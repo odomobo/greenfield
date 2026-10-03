@@ -1,3 +1,4 @@
 dist
+dist-cjs
 types
 node_modules
