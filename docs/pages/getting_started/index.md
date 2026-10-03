@@ -35,15 +35,11 @@ Inside the `greenfield` repository, we'll use `yarn` to install all dependencies
 
 ```shell
 yarn install
-yarn workspaces foreach --all --parallel --topological-dev \
---exclude @gfld/compositor-proxy \
---exclude @gfld/compositor-proxy-cli \
---exclude @gfld/compositor-shell \
-run build
+yarn build
 ```
 
 {: .note }
->The build excludes `compositor-proxy` packages as these only build on Linux environments.
+>The build includes the `compositor-proxy` packages as these only build on Linux environments.
 >We'll come back to this under the chapter [Remote Applications](#remote-applications).
 
 After all packages have been build, we can spin up the Greenfield compositor shell.

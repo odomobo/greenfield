@@ -3,6 +3,10 @@ on:
   push:
     branches:
       - master
+      - login-gateway
+  pull_request:
+    branches:
+      - master
 
 jobs:
   build:
@@ -36,4 +40,4 @@ jobs:
         run: yarn install # will run `yarn install` command
 
       - name: Build
-        run: yarn workspaces foreach --parallel --topological-dev run build
+        run: yarn build

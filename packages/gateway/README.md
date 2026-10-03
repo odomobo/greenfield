@@ -23,7 +23,7 @@ the session list or when the gateway stops; closing the browser doesn't affect i
 ## Development (no root)
 
 ```bash
-yarn workspaces foreach -A --parallel --topological-dev run build
+yarn build
 cd packages/gateway
 env -u DISPLAY GREENFIELD_DEV_PASSWORD='choose-a-password' \
   node dist/main.js --dev-auth --bind-ip 127.0.0.1 --bind-port 8443
@@ -41,7 +41,7 @@ One-time setup (Debian/Ubuntu):
 
 ```bash
 sudo apt install libpam0g-dev                      # to build the PAM helper
-yarn workspaces foreach -A --parallel --topological-dev run build   # builds dist/pam-helper too
+yarn build   # builds dist/pam-helper too
 sudo cp -a ~/greenfield /opt/greenfield            # readable by the web user and all users (not under a 0750 home)
 sudo cp "$(command -v node)" /usr/local/bin/node   # a node every user can execute (nvm's lives in your home)
 sudo cp /opt/greenfield/packages/gateway/pam/greenfield /etc/pam.d/greenfield
