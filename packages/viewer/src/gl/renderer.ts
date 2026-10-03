@@ -105,19 +105,29 @@ type SurfaceTexture =
       hasAlpha: boolean
       /** texture coordinates of the real image inside the padded coded frame */
       src: [number, number, number, number]
+      /** size of the real image */
+      width: number
+      height: number
     }
   | { kind: 'rgba'; texture: WebGLTexture; width: number; height: number }
 
 export type Rect = { x: number; y: number; width: number; height: number }
 
+/**
+ * Draws in output (CSS pixel) coordinates into a drawing buffer at the device pixel ratio, so content stays sharp on
+ * HiDPI screens and when zoomed.
+ */
 export class Renderer {
   private readonly gl: WebGLRenderingContext
   private readonly rgbaProgram: Program
   private readonly yuvaProgram: Program
   private readonly quad: WebGLBuffer
   private readonly textures = new Map<string, SurfaceTexture>()
+  /** size of what's drawn into, in output coordinates */
   private width = 1
   private height = 1
+  /** drawing buffer pixels per output pixel */
+  private pixelRatio = 1
   private clearColor: [number, number, number] = [0.059, 0.09, 0.165]
 
   constructor(
@@ -147,17 +157,33 @@ export class Renderer {
   }
 
   /**
-   * Luminance (0-255) of an output region, top to bottom. For tests.
+   * Luminance (0-255) of an output region, top to bottom, one value per output pixel (sampled at its center). For
+   * tests.
    */
   readLuma(x: number, y: number, width: number, height: number): number[] {
     const gl = this.gl
-    const pixels = new Uint8Array(width * height * 4)
+    const ratio = this.pixelRatio
+    const bufferX = Math.floor(x * ratio)
+    const bufferY = Math.floor(y * ratio)
+    const bufferWidth = Math.max(1, Math.ceil((x + width) * ratio) - bufferX)
+    const bufferHeight = Math.max(1, Math.ceil((y + height) * ratio) - bufferY)
+    const pixels = new Uint8Array(bufferWidth * bufferHeight * 4)
     // GL rows start at the bottom
-    gl.readPixels(x, this.height - y - height, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+    gl.readPixels(
+      bufferX,
+      this.canvas.height - bufferY - bufferHeight,
+      bufferWidth,
+      bufferHeight,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      pixels,
+    )
     const luma: number[] = []
-    for (let row = height - 1; row >= 0; row--) {
+    for (let row = 0; row < height; row++) {
+      const bufferRow = Math.min(bufferHeight - 1, Math.floor((y + row + 0.5) * ratio) - bufferY)
       for (let column = 0; column < width; column++) {
-        const i = (row * width + column) * 4
+        const bufferColumn = Math.min(bufferWidth - 1, Math.floor((x + column + 0.5) * ratio) - bufferX)
+        const i = ((bufferHeight - 1 - bufferRow) * bufferWidth + bufferColumn) * 4
         luma.push(Math.round(0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]))
       }
     }
@@ -192,6 +218,8 @@ export class Renderer {
         alpha: createTexture(gl),
         hasAlpha: false,
         src: [0, 0, 1, 1],
+        width: 0,
+        height: 0,
       }
       this.textures.set(surface, texture)
     }
@@ -209,6 +237,8 @@ export class Renderer {
     }
     // The encoder pads the image to its encoded size at the top left, the image is in the bottom right corner.
     const { width, height } = frame.size
+    texture.width = width
+    texture.height = height
     const { width: encodedWidth, height: encodedHeight } = frame.encodedSize
     texture.src = [
       (encodedWidth - width) / opaque.codedWidth,
@@ -250,7 +280,7 @@ export class Renderer {
     if (framebuffer === null) {
       return
     }
-    const screen = { width: this.width, height: this.height }
+    const screen = { width: this.width, height: this.height, pixelRatio: this.pixelRatio }
     try {
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer)
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target, 0)
@@ -259,6 +289,7 @@ export class Renderer {
       }
       this.width = width
       this.height = height
+      this.pixelRatio = 1
       gl.viewport(0, 0, width, height)
       gl.disable(gl.BLEND)
       // drawSurface maps y down from the top, which would land upside down in a texture: flip with a negative height
@@ -266,9 +297,10 @@ export class Renderer {
     } finally {
       this.width = screen.width
       this.height = screen.height
+      this.pixelRatio = screen.pixelRatio
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
       gl.deleteFramebuffer(framebuffer)
-      gl.viewport(0, 0, this.width, this.height)
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height)
       gl.enable(gl.BLEND)
     }
   }
@@ -297,24 +329,28 @@ export class Renderer {
   }
 
   /**
-   * Match the drawing buffer to the canvas' displayed size. Returns the output size.
+   * Match the drawing buffer to the canvas' displayed size at the device pixel ratio. Returns the output size (CSS
+   * pixels) and the pixel ratio.
    */
-  resize(): { width: number; height: number } {
-    // TODO HiDPI: render at devicePixelRatio and report a scale to the server
+  resize(): { width: number; height: number; scale: number } {
+    const scale = window.devicePixelRatio || 1
     const width = Math.max(1, Math.round(this.canvas.clientWidth))
     const height = Math.max(1, Math.round(this.canvas.clientHeight))
-    if (this.canvas.width !== width || this.canvas.height !== height) {
-      this.canvas.width = width
-      this.canvas.height = height
+    const bufferWidth = Math.max(1, Math.round(width * scale))
+    const bufferHeight = Math.max(1, Math.round(height * scale))
+    if (this.canvas.width !== bufferWidth || this.canvas.height !== bufferHeight) {
+      this.canvas.width = bufferWidth
+      this.canvas.height = bufferHeight
     }
     this.width = width
     this.height = height
-    return { width, height }
+    this.pixelRatio = scale
+    return { width, height, scale }
   }
 
   beginFrame(): void {
     const gl = this.gl
-    gl.viewport(0, 0, this.width, this.height)
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height)
     gl.clearColor(...this.clearColor, 1)
     gl.clear(gl.COLOR_BUFFER_BIT)
     gl.enable(gl.BLEND)
@@ -332,7 +368,7 @@ export class Renderer {
     if (texture === null || framebuffer === null) {
       return undefined
     }
-    const screen = { width: this.width, height: this.height }
+    const screen = { width: this.width, height: this.height, pixelRatio: this.pixelRatio }
     try {
       gl.bindTexture(gl.TEXTURE_2D, texture)
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
@@ -343,6 +379,7 @@ export class Renderer {
       }
       this.width = width
       this.height = height
+      this.pixelRatio = 1
       gl.viewport(0, 0, width, height)
       gl.clearColor(0, 0, 0, 0)
       gl.clear(gl.COLOR_BUFFER_BIT)
@@ -363,10 +400,11 @@ export class Renderer {
     } finally {
       this.width = screen.width
       this.height = screen.height
+      this.pixelRatio = screen.pixelRatio
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
       gl.deleteFramebuffer(framebuffer)
       gl.deleteTexture(texture)
-      gl.viewport(0, 0, this.width, this.height)
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height)
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
     }
   }
@@ -392,11 +430,15 @@ export class Renderer {
     const y1 = 1 - ((dest.y + dest.height) / this.height) * 2
     gl.uniform4f(program.uniforms.u_dest, x0, y0, x1, y1)
 
+    // Each image pixel covering a whole number of drawing buffer pixels (e.g. an unstretched window at a pixel ratio of
+    // 2): sample the nearest pixel, interpolating would blur e.g. text. Chroma planes are half size, always interpolated.
+    const filter = this.isWholePixelScale(dest, texture.width, texture.height) ? gl.NEAREST : gl.LINEAR
     if (texture.kind === 'rgba') {
       gl.uniform4f(program.uniforms.u_src, 0, 0, 1, 1)
       gl.uniform1f(program.uniforms.u_opacity, opacity)
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, texture.texture)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter)
       gl.uniform1i(program.uniforms.u_texture, 0)
     } else {
       gl.uniform4f(program.uniforms.u_src, ...texture.src)
@@ -405,6 +447,11 @@ export class Renderer {
       planes.forEach((plane, i) => {
         gl.activeTexture(gl.TEXTURE0 + i)
         gl.bindTexture(gl.TEXTURE_2D, plane)
+        gl.texParameteri(
+          gl.TEXTURE_2D,
+          gl.TEXTURE_MAG_FILTER,
+          plane === texture.u || plane === texture.v ? gl.LINEAR : filter,
+        )
         gl.uniform1i(program.uniforms[names[i]], i)
       })
       gl.uniform1i(program.uniforms.u_hasAlpha, texture.hasAlpha ? 1 : 0)
@@ -412,5 +459,23 @@ export class Renderer {
     }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     return true
+  }
+
+  /** Whether an image drawn into dest maps each of its pixels onto a whole number of drawing buffer pixels. */
+  private isWholePixelScale(dest: Rect, imageWidth: number, imageHeight: number): boolean {
+    if (imageWidth <= 0 || imageHeight <= 0) {
+      return false
+    }
+    const isWhole = (value: number) => Math.abs(value - Math.round(value)) < 1e-6
+    const scaleX = (Math.abs(dest.width) * this.pixelRatio) / imageWidth
+    const scaleY = (Math.abs(dest.height) * this.pixelRatio) / imageHeight
+    return (
+      scaleX >= 1 &&
+      scaleY >= 1 &&
+      isWhole(scaleX) &&
+      isWhole(scaleY) &&
+      isWhole(dest.x * this.pixelRatio) &&
+      isWhole(dest.y * this.pixelRatio)
+    )
   }
 }

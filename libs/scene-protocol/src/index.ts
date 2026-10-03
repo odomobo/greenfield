@@ -15,12 +15,13 @@
  * areas, see the encoding policy in ROADMAP.md. Frames and patches of one surface arrive in order and are applied in
  * order: a patch draws over whatever the surface showed (including the last video frame), a video frame replaces it.
  *
- * Surfaces are identified by a key "<clientId>/<surfaceId>". Coordinates are in output (canvas CSS) pixels.
+ * Surfaces are identified by a key "<clientId>/<surfaceId>". Coordinates are in output (canvas CSS) pixels, at any
+ * device pixel ratio: the viewer reports its scale (devicePixelRatio) but the output size stays in CSS pixels.
  *
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 3
+export const PROTOCOL_VERSION = 4
 
 export const enum EnvelopeKind {
   CONTROL = 1,
@@ -36,10 +37,28 @@ export const CLOSE_PROTOCOL_ERROR = 4400
 // ---------------------------------------------------------------------------------------------------------------------
 // server -> viewer
 
-export type SceneSurface = { id: string; x: number; y: number; width: number; height: number }
+export type SceneRect = { x: number; y: number; width: number; height: number }
+
+export type SceneSurface = {
+  id: string
+  x: number
+  y: number
+  width: number
+  height: number
+  /**
+   * Where the surface takes pointer input (wl_surface.set_input_region), surface local rectangles clipped to the
+   * surface. Absent: the whole surface. Empty: nowhere, input goes to whatever is underneath.
+   */
+  input?: SceneRect[]
+}
 
 export type SceneWindow = {
   id: string
+  /**
+   * The window this one belongs to (xdg_toplevel.set_parent, e.g. a dialog). A child window moves with its parent, is
+   * stacked above it and is hidden with it; it has no taskbar button of its own. Positions are still absolute.
+   */
+  parent?: string
   title: string
   appId: string
   activated: boolean
@@ -119,8 +138,9 @@ export type ShellNotification = {
 type PointerTarget = { surface: string | null; sx?: number; sy?: number; x: number; y: number; time: number }
 
 export type ViewerMessage =
-  | { type: 'hello'; output: { width: number; height: number } }
-  | { type: 'output'; width: number; height: number }
+  /** scale: the viewer's devicePixelRatio. The server stores it; apps aren't told yet (needs the wlroots migration). */
+  | { type: 'hello'; output: { width: number; height: number; scale: number } }
+  | { type: 'output'; width: number; height: number; scale: number }
   | ({ type: 'pointer'; buttons: number } & PointerTarget)
   | ({ type: 'button'; button: number; pressed: boolean; buttons: number } & PointerTarget)
   | ({ type: 'axis'; deltaX: number; deltaY: number; deltaMode: number } & PointerTarget)

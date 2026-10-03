@@ -3,6 +3,7 @@ import { KeyFrameNeeded, SurfaceDecoder } from './decoder'
 import { Rect, Renderer } from './gl/renderer'
 import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
 import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
+import { acceptsInput, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
 
 type Point = { x: number; y: number }
 
@@ -107,15 +108,37 @@ export class Desktop {
     private readonly connection: Connection,
   ) {
     this.installInputHandlers()
-    new ResizeObserver(() => {
-      const output = this.renderer.resize()
-      this.output = output
-      this.connection.send({ type: 'output', width: output.width, height: output.height })
-      this.keepWindowsVisible()
-      this.scheduleRender()
-    }).observe(canvas)
+    // Observing the size in device pixels also catches pixel ratio changes (zoom, another monitor) where supported.
+    const resizeObserver = new ResizeObserver(() => this.outputChanged())
+    try {
+      resizeObserver.observe(canvas, { box: 'device-pixel-content-box' })
+    } catch {
+      resizeObserver.observe(canvas)
+    }
+    this.watchPixelRatio()
     setInterval(() => this.sendFeedback(), 500)
     this.measureRefreshRate()
+  }
+
+  /** The canvas was resized or the device pixel ratio changed (browser zoom, another monitor). */
+  private outputChanged() {
+    const { width, height, scale } = this.renderer.resize()
+    this.output = { width, height }
+    this.connection.send({ type: 'output', width, height, scale })
+    this.keepWindowsVisible()
+    this.scheduleRender()
+  }
+
+  /** A pixel ratio change doesn't always resize the canvas (e.g. moving the browser to another monitor). */
+  private watchPixelRatio() {
+    matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
+      'change',
+      () => {
+        this.outputChanged()
+        this.watchPixelRatio()
+      },
+      { once: true },
+    )
   }
 
   /**
@@ -123,9 +146,9 @@ export class Desktop {
    */
   reset(): void {
     this.clear()
-    const output = this.renderer.resize()
-    this.output = output
-    this.connection.send({ type: 'hello', output })
+    const { width, height, scale } = this.renderer.resize()
+    this.output = { width, height }
+    this.connection.send({ type: 'hello', output: { width, height, scale } })
     if (document.hasFocus() && document.activeElement === this.canvas) {
       this.connection.send({ type: 'focus', focused: true })
     }
@@ -198,13 +221,24 @@ export class Desktop {
   // -------------------------------------------------------------------------------------------------------------------
   // window management for the shell (taskbar)
 
+  /** The top level window a (child) window belongs to. */
+  private rootOf(window: SceneWindow): SceneWindow {
+    return rootWindow(this.windows, window)
+  }
+
+  private parentOf(window: SceneWindow): SceneWindow | undefined {
+    return window.parent === undefined ? undefined : this.windows.find((w) => w.id === window.parent)
+  }
+
+  /** Child windows are minimized and restored with their top level window. */
   private isMinimized(window: SceneWindow): boolean {
-    return this.localMinimized.get(window.id) ?? window.minimized
+    const root = this.rootOf(window)
+    return this.localMinimized.get(root.id) ?? root.minimized
   }
 
   /** Minimized and not animating anymore: not shown, not pickable. */
   private isHidden(window: SceneWindow): boolean {
-    const animation = this.animations.get(window.id)
+    const animation = this.animations.get(this.rootOf(window).id)
     return this.isMinimized(window) && animation?.kind !== 'minimize'
   }
 
@@ -213,8 +247,18 @@ export class Desktop {
     this.canvas.focus()
   }
 
+  /**
+   * Top level windows; child windows (dialogs) are reached through their parent, which counts as active while one of
+   * its children is.
+   */
   shellWindows(): ShellWindow[] {
-    return this.windows.map((window) => ({ ...window, shownMinimized: this.isMinimized(window) }))
+    return this.windows
+      .filter((window) => this.rootOf(window) === window)
+      .map((window) => ({
+        ...window,
+        activated: this.windows.some((w) => w.activated && this.rootOf(w) === window),
+        shownMinimized: this.isMinimized(window),
+      }))
   }
 
   private notifyWindowsChanged() {
@@ -228,8 +272,9 @@ export class Desktop {
       return
     }
     if (this.isMinimized(window)) {
-      this.startRestoreAnimation(window)
-      this.localMinimized.set(id, false)
+      const root = this.rootOf(window)
+      this.startRestoreAnimation(root)
+      this.localMinimized.set(root.id, false)
     }
     this.connection.send({ type: 'window.activate', window: id })
     this.canvas.focus()
@@ -238,14 +283,15 @@ export class Desktop {
   }
 
   minimizeWindow(id: string): void {
-    const window = this.windows.find((w) => w.id === id)
-    if (window === undefined || this.isMinimized(window)) {
+    const found = this.windows.find((w) => w.id === id)
+    if (found === undefined || this.isMinimized(found)) {
       return
     }
+    const window = this.rootOf(found)
     this.startMinimizeAnimation(window)
-    this.localMinimized.set(id, true)
+    this.localMinimized.set(window.id, true)
     // the server moves the keyboard focus to the next window
-    this.connection.send({ type: 'window.minimize', window: id, minimized: true })
+    this.connection.send({ type: 'window.minimize', window: window.id, minimized: true })
     this.notifyWindowsChanged()
     this.scheduleRender()
   }
@@ -279,15 +325,20 @@ export class Desktop {
     const scale = Math.min(maxWidth / geometry.width, maxHeight / geometry.height, 1)
     const width = Math.max(1, Math.round(geometry.width * scale))
     const height = Math.max(1, Math.round(geometry.height * scale))
-    const draws = window.surfaces.map((surface) => ({
-      surface: surface.id,
-      rect: {
-        x: (surface.x - geometry.x) * scale,
-        y: (surface.y - geometry.y) * scale,
-        width: surface.width * scale,
-        height: surface.height * scale,
-      },
-    }))
+    // with its child windows (dialogs), cropped to the window
+    const draws = this.windows
+      .filter((w) => this.rootOf(w) === window)
+      .flatMap((w) =>
+        w.surfaces.map((surface) => ({
+          surface: surface.id,
+          rect: {
+            x: (w.x - window.x + surface.x - geometry.x) * scale,
+            y: (w.y - window.y + surface.y - geometry.y) * scale,
+            width: surface.width * scale,
+            height: surface.height * scale,
+          },
+        })),
+      )
     return this.renderer.snapshot(draws, width, height)
   }
 
@@ -392,11 +443,22 @@ export class Desktop {
     }
   }
 
-  /** The animated rect and opacity of a window right now, if it's animating. */
+  /**
+   * The animated rect and opacity of a window right now, if it's animating. Child windows follow their top level
+   * window's animation.
+   */
   private animatedState(window: SceneWindow): { rect: Rect; opacity: number } | undefined {
     const state = this.animations.get(window.id)
     if (state === undefined) {
-      return undefined
+      const root = this.rootOf(window)
+      const rootState = root !== window ? this.animatedState(root) : undefined
+      if (rootState === undefined) {
+        return undefined
+      }
+      return {
+        rect: mapRect(this.restingRect(window), this.restingRect(root), rootState.rect),
+        opacity: rootState.opacity,
+      }
     }
     const progress = state.animation.progress()
     return {
@@ -527,9 +589,10 @@ export class Desktop {
     }
   }
 
-  private updateScene(windows: SceneWindow[]) {
+  private updateScene(sceneWindows: SceneWindow[]) {
     const previous = new Map(this.windows.map((window) => [window.id, window]))
     const previousRects = new Map(this.windows.map((window) => [window.id, this.shownGeometry(window)]))
+    const windows = stackChildrenAboveParents(sceneWindows)
     this.windows = windows
     for (const window of windows) {
       const local = this.localMinimized.get(window.id)
@@ -599,9 +662,15 @@ export class Desktop {
         this.animations.delete(id)
       }
     }
-    // the viewer decides where new windows go
+    // the viewer decides where new windows go; the server centers child windows on their parent
     for (const window of windows) {
-      if (window.placed || window.maximized || window.fullscreen || this.placementSent.has(window.id)) {
+      if (
+        window.placed ||
+        window.parent !== undefined ||
+        window.maximized ||
+        window.fullscreen ||
+        this.placementSent.has(window.id)
+      ) {
         continue
       }
       this.placementSent.add(window.id)
@@ -635,8 +704,39 @@ export class Desktop {
     return this.windows.some((window) => window.id.startsWith(`${clientId}/`))
   }
 
-  private windowPosition(window: SceneWindow): Point {
-    return this.localPositions.get(window.id) ?? { x: window.x, y: window.y }
+  /**
+   * Where a window's main surface origin is shown. A child window moves with its parent: while the parent is shown
+   * somewhere the server doesn't know about yet (a move in progress), the child is shown moved by as much.
+   */
+  private windowPosition(window: SceneWindow, seen = new Set<string>()): Point {
+    const local = this.localPositions.get(window.id)
+    if (local) {
+      return local
+    }
+    const parent = this.parentOf(window)
+    seen.add(window.id)
+    if (parent && !seen.has(parent.id)) {
+      const shownParent = this.windowPosition(parent, seen)
+      return { x: window.x + shownParent.x - parent.x, y: window.y + shownParent.y - parent.y }
+    }
+    return { x: window.x, y: window.y }
+  }
+
+  /** Whether a window's parent (or theirs) is being moved, resized or animated, or waits for the server to agree. */
+  private ancestorBusy(window: SceneWindow): boolean {
+    const seen = new Set<string>([window.id])
+    for (let current = this.parentOf(window); current && !seen.has(current.id); current = this.parentOf(current)) {
+      seen.add(current.id)
+      if (
+        this.interaction?.window === current.id ||
+        this.localPositions.has(current.id) ||
+        this.resizeOverrides.has(current.id) ||
+        this.animations.has(current.id)
+      ) {
+        return true
+      }
+    }
+    return false
   }
 
   /** The window geometry rect as shown, in output coordinates. */
@@ -699,10 +799,11 @@ export class Desktop {
       if (
         window.maximized ||
         window.fullscreen ||
-        !window.placed ||
+        (!window.placed && window.parent === undefined) ||
         this.resizeOverrides.has(window.id) ||
         this.animations.has(window.id) ||
-        this.interaction?.window === window.id
+        this.interaction?.window === window.id ||
+        this.ancestorBusy(window)
       ) {
         continue
       }
@@ -791,21 +892,18 @@ export class Desktop {
   private pick(point: Point): Pick | undefined {
     for (let w = this.windows.length - 1; w >= 0; w--) {
       const window = this.windows[w]
-      const kind = this.animations.get(window.id)?.kind
+      const kind = this.animations.get(this.rootOf(window).id)?.kind
       if (this.isHidden(window) || kind === 'minimize' || kind === 'restore') {
         continue
       }
       const rects = this.surfaceRects(window)
       for (let s = rects.length - 1; s >= 0; s--) {
         const { surface, rect, scaleX, scaleY } = rects[s]
-        // TODO respect the surface input region (e.g. client side shadows)
-        if (
-          point.x >= rect.x &&
-          point.y >= rect.y &&
-          point.x < rect.x + rect.width &&
-          point.y < rect.y + rect.height
-        ) {
-          return { window, surface: surface.id, sx: (point.x - rect.x) / scaleX, sy: (point.y - rect.y) / scaleY }
+        const sx = (point.x - rect.x) / scaleX
+        const sy = (point.y - rect.y) / scaleY
+        // outside the input region (e.g. a client side shadow) input goes to whatever is underneath
+        if (acceptsInput(surface, sx, sy)) {
+          return { window, surface: surface.id, sx, sy }
         }
       }
     }
@@ -1094,6 +1192,12 @@ export class Desktop {
       const position = this.localPositions.get(interaction.window)
       if (position) {
         this.connection.send({ type: 'window.move', window: interaction.window, ...position })
+        // The server may have confirmed this position during the move already, then no scene update follows. A stale
+        // override would keep e.g. a dialog from following its parent.
+        const window = this.windows.find((w) => w.id === interaction.window)
+        if (window && window.x === position.x && window.y === position.y) {
+          this.localPositions.delete(interaction.window)
+        }
       }
       this.applyCursor()
     } else {
