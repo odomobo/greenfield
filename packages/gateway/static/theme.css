@@ -219,6 +219,7 @@ button:focus-visible,
 
 .sessions li {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
@@ -231,6 +232,40 @@ button:focus-visible,
 .sessions .name {
   flex: 1;
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sessions .rename summary {
+  list-style: none;
+  padding: 0 4px;
+  font-size: var(--font-size-small);
+  color: var(--color-accent);
+  cursor: pointer;
+}
+
+.sessions .rename summary::-webkit-details-marker {
+  display: none;
+}
+
+.sessions .rename summary:hover {
+  text-decoration: underline;
+}
+
+/* the open rename form takes a row of its own below the session */
+.sessions .rename[open] {
+  flex-basis: 100%;
+  order: 1;
+}
+
+.sessions .rename form.inline {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.sessions .rename input[type='text'] {
+  flex: 1;
+  margin-bottom: 0;
 }
 
 .sessions .when {

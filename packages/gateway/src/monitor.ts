@@ -12,6 +12,7 @@ import { GatewayConfig } from './config'
 import {
   MonitorReply,
   MonitorReplyEnvelope,
+  normalizeSessionName,
   SessionInfo,
   SessionStart,
   WebRequest,
@@ -39,6 +40,10 @@ type SessionEntry = SessionInfo & {
 const TICKET_LIFETIME_MS = 7 * 24 * 3600 * 1000
 const MAX_CONCURRENT_AUTH = 4
 const SESSION_START_TIMEOUT_MS = 20_000
+
+function sessionInfo({ id, name, createdAt }: SessionEntry): SessionInfo {
+  return { id, name, createdAt }
+}
 
 const pamHelperPath = path.resolve(__dirname, 'pam-helper')
 const sessionProcessPath = path.resolve(__dirname, 'session-process.js')
@@ -196,13 +201,23 @@ export class Monitor {
         return {
           ok: true,
           type: 'sessions',
-          sessions: [...this.sessions.values()]
-            .filter((session) => session.uid === user.uid && !session.ending)
-            .map(({ id, createdAt }) => ({ id, createdAt })),
+          sessions: this.userSessions(user.uid).map(sessionInfo),
         }
       case 'createSession': {
         const session = await this.createSession(user)
-        return { ok: true, type: 'session', session: { id: session.id, createdAt: session.createdAt } }
+        return { ok: true, type: 'session', session: sessionInfo(session) }
+      }
+      case 'renameSession': {
+        const session = this.sessions.get(request.sessionId)
+        if (session === undefined || session.uid !== user.uid || session.ending) {
+          return { ok: false, error: 'not-found' }
+        }
+        const name = normalizeSessionName(request.name)
+        if (name === undefined) {
+          return { ok: false, error: 'invalid' }
+        }
+        session.name = name
+        return { ok: true, type: 'session', session: sessionInfo(session) }
       }
       case 'endSession': {
         const session = this.sessions.get(request.sessionId)
@@ -326,6 +341,7 @@ export class Monitor {
 
     const entry: SessionEntry = {
       id,
+      name: this.defaultSessionName(user.uid),
       createdAt: Date.now(),
       uid: user.uid,
       username: user.username,
@@ -355,6 +371,20 @@ export class Monitor {
     log.info(`Started session ${id} for ${user.username}.`)
     await ready
     return entry
+  }
+
+  private userSessions(uid: number): SessionEntry[] {
+    return [...this.sessions.values()].filter((session) => session.uid === uid && !session.ending)
+  }
+
+  /** "Session N" with the lowest N none of the user's sessions is called, so names don't shift when one ends. */
+  private defaultSessionName(uid: number): string {
+    const taken = new Set(this.userSessions(uid).map((session) => session.name))
+    let n = 1
+    while (taken.has(`Session ${n}`)) {
+      n++
+    }
+    return `Session ${n}`
   }
 
   private shuttingDown = false

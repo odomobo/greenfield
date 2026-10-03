@@ -12,7 +12,7 @@ import { createServer as createHTTPSServer } from 'node:https'
 import { connect, Server as NetServer, Socket } from 'node:net'
 import path from 'node:path'
 import { AppConfigSchema } from './app-config'
-import { MonitorReply, MonitorReplyEnvelope, WebRequest, WebStart } from './ipc'
+import { MAX_SESSION_NAME_LENGTH, MonitorReply, MonitorReplyEnvelope, WebRequest, WebStart } from './ipc'
 import { log } from './log'
 import { errorPage, loginPage, sessionsPage } from './pages'
 import { RateLimiter } from './rate-limit'
@@ -363,6 +363,11 @@ async function handlePost(request: IncomingMessage, response: ServerResponse, ur
       await handleLaunch(request, response, session, launch[1])
       return
     }
+    const rename = /^\/api\/sessions\/([A-Za-z0-9_-]{1,64})\/rename$/.exec(url.pathname)
+    if (rename) {
+      await handleRenameAPI(request, response, session, rename[1])
+      return
+    }
     sendJSON(response, 404, { error: 'not found' })
     return
   }
@@ -399,8 +404,50 @@ async function handlePost(request: IncomingMessage, response: ServerResponse, ur
       redirect(response, '/sessions')
       return
     }
+    case '/sessions/rename': {
+      const reply = await monitor({
+        type: 'renameSession',
+        ticket: session.ticket,
+        sessionId: form.get('session') ?? '',
+        name: form.get('name') ?? '',
+      })
+      if (!reply.ok && reply.error === 'invalid') {
+        await handleSessionsPage(
+          response,
+          session,
+          `A session name must be 1 to ${MAX_SESSION_NAME_LENGTH} characters long.`,
+        )
+        return
+      }
+      redirect(response, '/sessions')
+      return
+    }
   }
   send(response, 404, errorPage(404))
+}
+
+/** Rename a session (JSON API, for the viewer's start menu). Body: { "name": "..." } */
+async function handleRenameAPI(request: IncomingMessage, response: ServerResponse, session: LoginSession, sessionId: string) {
+  let body: any
+  try {
+    body = await readJSONBody(request)
+  } catch {
+    sendJSON(response, 400, { error: 'bad request' })
+    return
+  }
+  const reply = await monitor({
+    type: 'renameSession',
+    ticket: session.ticket,
+    sessionId,
+    name: typeof body?.name === 'string' ? body.name : '',
+  })
+  if (reply.ok && reply.type === 'session') {
+    sendJSON(response, 200, reply.session)
+  } else if (!reply.ok && reply.error === 'invalid') {
+    sendJSON(response, 400, { error: 'invalid name', maxLength: MAX_SESSION_NAME_LENGTH })
+  } else {
+    sendJSON(response, 404, { error: 'not found' })
+  }
 }
 
 async function handleLaunch(request: IncomingMessage, response: ServerResponse, session: LoginSession, sessionId: string) {

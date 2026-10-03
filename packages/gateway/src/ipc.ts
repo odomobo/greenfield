@@ -8,7 +8,27 @@ import { AppConfigSchema } from './app-config'
 
 export type SessionInfo = {
   id: string
+  /** user-visible name, "Session N" until the user renames it */
+  name: string
   createdAt: number
+}
+
+export const MAX_SESSION_NAME_LENGTH = 64
+
+/**
+ * A session name as entered by the user: trimmed, whitespace runs collapsed, control characters removed. Undefined if
+ * nothing usable is left or it's too long.
+ */
+export function normalizeSessionName(name: unknown): string | undefined {
+  if (typeof name !== 'string') {
+    return undefined
+  }
+  // eslint-disable-next-line no-control-regex
+  const normalized = name.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (normalized.length === 0 || [...normalized].length > MAX_SESSION_NAME_LENGTH) {
+    return undefined
+  }
+  return normalized
 }
 
 export type WebRequest =
@@ -17,6 +37,7 @@ export type WebRequest =
   | { type: 'listSessions'; ticket: string }
   | { type: 'createSession'; ticket: string }
   | { type: 'endSession'; ticket: string; sessionId: string }
+  | { type: 'renameSession'; ticket: string; sessionId: string; name: string }
   /** where to connect for a session the ticket's user owns */
   | { type: 'sessionSocket'; ticket: string; sessionId: string }
 
@@ -28,7 +49,7 @@ export type MonitorReply =
   | { ok: true; type: 'session'; session: SessionInfo }
   | { ok: true; type: 'socket'; path: string }
   | { ok: true; type: 'done' }
-  | { ok: false; error: 'auth-failed' | 'forbidden' | 'not-found' | 'failed' }
+  | { ok: false; error: 'auth-failed' | 'forbidden' | 'not-found' | 'invalid' | 'failed' }
 
 export type MonitorReplyEnvelope = { serial: number; reply: MonitorReply }
 

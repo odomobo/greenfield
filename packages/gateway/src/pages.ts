@@ -1,7 +1,7 @@
 /**
  * Server-rendered pages. No inline scripts or styles (the CSP forbids them), no product or version names.
  */
-import { SessionInfo } from './ipc'
+import { MAX_SESSION_NAME_LENGTH, SessionInfo } from './ipc'
 
 export function escapeHTML(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
@@ -82,9 +82,19 @@ export function sessionsPage({
       : `<ul class="sessions">${sessions
           .sort((a, b) => a.createdAt - b.createdAt)
           .map(
-            (session, index) => `
+            (session) => `
     <li>
-      <span class="name">Session ${index + 1}<span class="when">Started ${formatTime(session.createdAt)}</span></span>
+      <span class="name">${escapeHTML(session.name)}<span class="when">Started ${formatTime(session.createdAt)}</span></span>
+      <details class="rename">
+        <summary>Rename</summary>
+        <form class="inline" method="post" action="/sessions/rename">
+          <input type="hidden" name="csrf" value="${escapeHTML(csrf)}">
+          <input type="hidden" name="session" value="${escapeHTML(session.id)}">
+          <input type="text" name="name" value="${escapeHTML(session.name)}" aria-label="Session name" required
+            maxlength="${MAX_SESSION_NAME_LENGTH}" spellcheck="false" autocomplete="off">
+          <button type="submit">Save</button>
+        </form>
+      </details>
       <a class="button primary" href="/desktop/?session=${encodeURIComponent(session.id)}">Open</a>
       <form class="inline" method="post" action="/sessions/end">
         <input type="hidden" name="csrf" value="${escapeHTML(csrf)}">
