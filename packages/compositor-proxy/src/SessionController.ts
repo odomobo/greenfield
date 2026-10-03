@@ -10,18 +10,20 @@ export type SessionController = {
   onWsUpgrade(
     request: { headers: IncomingMessage['headers']; method: IncomingMessage['method']; url: IncomingMessage['url'] },
     socket: Socket,
+    head?: Buffer,
   ): void
 }
 
 /**
- * WebSocket endpoints of a session process. The main process already checked which session the request is for.
+ * WebSocket endpoints of a session process. The gateway already authenticated the request and checked that the
+ * session belongs to the user.
  */
 export function createSessionController(viewerHost: ViewerHost): SessionController {
   const wss = new WebSocketServer({ perMessageDeflate: false, noServer: true })
 
   return {
-    onWsUpgrade(request, socket) {
-      wss.handleUpgrade(request as IncomingMessage, socket, Buffer.from([]), (ws) => {
+    onWsUpgrade(request, socket, head) {
+      wss.handleUpgrade(request as IncomingMessage, socket, head ?? Buffer.from([]), (ws) => {
         const url = new URL(request.url ?? '', `http://${request.headers.host}`)
         if (url.pathname === '/viewer') {
           viewerHost.attach(ws)

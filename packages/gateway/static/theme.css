@@ -1,0 +1,271 @@
+/*
+ * Default theme. Everything visual is a custom property here, so a theme is just a stylesheet that overrides them.
+ * Flat, simple, modern: neutral surfaces, one accent color, soft corners, no ornament.
+ */
+:root {
+  --font-family: system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', 'Noto Sans', 'Cantarell', 'Ubuntu',
+    'Helvetica Neue', Arial, sans-serif;
+  --font-size: 14px;
+  --font-size-small: 12px;
+  --font-size-title: 20px;
+
+  --color-background: #eef1f6;
+  --color-background-gradient: linear-gradient(160deg, #e7ecf5 0%, #f3f0f6 55%, #eaf1f3 100%);
+  --color-surface: #ffffff;
+  --color-surface-hover: #f5f5f5;
+  --color-border: #e5e5e5;
+  --color-text: #1a1a1a;
+  --color-text-secondary: #5f5f5f;
+  --color-accent: #005fb8;
+  --color-accent-hover: #0067c0;
+  --color-accent-pressed: #004d99;
+  --color-on-accent: #ffffff;
+  --color-input-background: #ffffff;
+  --color-input-border: #d1d1d1;
+  --color-input-underline: #8a8a8a;
+  --color-error: #c42b1c;
+  --color-error-background: #fde7e9;
+  --color-focus-ring: #1a1a1a;
+
+  --radius-surface: 8px;
+  --radius-control: 4px;
+  --shadow-surface: 0 2px 8px rgba(0, 0, 0, 0.06), 0 16px 40px rgba(0, 0, 0, 0.08);
+  --control-height: 34px;
+  --card-width: 360px;
+  --spacing: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background: #1c1c1c;
+    --color-background-gradient: linear-gradient(160deg, #1d2129 0%, #201d24 55%, #1b2224 100%);
+    --color-surface: #2b2b2b;
+    --color-surface-hover: #323232;
+    --color-border: #3a3a3a;
+    --color-text: #ffffff;
+    --color-text-secondary: #c5c5c5;
+    --color-accent: #4cc2ff;
+    --color-accent-hover: #47b1e8;
+    --color-accent-pressed: #42a1d2;
+    --color-on-accent: #000000;
+    --color-input-background: #2d2d2d;
+    --color-input-border: #3d3d3d;
+    --color-input-underline: #9a9a9a;
+    --color-error: #ff99a4;
+    --color-error-background: #442726;
+    --color-focus-ring: #ffffff;
+    --shadow-surface: 0 2px 8px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.35);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing);
+  font-family: var(--font-family);
+  font-size: var(--font-size);
+  color: var(--color-text);
+  background: var(--color-background);
+  background-image: var(--color-background-gradient);
+}
+
+.card {
+  width: 100%;
+  max-width: var(--card-width);
+  padding: calc(var(--spacing) * 2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-surface);
+  box-shadow: var(--shadow-surface);
+}
+
+.card.wide {
+  max-width: calc(var(--card-width) * 1.5);
+}
+
+.avatar {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto var(--spacing);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: var(--font-size-title);
+  font-weight: 600;
+  text-align: center;
+}
+
+.subtitle {
+  margin: 0 0 calc(var(--spacing) * 1.5);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-small);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+}
+
+input[type='text'],
+input[type='password'] {
+  display: block;
+  width: 100%;
+  height: var(--control-height);
+  margin-bottom: var(--spacing);
+  padding: 0 10px;
+  font: inherit;
+  color: var(--color-text);
+  background: var(--color-input-background);
+  border: 1px solid var(--color-input-border);
+  border-bottom-color: var(--color-input-underline);
+  border-radius: var(--radius-control);
+  outline: none;
+}
+
+input[type='text']:focus,
+input[type='password']:focus {
+  border-bottom: 2px solid var(--color-accent);
+  padding-bottom: 1px;
+}
+
+button,
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height);
+  padding: 0 16px;
+  font: inherit;
+  text-decoration: none;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+
+button:hover,
+.button:hover {
+  background: var(--color-surface-hover);
+}
+
+button.primary,
+.button.primary {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+  border-color: transparent;
+}
+
+button.primary:hover,
+.button.primary:hover {
+  background: var(--color-accent-hover);
+}
+
+button.primary:active,
+.button.primary:active {
+  background: var(--color-accent-pressed);
+}
+
+button:focus-visible,
+.button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.full {
+  width: 100%;
+}
+
+.error {
+  margin: 0 0 var(--spacing);
+  padding: 8px 12px;
+  color: var(--color-error);
+  background: var(--color-error-background);
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-small);
+}
+
+.sessions {
+  list-style: none;
+  margin: 0 0 calc(var(--spacing) * 1.5);
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-surface);
+  overflow: hidden;
+}
+
+.sessions li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.sessions li + li {
+  border-top: 1px solid var(--color-border);
+}
+
+.sessions .name {
+  flex: 1;
+  min-width: 0;
+}
+
+.sessions .when {
+  display: block;
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+}
+
+.empty {
+  margin: 0 0 calc(var(--spacing) * 1.5);
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: center;
+}
+
+form.inline {
+  display: inline;
+  margin: 0;
+}
+
+.link-button {
+  height: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-accent);
+}
+
+.link-button:hover {
+  background: none;
+  text-decoration: underline;
+}

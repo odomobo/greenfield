@@ -1,0 +1,32 @@
+{
+  "name": "@gfld/gateway",
+  "version": "0.1.0",
+  "description": "Login gateway and per-user session manager.",
+  "type": "commonjs",
+  "private": true,
+  "bin": "dist/main.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux"
+  ],
+  "scripts": {
+    "build:native": "sh ./native/build.sh",
+    "build": "yarn run rimraf dist && yarn run tsc && yarn build:native",
+    "run": "yarn node dist/main.js"
+  },
+  "dependencies": {
+    "@gfld/compositor-proxy": "workspace:^",
+    "ajv": "^8.16.0",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "@tsconfig/node18": "^18.2.4",
+    "@types/node": "^20.14.8",
+    "@types/ws": "^8.5.10",
+    "rimraf": "^5.0.7",
+    "typescript": "^5.5.2"
+  },
+  "license": "AGPL-3.0-or-later"
+}

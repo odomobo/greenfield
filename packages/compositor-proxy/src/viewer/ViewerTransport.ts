@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws'
 import { Socket } from 'node:net'
 import { createLogger } from '../Logger.js'
-import { setTcpNotSentLowat } from '../wayland-server.js'
+import { setSocketSendBuffer, setTcpNotSentLowat } from '../wayland-server.js'
 import { decodeControl, encodeControl, encodeFrame, isKeyFrame } from './protocol.js'
 
 const logger = createLogger('viewer-transport')
@@ -44,6 +44,8 @@ export interface ViewerTransport {
 // Keep the kernel's unsent backlog small, so frames wait in our queue where they can still be coalesced and control
 // messages can overtake them.
 const TCP_NOTSENT_LOWAT_BYTES = 32 * 1024
+// Same idea when the viewer is relayed to us over a Unix socket (by the gateway): cap the kernel send buffer.
+const UNIX_SEND_BUFFER_BYTES = 32 * 1024
 // Don't hand a new frame to the socket while more than this is still buffered in user space.
 const FRAME_SEND_BUFFERED_LIMIT = 64 * 1024
 // Max unsent delta frames per surface. Beyond that the viewer is too far behind: drop them and resync with a key frame.
@@ -209,6 +211,14 @@ export class WebSocketViewerTransport implements ViewerTransport {
     const fd: number | undefined = (socket as any)?._handle?.fd
     if (fd === undefined || fd < 0) {
       logger.info('Could not reach the viewer socket fd, TCP_NOTSENT_LOWAT not set.')
+      return
+    }
+    if (socket?.remoteAddress === undefined) {
+      // a Unix socket (relayed through the gateway)
+      const result = setSocketSendBuffer(fd, UNIX_SEND_BUFFER_BYTES)
+      if (result !== 0) {
+        logger.info(`Could not limit the viewer socket send buffer (errno ${result}).`)
+      }
       return
     }
     const result = setTcpNotSentLowat(fd, TCP_NOTSENT_LOWAT_BYTES)

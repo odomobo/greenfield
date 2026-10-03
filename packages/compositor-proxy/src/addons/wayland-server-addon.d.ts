@@ -111,6 +111,8 @@ declare namespace westfieldAddon {
 
   /** returns 0 on success, errno otherwise */
   function setTcpNotSentLowat(fd: number, bytes: number): number
+
+  function setSocketSendBuffer(fd: number, bytes: number): number
 }
 
 export = westfieldAddon

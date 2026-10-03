@@ -1270,6 +1270,27 @@ setTcpNotSentLowat(napi_env env, napi_callback_info info) {
     return return_value;
 }
 
+// Limits how much a socket buffers in the kernel (SO_SNDBUF). For the Unix socket between a session and the gateway
+// this keeps unsent frames in the session's own priority queue instead of the kernel. Returns 0 on success, errno
+// otherwise.
+napi_value
+setSocketSendBuffer(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[argc], return_value;
+    int32_t fd, bytes;
+
+    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
+    NAPI_CALL(env, napi_get_value_int32(env, argv[0], &fd))
+    NAPI_CALL(env, napi_get_value_int32(env, argv[1], &bytes))
+
+    int result = 0;
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes)) < 0) {
+        result = errno;
+    }
+    NAPI_CALL(env, napi_create_int32(env, result, &return_value))
+    return return_value;
+}
+
 napi_value
 init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
@@ -1303,6 +1324,7 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("getCredentials", getCredentials),
             DECLARE_NAPI_METHOD("getBufferSize", getBufferSize),
             DECLARE_NAPI_METHOD("setTcpNotSentLowat", setTcpNotSentLowat),
+            DECLARE_NAPI_METHOD("setSocketSendBuffer", setSocketSendBuffer),
 
             // xwayland
             DECLARE_NAPI_METHOD("setupXWayland", setupXWayland),

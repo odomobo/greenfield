@@ -53,9 +53,26 @@ body {
   border-color: var(--accent);
 }
 
+#session-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  white-space: nowrap;
+}
+
 #status {
   opacity: 0.7;
-  white-space: nowrap;
+}
+
+#session-info a,
+#overlay a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+#session-info a:hover,
+#overlay a:hover {
+  text-decoration: underline;
 }
 
 #output-container {

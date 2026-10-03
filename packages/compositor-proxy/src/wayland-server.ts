@@ -33,6 +33,7 @@ export const {
   getCredentials,
   getBufferSize,
   setTcpNotSentLowat,
+  setSocketSendBuffer,
 } = westfieldAddon
 
 export type {

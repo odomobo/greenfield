@@ -68,6 +68,14 @@ export class Connection {
     }
   }
 
+  /** stop reconnecting (e.g. the session ended) */
+  stop(): void {
+    clearTimeout(this.retryTimer)
+    const ws = this.ws
+    this.ws = undefined
+    ws?.close()
+  }
+
   get open(): boolean {
     return this.ws?.readyState === WebSocket.OPEN
   }

@@ -10,13 +10,14 @@
   <body>
     <header id="bar">
       <div id="apps"></div>
-      <div id="status"></div>
+      <div id="session-info"><span id="user"></span><span id="status"></span><a id="sessions-link" href="/sessions">Sessions</a></div>
     </header>
     <main id="output-container">
       <canvas id="output" tabindex="0"></canvas>
       <div id="overlay" hidden>
         <div id="overlay-message"></div>
         <button id="overlay-reconnect" hidden>Reconnect</button>
+        <a id="overlay-sessions" href="/sessions" hidden>Back to sessions</a>
       </div>
     </main>
   </body>
