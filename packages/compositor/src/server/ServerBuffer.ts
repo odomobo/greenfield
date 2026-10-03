@@ -10,7 +10,7 @@ import Surface from '../Surface'
 export type NativeBufferContents = BufferContents<undefined>
 
 /**
- * A wl_buffer whose storage (wl_shm or dmabuf) is owned by the native (libwayland) side of the proxy. Contents are
+ * A wl_buffer whose storage (wl_shm, linux-dmabuf or wl_drm) is owned by the native (libwayland) side of the proxy. Contents are
  * available immediately on commit. Encoding for the browser happens in the proxy, independent of the protocol state.
  */
 export class ServerBuffer implements BufferImplementation<NativeBufferContents> {
@@ -21,10 +21,13 @@ export class ServerBuffer implements BufferImplementation<NativeBufferContents> 
     private readonly querySize: () => Size | undefined,
   ) {}
 
-  getContents(_surface: Surface, serial?: number): NativeBufferContents {
+  getContents(surface: Surface, serial?: number): NativeBufferContents {
     this.released = false
-    // TODO dmabuf sizes, querySize only knows wl_shm buffers
-    const size = this.querySize() ?? { width: 0, height: 0 }
+    const queriedSize = this.querySize()
+    if (queriedSize === undefined) {
+      surface.session.logger.warn(`[buffer: ${this.resource.id}] - Unknown buffer type or destroyed buffer, no size.`)
+    }
+    const size = queriedSize ?? { width: 0, height: 0 }
     return {
       size,
       mimeType: 'image/argb8888',

@@ -199,6 +199,11 @@ encodeFrame(napi_env env, napi_callback_info info) {
     NAPI_CALL(env, napi_get_value_uint32(env, argv[3], &buffer_creation_serial))
 
     buffer_resource = wl_client_get_object(node_frame_encoder->client, buffer_id);
+    if (buffer_resource == NULL) {
+        NAPI_CALL(env, napi_throw_error((env), NULL, "Can't encode frame buffer, buffer does not exist."))
+        NAPI_CALL(env, napi_get_undefined(env, &return_value))
+        return return_value;
+    }
     struct frame_buffer *frame_buffer = calloc(1, sizeof(*frame_buffer));
     frame_buffer->buffer_id = wl_resource_get_id(buffer_resource);
     frame_buffer->discard_cb = discard_frame_buffer_cb;
@@ -227,6 +232,13 @@ encodeFrame(napi_env env, napi_callback_info info) {
         frame_buffer->impl.shm.buffer_data = wl_shm_buffer_get_data(shm_buffer);
         frame_buffer->impl.shm.buffer_stride = wl_shm_buffer_get_stride(shm_buffer);
         frame_buffer->impl.shm.pool = wl_shm_buffer_ref_pool(shm_buffer);
+    } else {
+        // Not a buffer type we can encode (or the dmabuf was destroyed). Without this the zeroed frame_buffer would be
+        // treated as an SHM buffer without data.
+        free(frame_buffer);
+        NAPI_CALL(env, napi_throw_error((env), NULL, "Can't encode frame buffer, unsupported buffer type."))
+        NAPI_CALL(env, napi_get_undefined(env, &return_value))
+        return return_value;
     }
 
     if (frame_encoder_encode(&node_frame_encoder->encoder, frame_buffer, buffer_content_serial, buffer_creation_serial) == -1) {

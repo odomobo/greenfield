@@ -13,6 +13,7 @@
 #include "addon.h"
 #include "westfield-buffer.h"
 #include "westfield-surface.h"
+#include "westfield-wayland-server-extra.h"
 
 #define RANDNAME_PATTERN "/westfield-XXXXXX"
 
@@ -440,8 +441,14 @@ static void params_create_common(struct wl_resource *params_resource,
     westfield_buffer_init(&buffer->base, &buffer_impl, attribs.width, attribs.height);
 
     struct wl_client *client = wl_resource_get_client(params_resource);
+    uint32_t resource_id = buffer_id;
+    if (resource_id == 0) {
+        // Non-immediate create: the server allocates the wl_buffer id. The forked libwayland doesn't allocate server
+        // ids in wl_resource_create (id 0 would end up as object 0), so reserve one from the shared server id map.
+        wl_get_server_object_ids_batch(client, &resource_id, 1);
+    }
     buffer->resource = wl_resource_create(client, &wl_buffer_interface,
-                                          1, buffer_id);
+                                          1, resource_id);
     if (!buffer->resource) {
         wl_resource_post_no_memory(params_resource);
         free(buffer);

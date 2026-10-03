@@ -72,8 +72,15 @@ export class Encoder {
   }): Promise<Buffer> {
     // console.debug(`Start encoding: ${bufferContentSerial}`)
     return new Promise<Buffer>((resolve, reject) => {
-      this.encodingQueue.push({ resolve, reject, bufferResourceId, bufferContentSerial })
-      appEndpointNative.encodeFrame(this.nativeEncoder, bufferResourceId, bufferContentSerial, bufferCreationSerial)
+      const encodingTask = { resolve, reject, bufferResourceId, bufferContentSerial }
+      this.encodingQueue.push(encodingTask)
+      try {
+        appEndpointNative.encodeFrame(this.nativeEncoder, bufferResourceId, bufferContentSerial, bufferCreationSerial)
+      } catch (e) {
+        // No callback will come for this frame, so it must not stay in the queue or later results get misassigned.
+        this.encodingQueue.splice(this.encodingQueue.indexOf(encodingTask), 1)
+        reject(e)
+      }
     })
   }
 

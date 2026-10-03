@@ -1193,11 +1193,13 @@ getCredentials(napi_env env, napi_callback_info info) {
 napi_value
 getBufferSize(napi_env env, napi_callback_info info) {
     size_t argc = 2;
-    napi_value argv[argc], return_value, width_value, height_value;
+    napi_value argv[argc], return_value, width_value, height_value, format_value, kind_value;
     struct wl_client *client;
     uint32_t buffer_id;
     struct wl_resource *buffer_resource;
-    struct wl_shm_buffer *shm_buffer;
+    int32_t width, height;
+    uint32_t format;
+    const char *kind;
 
     NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
     NAPI_CALL(env, napi_get_value_external(env, argv[0], (void **) &client));
@@ -1208,17 +1210,39 @@ getBufferSize(napi_env env, napi_callback_info info) {
     if (buffer_resource == NULL) {
         return return_value;
     }
-    shm_buffer = wl_shm_buffer_get(buffer_resource);
-    if (shm_buffer == NULL) {
-        // TODO dmabuf buffer sizes
+
+    struct wl_shm_buffer *shm_buffer = wl_shm_buffer_get(buffer_resource);
+    if (shm_buffer != NULL) {
+        width = wl_shm_buffer_get_width(shm_buffer);
+        height = wl_shm_buffer_get_height(shm_buffer);
+        // wl_shm format codes, not drm fourcc
+        format = wl_shm_buffer_get_format(shm_buffer);
+        kind = "shm";
+    } else if (wlr_dmabuf_v1_resource_is_buffer(buffer_resource)) {
+        struct wlr_dmabuf_v1_buffer *dmabuf_buffer = wlr_dmabuf_v1_buffer_from_buffer_resource(buffer_resource);
+        width = dmabuf_buffer->base.width;
+        height = dmabuf_buffer->base.height;
+        format = dmabuf_buffer->attributes.format;
+        kind = "dmabuf";
+    } else if (wlr_drm_buffer_is_resource(buffer_resource)) {
+        struct wlr_drm_buffer *drm_buffer = wlr_drm_buffer_from_resource(buffer_resource);
+        width = drm_buffer->base.width;
+        height = drm_buffer->base.height;
+        format = drm_buffer->dmabuf.format;
+        kind = "wl_drm";
+    } else {
         return return_value;
     }
 
     NAPI_CALL(env, napi_create_object(env, &return_value))
-    NAPI_CALL(env, napi_create_int32(env, wl_shm_buffer_get_width(shm_buffer), &width_value))
-    NAPI_CALL(env, napi_create_int32(env, wl_shm_buffer_get_height(shm_buffer), &height_value))
+    NAPI_CALL(env, napi_create_int32(env, width, &width_value))
+    NAPI_CALL(env, napi_create_int32(env, height, &height_value))
+    NAPI_CALL(env, napi_create_uint32(env, format, &format_value))
+    NAPI_CALL(env, napi_create_string_utf8(env, kind, NAPI_AUTO_LENGTH, &kind_value))
     NAPI_CALL(env, napi_set_named_property(env, return_value, "width", width_value))
     NAPI_CALL(env, napi_set_named_property(env, return_value, "height", height_value))
+    NAPI_CALL(env, napi_set_named_property(env, return_value, "format", format_value))
+    NAPI_CALL(env, napi_set_named_property(env, return_value, "kind", kind_value))
     return return_value;
 }
 

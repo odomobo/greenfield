@@ -100,7 +100,14 @@ declare namespace westfieldAddon {
 
   function getCredentials(wlClient: WlClient, pidUidGid: Uint32Array): void
 
-  function getBufferSize(wlClient: WlClient, bufferId: number): { width: number; height: number } | undefined
+  /**
+   * Size and format of a wl_shm, linux-dmabuf or wl_drm buffer. format is a wl_shm format code for 'shm' buffers and a
+   * drm fourcc otherwise.
+   */
+  function getBufferSize(
+    wlClient: WlClient,
+    bufferId: number,
+  ): { width: number; height: number; format: number; kind: 'shm' | 'dmabuf' | 'wl_drm' } | undefined
 
   /** returns 0 on success, errno otherwise */
   function setTcpNotSentLowat(fd: number, bytes: number): number

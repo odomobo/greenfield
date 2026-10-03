@@ -95,11 +95,15 @@ function connectClient(session: Session, options: ServerClientOptions): ServerCl
     options.send(new Uint8Array(message.buffer))
   }
 
+  // Server-side ids of objects created natively (not from our reserved id batch). Once destroyed they stay reserved on
+  // the native side and are recycled here like any other server id.
+  const nativeServerIds = new Set<number>()
   client.addResourceDestroyListener((resource) => {
+    nativeServerIds.delete(resource.id)
     sendOutOfBand(OOB_RESOURCE_DESTROYED, new Uint32Array([resource.id]))
   })
   client.addResourceCreatedListener((resource) => {
-    if (resource.id >= 0xff000000 && client.recycledIds.length === 0) {
+    if (resource.id >= 0xff000000 && !nativeServerIds.has(resource.id) && client.recycledIds.length === 0) {
       session.logger.warn('[client] - Ran out of reserved resource ids.')
       client.close()
     }
@@ -114,6 +118,10 @@ function connectClient(session: Session, options: ServerClientOptions): ServerCl
   const outOfBandHandlers: Record<number, (payload: Uint32Array) => void> = {
     [OOB_BUFFER_CREATION]: (payload) => {
       const resourceId = payload[0]
+      if (resourceId >= 0xff000000) {
+        // Created natively with a server-allocated id (linux-dmabuf non-immediate create), not taken from our id batch.
+        nativeServerIds.add(resourceId)
+      }
       const wlBufferResource = new WlBufferResource(client, resourceId, 1)
       wlBufferResource.implementation = new ServerBuffer(wlBufferResource, () => options.getBufferSize(resourceId))
     },
