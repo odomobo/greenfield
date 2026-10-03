@@ -1,11 +1,6 @@
-import { api } from './auth'
+import { SessionInfo, sessionNameField } from './rename-field'
 
-export type SessionInfo = { id: string; name: string; createdAt: number }
-
-const MAX_NAME_LENGTH = 64
-
-const pencilIcon =
-  '<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.9 3.1a3 3 0 0 1 4.2 4.2L8.6 19.8l-5.1 1.1 1.1-5.1L16.9 3.1Zm-1.1 3.3-9.4 9.4-.5 2.2 2.2-.5 9.4-9.4-1.7-1.7Z"/></svg>'
+export type { SessionInfo }
 
 function formatTime(timestamp: number): string {
   return new Date(timestamp).toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
@@ -35,23 +30,11 @@ export class SessionList {
 
     const name = document.createElement('div')
     name.className = 'name'
-    const field = document.createElement('label')
-    field.className = 'session-name'
-    field.title = 'Rename'
-    const input = document.createElement('input')
-    input.type = 'text'
-    input.value = session.name
-    input.maxLength = MAX_NAME_LENGTH
-    input.spellcheck = false
-    input.autocomplete = 'off'
-    input.setAttribute('aria-label', 'Rename session')
-    field.append(input)
-    field.insertAdjacentHTML('beforeend', pencilIcon)
+    const { field } = sessionNameField(session, this.showError)
     const when = document.createElement('span')
     when.className = 'when'
     when.textContent = `Started ${formatTime(session.createdAt)}`
     name.append(field, when)
-    this.makeRenamable(input, session)
 
     const openButton = document.createElement('button')
     openButton.type = 'button'
@@ -76,47 +59,5 @@ export class SessionList {
       }
     })
     return row
-  }
-
-  private makeRenamable(input: HTMLInputElement, session: SessionInfo) {
-    let saved = session.name
-    let cancelled = false
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault()
-        input.blur()
-      } else if (event.key === 'Escape') {
-        cancelled = true
-        input.value = saved
-        input.blur()
-      }
-    })
-    input.addEventListener('blur', async () => {
-      if (cancelled) {
-        cancelled = false
-        return
-      }
-      const name = input.value
-      if (name === saved) {
-        return
-      }
-      const response = await api(`/api/sessions/${encodeURIComponent(session.id)}/rename`, {
-        method: 'POST',
-        body: { name },
-      })
-      if (response.ok) {
-        const renamed: SessionInfo = await response.json()
-        saved = renamed.name
-        input.value = saved
-        this.showError(undefined)
-      } else {
-        input.value = saved
-        this.showError(
-          response.status === 400
-            ? `A session name must be 1 to ${MAX_NAME_LENGTH} characters long.`
-            : 'The session could not be renamed.',
-        )
-      }
-    })
   }
 }

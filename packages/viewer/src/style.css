@@ -1,67 +1,660 @@
-/* The desktop. The sign-in form and session list use the gateway's theme (/static/theme.css). */
+/*
+ * The desktop and its shell. Colors and sizes come from the theme (/static/theme.css), so a theme is a stylesheet that
+ * overrides custom properties.
+ */
 #desktop-view {
-  --bar-bg: #1e293b;
-  --bar-fg: #e2e8f0;
-  --desktop-bg: #0f172a;
-  --accent: #38bdf8;
-  color-scheme: dark;
   position: fixed;
   inset: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--desktop-bg);
-  color: var(--bar-fg);
-  font: 13px system-ui, sans-serif;
+  background: var(--color-desktop);
+  color: var(--color-text);
+  font-family: var(--font-family);
+  font-size: var(--font-size-small);
+  user-select: none;
 }
 
-#bar {
+/* --- taskbar (top) --- */
+
+#taskbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: var(--taskbar-height);
+  padding: 0 4px;
+  background: var(--color-taskbar);
+  border-bottom: 1px solid var(--color-taskbar-border);
+  /* always above the windows and their animations */
+  position: relative;
+  z-index: 2;
+}
+
+.taskbar-button {
+  position: relative;
+  flex: none;
+  height: calc(var(--taskbar-height) - 6px);
+  min-width: calc(var(--taskbar-height) - 2px);
+  padding: 0 8px;
+  color: var(--color-text);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-control);
+}
+
+.taskbar-button:hover,
+.taskbar-button.open {
+  background: var(--color-subtle-hover);
+}
+
+.taskbar-button:active {
+  background: var(--color-subtle-pressed);
+}
+
+#taskbar-items {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.taskbar-button.app .indicator {
+  position: absolute;
+  left: 50%;
+  bottom: 1px;
+  width: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--color-indicator);
+  transform: translateX(-50%);
+  transition:
+    width 150ms ease-out,
+    background-color 150ms ease-out;
+}
+
+.taskbar-button.app.running .indicator {
+  width: 6px;
+}
+
+.taskbar-button.app.active {
+  background: var(--color-subtle-hover);
+}
+
+.taskbar-button.app.active .indicator {
+  width: 16px;
+  background: var(--color-accent);
+}
+
+#tray {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tray-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+}
+
+#connection-indicator[data-state='connected'] {
+  color: var(--color-connection-ok);
+}
+
+#connection-indicator[data-state='reconnecting'],
+#connection-indicator[data-state='offline'] {
+  color: var(--color-connection-bad);
+}
+
+#connection-indicator[data-state='connecting'] {
+  color: var(--color-text-secondary);
+}
+
+.tray-clock {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tray-clock .bell {
+  position: relative;
+  display: inline-flex;
+}
+
+.tray-clock.unseen .bell::after {
+  content: '';
+  position: absolute;
+  top: -1px;
+  right: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  box-shadow: 0 0 0 1.5px var(--color-taskbar);
+}
+
+/* --- app icons --- */
+
+.app-icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-icon img {
+  display: block;
+  object-fit: contain;
+}
+
+.app-icon.fallback {
+  color: var(--color-text-secondary);
+}
+
+/* --- popups --- */
+
+.flyout {
+  position: fixed;
+  z-index: 10;
+  color: var(--color-text);
+  background: var(--color-flyout);
+  border: 1px solid var(--color-flyout-border);
+  border-radius: var(--radius-flyout);
+  box-shadow: var(--shadow-flyout);
+  font-family: var(--font-family);
+  font-size: var(--font-size);
+  user-select: none;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--color-text);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-control);
+}
+
+.icon-button:hover,
+.icon-button.open {
+  background: var(--color-subtle-hover);
+}
+
+.icon-button:active {
+  background: var(--color-subtle-pressed);
+}
+
+.context-menu {
+  min-width: 180px;
+  padding: 4px;
+  z-index: 20;
+}
+
+.context-menu .heading {
+  padding: 6px 10px 4px;
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 280px;
+}
+
+.context-menu button {
+  display: flex;
+  justify-content: flex-start;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  background: transparent;
+  border: none;
+}
+
+.context-menu button:hover {
+  background: var(--color-subtle-hover);
+}
+
+.context-menu button.danger {
+  color: var(--color-error);
+}
+
+.context-menu .separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--color-flyout-border);
+}
+
+/* --- Apps menu --- */
+
+#apps-menu {
+  top: calc(var(--taskbar-height) + 4px);
+  left: 4px;
+  width: min(520px, calc(100vw - 8px));
+  max-height: calc(100vh - var(--taskbar-height) - 12px);
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  gap: 10px;
+}
+
+#apps-menu[hidden] {
+  display: none;
+}
+
+.apps-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 8px;
-  background: var(--bar-bg);
-  box-shadow: 0 1px 4px #0008;
-  z-index: 1;
 }
 
-#apps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  flex: 1;
-}
-
-#apps button,
-#session-info button,
-#overlay button {
-  height: auto;
-  font: inherit;
-  background: #334155;
-  color: var(--bar-fg);
-  border: 1px solid #475569;
-  border-radius: 4px;
-  padding: 3px 10px;
-  cursor: pointer;
-}
-
-#apps button:hover,
-#session-info button:hover,
-#overlay button:hover {
-  background: #334155;
-  border-color: var(--accent);
-}
-
-#session-info {
+.apps-user {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  max-width: 40%;
+  min-width: 0;
+}
+
+.apps-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: var(--color-text-secondary);
+  background: var(--color-subtle-hover);
+}
+
+.apps-username {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#status {
-  opacity: 0.7;
+.apps-session {
+  flex: 1;
+  min-width: 0;
 }
+
+.apps-session .session-name {
+  margin-left: 0;
+}
+
+#apps-menu .error {
+  margin: 0;
+}
+
+.apps-search {
+  position: relative;
+  display: block;
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.apps-search svg {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.apps-search input[type='text'] {
+  margin: 0;
+  padding-left: 34px;
+  border-radius: 999px;
+}
+
+.apps-search input[type='text']:focus {
+  padding-bottom: 0;
+  border-bottom-width: 1px;
+  border-color: var(--color-accent);
+}
+
+.apps-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 -6px;
+  padding: 0 6px;
+}
+
+.apps-body h2 {
+  margin: 6px 4px 6px;
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.apps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.app-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  height: auto;
+  min-width: 0;
+  padding: 10px 4px 8px;
+  background: transparent;
+  border: none;
+  font-size: var(--font-size-small);
+}
+
+.app-tile span:last-child {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-tile:hover,
+.app-row:hover {
+  background: var(--color-subtle-hover);
+}
+
+.apps-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.apps-list li {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.app-row {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 12px;
+  height: 40px;
+  padding: 0 44px 0 8px;
+  text-align: left;
+  background: transparent;
+  border: none;
+}
+
+.app-row-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.app-row-text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-generic {
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+}
+
+.pin-toggle {
+  position: absolute;
+  right: 4px;
+  color: var(--color-text-secondary);
+  opacity: 0;
+}
+
+.apps-list li:hover .pin-toggle,
+.pin-toggle:focus-visible,
+.pin-toggle.pinned {
+  opacity: 1;
+}
+
+.pin-toggle.pinned {
+  color: var(--color-accent);
+}
+
+@media (hover: none) {
+  .pin-toggle {
+    opacity: 1;
+  }
+}
+
+.apps-empty {
+  margin: 8px 4px;
+  color: var(--color-text-secondary);
+}
+
+/* --- window previews --- */
+
+#window-preview {
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  max-width: calc(100vw - 8px);
+  overflow-x: auto;
+}
+
+#window-preview[hidden] {
+  display: none;
+}
+
+.preview-card {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  width: 216px;
+  padding: 4px 8px 8px;
+  border-radius: var(--radius-control);
+  cursor: default;
+  outline: none;
+}
+
+.preview-card:hover,
+.preview-card:focus-visible {
+  background: var(--color-subtle-hover);
+}
+
+.preview-card.active {
+  box-shadow: inset 0 -2px 0 var(--color-accent);
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+}
+
+.preview-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-size-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-controls {
+  display: flex;
+  opacity: 0;
+}
+
+.preview-card:hover .preview-controls,
+.preview-card:focus-within .preview-controls {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .preview-controls {
+    opacity: 1;
+  }
+}
+
+.preview-controls button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--color-text);
+  background: transparent;
+  border: none;
+}
+
+.preview-controls button:hover {
+  background: var(--color-subtle-pressed);
+}
+
+.preview-controls button[data-action='close']:hover {
+  color: #fff;
+  background: #c42b1c;
+}
+
+.preview-image {
+  display: block;
+  align-self: center;
+  max-width: 200px;
+  max-height: 120px;
+  margin-top: 4px;
+  border-radius: 4px;
+}
+
+/* --- notifications --- */
+
+#notifications-panel {
+  top: calc(var(--taskbar-height) + 4px);
+  right: 4px;
+  width: min(380px, calc(100vw - 8px));
+  max-height: calc(100vh - var(--taskbar-height) - 12px);
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+}
+
+#notifications-panel[hidden] {
+  display: none;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: var(--font-size);
+  font-weight: 600;
+}
+
+.panel-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.panel-empty {
+  margin: 24px 0;
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+
+.notification,
+.toast {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 36px 10px 10px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-surface);
+}
+
+.notification.critical,
+.toast.critical {
+  border-left: 3px solid var(--color-error);
+}
+
+.notification-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.notification-meta {
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+}
+
+.notification-summary {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.notification-body {
+  margin-top: 2px;
+  color: var(--color-text-secondary);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.notification-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+}
+
+#toasts {
+  position: fixed;
+  top: calc(var(--taskbar-height) + 8px);
+  right: 8px;
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(360px, calc(100vw - 16px));
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  background: var(--color-flyout);
+  border-color: var(--color-flyout-border);
+  box-shadow: var(--shadow-flyout);
+  animation: toast-in 200ms ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+/* --- output --- */
 
 #output-container {
   position: relative;
@@ -80,12 +673,13 @@
 #overlay {
   position: absolute;
   inset: 0;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: #0f172acc;
+  background: color-mix(in srgb, var(--color-desktop) 80%, transparent);
   font-size: 16px;
 }
 

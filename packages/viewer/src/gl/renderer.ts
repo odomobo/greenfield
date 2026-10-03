@@ -34,6 +34,7 @@ const FRAGMENT_YUVA = `
   uniform sampler2D u_v;
   uniform sampler2D u_alpha;
   uniform bool u_hasAlpha;
+  uniform float u_opacity;
   varying vec2 v_texCoord;
   const vec3 offset = vec3(-0.0625, -0.5, -0.5);
   const vec3 rcoeff = vec3(1.164, 0.000, 1.596);
@@ -50,7 +51,7 @@ const FRAGMENT_YUVA = `
     if (u_hasAlpha) {
       alpha = clamp((texture2D(u_alpha, v_texCoord).r + offset.x) * 1.164, 0.0, 1.0);
     }
-    gl_FragColor = vec4(rgb, alpha);
+    gl_FragColor = vec4(rgb, alpha * u_opacity);
   }
 `
 
@@ -117,6 +118,7 @@ export class Renderer {
   private readonly textures = new Map<string, SurfaceTexture>()
   private width = 1
   private height = 1
+  private clearColor: [number, number, number] = [0.059, 0.09, 0.165]
 
   constructor(
     readonly canvas: HTMLCanvasElement,
@@ -138,7 +140,7 @@ export class Renderer {
     this.gl = gl
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
     this.rgbaProgram = link(gl, FRAGMENT_RGBA, ['u_texture', 'u_opacity'])
-    this.yuvaProgram = link(gl, FRAGMENT_YUVA, ['u_y', 'u_u', 'u_v', 'u_alpha', 'u_hasAlpha'])
+    this.yuvaProgram = link(gl, FRAGMENT_YUVA, ['u_y', 'u_u', 'u_v', 'u_alpha', 'u_hasAlpha', 'u_opacity'])
     this.quad = gl.createBuffer()!
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad)
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW)
@@ -160,6 +162,14 @@ export class Renderer {
       }
     }
     return luma
+  }
+
+  /** The desktop background, a CSS rgb()/rgba() color as getComputedStyle reports it. */
+  setClearColor(cssColor: string): void {
+    const match = /rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/.exec(cssColor)
+    if (match) {
+      this.clearColor = [Number(match[1]) / 255, Number(match[2]) / 255, Number(match[3]) / 255]
+    }
   }
 
   hasContent(surface: string): boolean {
@@ -263,10 +273,60 @@ export class Renderer {
   beginFrame(): void {
     const gl = this.gl
     gl.viewport(0, 0, this.width, this.height)
-    gl.clearColor(0.059, 0.09, 0.165, 1)
+    gl.clearColor(...this.clearColor, 1)
     gl.clear(gl.COLOR_BUFFER_BIT)
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+  }
+
+  /**
+   * Draw surfaces into an offscreen image of the given size (rects relative to it), e.g. a window preview. Doesn't touch
+   * what's on screen.
+   */
+  snapshot(draws: { surface: string; rect: Rect }[], width: number, height: number): ImageData | undefined {
+    const gl = this.gl
+    const texture = gl.createTexture()
+    const framebuffer = gl.createFramebuffer()
+    if (texture === null || framebuffer === null) {
+      return undefined
+    }
+    const screen = { width: this.width, height: this.height }
+    try {
+      gl.bindTexture(gl.TEXTURE_2D, texture)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer)
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0)
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        return undefined
+      }
+      this.width = width
+      this.height = height
+      gl.viewport(0, 0, width, height)
+      gl.clearColor(0, 0, 0, 0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      gl.enable(gl.BLEND)
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+      for (const { surface, rect } of draws) {
+        this.drawSurface(surface, rect)
+      }
+      const pixels = new Uint8ClampedArray(width * height * 4)
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+      // GL rows start at the bottom, and drawSurface maps y down from the top: the image is upside down
+      const image = new ImageData(width, height)
+      const rowBytes = width * 4
+      for (let row = 0; row < height; row++) {
+        image.data.set(pixels.subarray((height - 1 - row) * rowBytes, (height - row) * rowBytes), row * rowBytes)
+      }
+      return image
+    } finally {
+      this.width = screen.width
+      this.height = screen.height
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+      gl.deleteFramebuffer(framebuffer)
+      gl.deleteTexture(texture)
+      gl.viewport(0, 0, this.width, this.height)
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+    }
   }
 
   /**
@@ -306,6 +366,7 @@ export class Renderer {
         gl.uniform1i(program.uniforms[names[i]], i)
       })
       gl.uniform1i(program.uniforms.u_hasAlpha, texture.hasAlpha ? 1 : 0)
+      gl.uniform1f(program.uniforms.u_opacity, opacity)
     }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     return true

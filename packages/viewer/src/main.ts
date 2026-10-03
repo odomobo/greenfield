@@ -3,6 +3,7 @@ import { Connection, ConnectionState } from './connection'
 import { Desktop } from './desktop'
 import { Renderer } from './gl/renderer'
 import { SessionInfo, SessionList } from './sessions'
+import { Shell } from './shell/shell'
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id)
@@ -33,18 +34,33 @@ const newSessionButton = element<HTMLButtonElement>('new-session')
 
 const desktopView = element<HTMLDivElement>('desktop-view')
 const canvas = element<HTMLCanvasElement>('output')
-const status = element<HTMLSpanElement>('status')
 const overlay = element<HTMLDivElement>('overlay')
 const overlayMessage = element<HTMLDivElement>('overlay-message')
 const reconnectButton = element<HTMLButtonElement>('overlay-reconnect')
 const overlaySessionsButton = element<HTMLButtonElement>('overlay-sessions')
-const user = element<HTMLSpanElement>('user')
 
 element('sessions-hostname').textContent = element('hostname').textContent
 
 const connection = new Connection()
 const renderer = new Renderer(canvas, { preserveDrawingBuffer: testMode })
 const desktop = new Desktop(canvas, renderer, connection)
+const shell = new Shell(
+  desktop,
+  {
+    send: (message) => connection.send(message),
+    disconnect: () => showSessions(),
+    logout: () => logout(),
+  },
+  element('taskbar'),
+)
+
+/** The renderer draws the desktop background: use the theme's color, also when the system switches light/dark. */
+function applyDesktopColor() {
+  renderer.setClearColor(getComputedStyle(desktopView).backgroundColor)
+  desktop.scheduleRender()
+}
+applyDesktopColor()
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyDesktopColor)
 let username = ''
 let currentSession: string | undefined
 
@@ -63,6 +79,7 @@ function show(view: HTMLElement, title: string) {
 // --- signing in ---
 
 function showLogin(message?: string) {
+  shell.stop()
   connection.stop()
   desktop.clear()
   currentSession = undefined
@@ -156,7 +173,7 @@ const sessionList = new SessionList(
   element('session-list'),
   element('no-sessions'),
   (message) => showError(sessionsError, message),
-  (session) => openSession(session.id),
+  (session) => openSession(session),
   async (session: SessionInfo) => {
     await api(`/api/sessions/${encodeURIComponent(session.id)}/end`, { method: 'POST' })
     await showSessions()
@@ -164,6 +181,7 @@ const sessionList = new SessionList(
 )
 
 async function showSessions(error?: string) {
+  shell.stop()
   connection.stop()
   desktop.clear()
   currentSession = undefined
@@ -183,36 +201,36 @@ newSessionButton.addEventListener('click', async () => {
     return
   }
   const session: SessionInfo = await response.json()
-  openSession(session.id)
+  openSession(session)
 })
 
 // --- desktop ---
 
-function openSession(session: string) {
+function openSession(session: SessionInfo) {
   const token = currentToken()
   if (token === undefined) {
     showLogin()
     return
   }
-  currentSession = session
-  user.textContent = username
+  currentSession = session.id
   overlay.hidden = true
   overlaySessionsButton.hidden = true
-  show(desktopView, 'Desktop')
-  loadApps(session)
-  connection.attach(session, token)
+  show(desktopView, session.name)
+  shell.start(username, session)
+  connection.attach(session.id, token)
   canvas.focus()
 }
 
-element('disconnect').addEventListener('click', () => showSessions())
-overlaySessionsButton.addEventListener('click', () => showSessions())
-element('logout').addEventListener('click', async () => {
+/** End the session and sign out. */
+async function logout() {
   if (currentSession !== undefined) {
     await api(`/api/sessions/${encodeURIComponent(currentSession)}/end`, { method: 'POST' }).catch(() => undefined)
   }
   signOut()
   showLogin()
-})
+}
+
+overlaySessionsButton.addEventListener('click', () => showSessions())
 
 if (testMode) {
   // hooks for automated tests (see scripts/test-gateway.sh)
@@ -224,6 +242,8 @@ if (testMode) {
     output: () => desktop.debugOutput(),
     interaction: () => desktop.debugInteraction(),
     resizing: () => desktop.debugResizing(),
+    animations: () => desktop.debugAnimations(),
+    shellWindows: () => desktop.shellWindows(),
     readLuma: (x: number, y: number, width: number, height: number) => renderer.readLuma(x, y, width, height),
   }
 }
@@ -231,7 +251,11 @@ if (testMode) {
 connection.onOpen = () => desktop.reset()
 connection.onEnvelope = (envelope) => {
   if (envelope.kind === 'control') {
-    desktop.handleMessage(envelope.message)
+    if (envelope.message.type.startsWith('shell.')) {
+      shell.handleMessage(envelope.message)
+    } else {
+      desktop.handleMessage(envelope.message)
+    }
   } else {
     desktop.handleFrame(envelope.surface, envelope.frame)
   }
@@ -240,26 +264,26 @@ connection.onStateChange = (state: ConnectionState) => {
   reconnectButton.hidden = true
   switch (state.kind) {
     case 'connecting':
-      status.textContent = 'connecting…'
+      shell.setConnection('connecting')
       break
     case 'connected':
-      status.textContent = 'connected'
+      shell.setConnection('connected')
       overlay.hidden = true
       break
     case 'reconnecting':
-      status.textContent = 'disconnected'
+      shell.setConnection('reconnecting')
       overlayMessage.textContent = `Connection lost. Reconnecting in ${state.inSeconds}s…`
       overlay.hidden = false
       break
     case 'taken-over':
-      status.textContent = 'taken over'
+      shell.setConnection('offline')
       overlayMessage.textContent = 'This session was opened somewhere else.'
       reconnectButton.hidden = false
       overlaySessionsButton.hidden = false
       overlay.hidden = false
       break
     case 'ended':
-      status.textContent = 'ended'
+      shell.setConnection('offline')
       overlayMessage.textContent = 'This session has ended.'
       overlaySessionsButton.hidden = false
       overlay.hidden = false
@@ -270,28 +294,3 @@ connection.onStateChange = (state: ConnectionState) => {
   }
 }
 reconnectButton.addEventListener('click', () => connection.connect())
-
-async function loadApps(session: string) {
-  const apps = element<HTMLDivElement>('apps')
-  apps.replaceChildren()
-  const response = await api('/api/apps')
-  const list: { path: string; name: string }[] = await response.json()
-  apps.replaceChildren(
-    ...list.map(({ path, name }) => {
-      const button = document.createElement('button')
-      button.textContent = name
-      button.dataset.app = path
-      button.addEventListener('click', async () => {
-        const result = await api(`/api/sessions/${encodeURIComponent(session)}/launch`, {
-          method: 'POST',
-          body: { app: path },
-        })
-        if (!result.ok) {
-          console.error(`Failed to launch ${name}: ${result.status}`)
-        }
-        canvas.focus()
-      })
-      return button
-    }),
-  )
-}

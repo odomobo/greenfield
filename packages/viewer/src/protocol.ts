@@ -31,6 +31,8 @@ export type SceneWindow = {
   activated: boolean
   maximized: boolean
   fullscreen: boolean
+  /** hidden (shown only in the taskbar); window.activate shows it again */
+  minimized: boolean
   /** false until the viewer decided where the window goes (send window.move) */
   placed: boolean
   /** position of the main surface's origin */
@@ -54,6 +56,47 @@ export type ServerMessage =
   /** The client asked to start an interactive move/resize (xdg_toplevel.move/resize) during the current button press. */
   | { type: 'interactive'; mode: 'move'; window: string }
   | { type: 'interactive'; mode: 'resize'; window: string; edges: number }
+  /** The client asked to be (un)maximized; the scene follows once it committed. Lets the viewer animate right away. */
+  | { type: 'maximize-requested'; window: string; maximized: boolean }
+  // desktop shell (packages/gateway/src/shell/service.ts)
+  /** installed applications, sorted by name; sent on attach */
+  | { type: 'shell.apps'; apps: ShellApp[] }
+  /** desktop file IDs of the pinned apps, in order */
+  | { type: 'shell.pinned'; apps: string[] }
+  /** data URLs for requested icon names (null: no such icon) */
+  | { type: 'shell.icons'; icons: Record<string, string | null> }
+  /** all kept notifications, oldest first; sent on attach */
+  | { type: 'shell.notifications'; notifications: ShellNotification[] }
+  /** a new notification, or one replacing the notification with the same id */
+  | { type: 'shell.notification'; notification: ShellNotification }
+  | { type: 'shell.notification-closed'; id: number }
+  | { type: 'shell.launch-failed'; app: string; reason: 'unknown' | 'not-runnable' | 'failed' }
+
+export type ShellApp = {
+  /** desktop file ID */
+  id: string
+  name: string
+  genericName?: string
+  comment?: string
+  keywords: string[]
+  /** icon name or path, see shell.icons */
+  icon?: string
+  /** StartupWMClass: the app_id its windows have, if it's not the desktop file ID */
+  wmClass?: string
+}
+
+export type ShellNotification = {
+  id: number
+  appName: string
+  summary: string
+  body: string
+  icon?: string
+  desktopEntry?: string
+  urgency: 'low' | 'normal' | 'critical'
+  /** ms, -1: default, 0: stays until dismissed */
+  expireTimeout: number
+  time: number
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // viewer -> server
@@ -76,11 +119,19 @@ export type ViewerMessage =
   /** width/height are window geometry sizes. done: the interactive resize ended. */
   | { type: 'window.resize'; window: string; width: number; height: number; edges: number; done: boolean }
   | { type: 'window.maximize'; window: string; maximized: boolean }
+  | { type: 'window.minimize'; window: string; minimized: boolean }
   | { type: 'window.close'; window: string }
   /** frame pacing: how often the viewer refreshes and how long decoding takes (ms) */
   | { type: 'feedback'; refreshInterval: number; decodeDuration: number }
   /** the viewer can't decode this surface's stream, send a key frame */
   | { type: 'keyframe'; surface: string }
+  | { type: 'shell.launch'; app: string }
+  | { type: 'shell.pin'; apps: string[] }
+  | { type: 'shell.icons'; names: string[] }
+  | { type: 'shell.notification-dismiss'; id: number }
+  | { type: 'shell.notifications-clear' }
+  /** re-read installed applications (the server rate-limits this) */
+  | { type: 'shell.refresh-apps' }
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()

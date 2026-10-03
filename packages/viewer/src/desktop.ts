@@ -1,6 +1,7 @@
 import { Connection } from './connection'
 import { KeyFrameNeeded, SurfaceDecoder } from './decoder'
 import { Rect, Renderer } from './gl/renderer'
+import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
 import { parseEncodedFrame, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 
 type Point = { x: number; y: number }
@@ -21,6 +22,22 @@ type Interaction =
  */
 type ResizeOverride = { rect: Rect; edges: number; finalSize?: Size; settleTimer?: ReturnType<typeof setTimeout> }
 
+/**
+ * A minimize, restore, maximize or unmaximize being animated: the window's latest content is scaled from one rect to
+ * another (window geometry, output coordinates), nothing is resized on the client for it. A maximize/unmaximize keeps
+ * showing the end rect after the animation until the client committed the new state (or SETTLE_TIMEOUT).
+ */
+type WindowAnimation = {
+  kind: 'minimize' | 'restore' | 'maximize' | 'unmaximize'
+  animation: Animation
+  from: Rect
+  to: Rect
+  fromOpacity: number
+  toOpacity: number
+  /** maximize/unmaximize: when to give up waiting for the client after the animation ended */
+  deadline?: number
+}
+
 type Cursor =
   | { kind: 'default' | 'hidden' }
   | { kind: 'named'; name: string }
@@ -37,6 +54,10 @@ const MOVE_SEND_INTERVAL = 50
 const MIN_VISIBLE = 80
 /** Give up waiting for a client to commit the final size of a resize after this long. */
 const RESIZE_SETTLE_TIMEOUT = 2000
+/** Durations of the window state animations, ms. Subtle and short. */
+const STATE_ANIMATION_MS = 300
+
+export type ShellWindow = SceneWindow & { shownMinimized: boolean }
 
 /**
  * The viewer side of a session: shows the server's window scene and acts as its window manager. Everything that
@@ -53,6 +74,18 @@ export class Desktop {
   private readonly decoders = new Map<string, SurfaceDecoder>()
   private readonly keyFrameRequested = new Set<string>()
   private cursor: Cursor = { kind: 'default' }
+  /** minimized state the viewer asked for, until the server's scene agrees */
+  private readonly localMinimized = new Map<string, boolean>()
+  private readonly animations = new Map<string, WindowAnimation>()
+  /** geometry of windows before they were maximized, to animate back to */
+  private readonly restoreRects = new Map<string, Rect>()
+
+  /** Called whenever the window list or a window's state changes. */
+  onWindowsChanged: (windows: ShellWindow[]) => void = () => {
+    /* noop */
+  }
+  /** Where a window goes when minimized (its taskbar button), in page coordinates. */
+  minimizeTarget: (window: string) => DOMRect | undefined = () => undefined
 
   private pointer: Point = { x: 0, y: 0 }
   /** where the current button press started; interactions the client starts on a press are measured from here */
@@ -116,10 +149,14 @@ export class Desktop {
     }
     this.resizeOverrides.clear()
     this.placementSent.clear()
+    this.localMinimized.clear()
+    this.animations.clear()
+    this.restoreRects.clear()
     this.grab = undefined
     this.interaction = undefined
     this.buttons = 0
     this.scheduleRender()
+    this.onWindowsChanged([])
   }
 
   /**
@@ -153,6 +190,263 @@ export class Desktop {
     return this.resizeOverrides.size > 0
   }
 
+  /** Running state animations by window. For tests. */
+  debugAnimations(): Record<string, string> {
+    return Object.fromEntries([...this.animations].map(([id, { kind }]) => [id, kind]))
+  }
+
+  // -------------------------------------------------------------------------------------------------------------------
+  // window management for the shell (taskbar)
+
+  private isMinimized(window: SceneWindow): boolean {
+    return this.localMinimized.get(window.id) ?? window.minimized
+  }
+
+  /** Minimized and not animating anymore: not shown, not pickable. */
+  private isHidden(window: SceneWindow): boolean {
+    const animation = this.animations.get(window.id)
+    return this.isMinimized(window) && animation?.kind !== 'minimize'
+  }
+
+  /** Give the keyboard to the session. */
+  focus(): void {
+    this.canvas.focus()
+  }
+
+  shellWindows(): ShellWindow[] {
+    return this.windows.map((window) => ({ ...window, shownMinimized: this.isMinimized(window) }))
+  }
+
+  private notifyWindowsChanged() {
+    this.onWindowsChanged(this.shellWindows())
+  }
+
+  /** Bring a window to the front and give it the keyboard, restoring it if it's minimized. */
+  activateWindow(id: string): void {
+    const window = this.windows.find((w) => w.id === id)
+    if (window === undefined) {
+      return
+    }
+    if (this.isMinimized(window)) {
+      this.startRestoreAnimation(window)
+      this.localMinimized.set(id, false)
+    }
+    this.connection.send({ type: 'window.activate', window: id })
+    this.canvas.focus()
+    this.notifyWindowsChanged()
+    this.scheduleRender()
+  }
+
+  minimizeWindow(id: string): void {
+    const window = this.windows.find((w) => w.id === id)
+    if (window === undefined || this.isMinimized(window)) {
+      return
+    }
+    this.startMinimizeAnimation(window)
+    this.localMinimized.set(id, true)
+    // the server moves the keyboard focus to the next window
+    this.connection.send({ type: 'window.minimize', window: id, minimized: true })
+    this.notifyWindowsChanged()
+    this.scheduleRender()
+  }
+
+  setMaximized(id: string, maximized: boolean): void {
+    const window = this.windows.find((w) => w.id === id)
+    if (window === undefined || window.fullscreen) {
+      return
+    }
+    if (this.isMinimized(window)) {
+      this.activateWindow(id)
+    }
+    // ask right away, the animation runs while the client redraws
+    this.connection.send({ type: 'window.maximize', window: id, maximized })
+    this.startMaximizeAnimation(window, maximized)
+  }
+
+  closeWindow(id: string): void {
+    this.connection.send({ type: 'window.close', window: id })
+  }
+
+  /**
+   * The window's current content scaled to fit maxWidth x maxHeight, for previews. Works for minimized windows too.
+   */
+  renderPreview(id: string, maxWidth: number, maxHeight: number): ImageData | undefined {
+    const window = this.windows.find((w) => w.id === id)
+    if (window === undefined || window.geometry.width <= 0 || window.geometry.height <= 0) {
+      return undefined
+    }
+    const { geometry } = window
+    const scale = Math.min(maxWidth / geometry.width, maxHeight / geometry.height, 1)
+    const width = Math.max(1, Math.round(geometry.width * scale))
+    const height = Math.max(1, Math.round(geometry.height * scale))
+    const draws = window.surfaces.map((surface) => ({
+      surface: surface.id,
+      rect: {
+        x: (surface.x - geometry.x) * scale,
+        y: (surface.y - geometry.y) * scale,
+        width: surface.width * scale,
+        height: surface.height * scale,
+      },
+    }))
+    return this.renderer.snapshot(draws, width, height)
+  }
+
+  // -------------------------------------------------------------------------------------------------------------------
+  // state animations
+
+  /** The taskbar button rect, in output coordinates, or a spot above the window if there's no button. */
+  private minimizedRect(window: SceneWindow, from: Rect): Rect {
+    const target = this.minimizeTarget(window.id)
+    const canvasRect = this.canvas.getBoundingClientRect()
+    const centerX = target ? target.x + target.width / 2 - canvasRect.x : from.x + from.width / 2
+    const centerY = target ? target.y + target.height / 2 - canvasRect.y : -24
+    // shrink to about twice the button's width
+    const scale = Math.min(1, ((target?.width ?? 40) * 2) / Math.max(1, from.width))
+    const width = from.width * scale
+    const height = from.height * scale
+    return { x: centerX - width / 2, y: centerY - height / 2, width, height }
+  }
+
+  private currentRect(window: SceneWindow): Rect {
+    return this.shownGeometry(window)
+  }
+
+  private startMinimizeAnimation(window: SceneWindow, from = this.currentRect(window)) {
+    this.animations.set(window.id, {
+      kind: 'minimize',
+      animation: new Animation(STATE_ANIMATION_MS, EASE_IN),
+      from,
+      to: this.minimizedRect(window, from),
+      fromOpacity: 1,
+      toOpacity: 0,
+    })
+    this.interruptInteraction(window.id)
+  }
+
+  private startRestoreAnimation(window: SceneWindow) {
+    const to = this.restingRect(window)
+    this.animations.set(window.id, {
+      kind: 'restore',
+      animation: new Animation(STATE_ANIMATION_MS, EASE_OUT),
+      from: this.minimizedRect(window, to),
+      to,
+      fromOpacity: 0,
+      toOpacity: 1,
+    })
+  }
+
+  private startMaximizeAnimation(window: SceneWindow, maximized: boolean) {
+    const from = this.currentRect(window)
+    let to: Rect | undefined
+    if (maximized) {
+      if (!window.maximized) {
+        this.restoreRects.set(window.id, from)
+      }
+      to = { x: 0, y: 0, width: this.output.width, height: this.output.height }
+    } else {
+      // where it was before it was maximized; unknown if it was maximized before we attached: no animation
+      to = this.restoreRects.get(window.id)
+      this.restoreRects.delete(window.id)
+    }
+    if (to === undefined || this.isHidden(window)) {
+      return
+    }
+    this.interruptInteraction(window.id)
+    this.animations.set(window.id, {
+      kind: maximized ? 'maximize' : 'unmaximize',
+      // maximize starts slow and accelerates out, restore starts fast and eases out
+      animation: new Animation(STATE_ANIMATION_MS, maximized ? EASE_IN : EASE_OUT),
+      from,
+      to,
+      fromOpacity: 1,
+      toOpacity: 1,
+    })
+    this.scheduleRender()
+  }
+
+  /** Where a window rests when it's not animating: its scene geometry (or the rect of a resize in progress). */
+  private restingRect(window: SceneWindow): Rect {
+    const override = this.resizeOverrides.get(window.id)
+    if (override) {
+      return override.rect
+    }
+    const position = this.windowPosition(window)
+    return {
+      x: position.x + window.geometry.x,
+      y: position.y + window.geometry.y,
+      width: window.geometry.width,
+      height: window.geometry.height,
+    }
+  }
+
+  /** A state change of the window ends a move/resize of it. */
+  private interruptInteraction(id: string) {
+    if (this.interaction?.window === id) {
+      this.interaction = undefined
+      this.applyCursor()
+    }
+    const override = this.resizeOverrides.get(id)
+    if (override) {
+      clearTimeout(override.settleTimer)
+      this.resizeOverrides.delete(id)
+    }
+  }
+
+  /** The animated rect and opacity of a window right now, if it's animating. */
+  private animatedState(window: SceneWindow): { rect: Rect; opacity: number } | undefined {
+    const state = this.animations.get(window.id)
+    if (state === undefined) {
+      return undefined
+    }
+    const progress = state.animation.progress()
+    return {
+      rect: lerpRect(state.from, state.to, progress),
+      opacity: state.fromOpacity + (state.toOpacity - state.fromOpacity) * progress,
+    }
+  }
+
+  /** Has the client caught up with the state a maximize/unmaximize animation shows? */
+  private animationSettled(window: SceneWindow, state: WindowAnimation): boolean {
+    if (state.kind === 'maximize') {
+      return window.maximized && this.clientCaughtUp(window, { width: state.to.width, height: state.to.height })
+    }
+    return !window.maximized
+  }
+
+  /** Drop finished animations. Returns whether any are still running (and need frames). */
+  private advanceAnimations(): boolean {
+    const now = performance.now()
+    let running = false
+    let changed = false
+    for (const [id, state] of [...this.animations]) {
+      const window = this.windows.find((w) => w.id === id)
+      if (window === undefined) {
+        this.animations.delete(id)
+        continue
+      }
+      if (!state.animation.done(now)) {
+        running = true
+        continue
+      }
+      if (state.kind === 'maximize' || state.kind === 'unmaximize') {
+        if (state.deadline === undefined) {
+          state.deadline = now + RESIZE_SETTLE_TIMEOUT
+          setTimeout(() => this.scheduleRender(), RESIZE_SETTLE_TIMEOUT + 1)
+        }
+        // hold the end rect until the client committed; a scene update or the deadline ends it
+        if (!this.animationSettled(window, state) && now < state.deadline) {
+          continue
+        }
+      }
+      this.animations.delete(id)
+      changed = true
+    }
+    if (changed) {
+      this.keepWindowsVisible()
+    }
+    return running
+  }
+
   // -------------------------------------------------------------------------------------------------------------------
   // server -> viewer
 
@@ -168,6 +462,13 @@ export class Desktop {
       case 'interactive':
         this.startInteraction(message)
         break
+      case 'maximize-requested': {
+        const window = this.windows.find((w) => w.id === message.window)
+        if (window) {
+          this.startMaximizeAnimation(window, message.maximized)
+        }
+        break
+      }
       case 'welcome':
         break
     }
@@ -202,7 +503,37 @@ export class Desktop {
   }
 
   private updateScene(windows: SceneWindow[]) {
+    const previous = new Map(this.windows.map((window) => [window.id, window]))
+    const previousRects = new Map(this.windows.map((window) => [window.id, this.shownGeometry(window)]))
     this.windows = windows
+    for (const window of windows) {
+      const local = this.localMinimized.get(window.id)
+      if (local !== undefined) {
+        if (local === window.minimized) {
+          this.localMinimized.delete(window.id)
+        }
+        continue
+      }
+      // minimized or restored by the client or another viewer
+      const before = previous.get(window.id)
+      if (before && before.minimized !== window.minimized && !this.animations.has(window.id)) {
+        if (window.minimized) {
+          this.startMinimizeAnimation(window, previousRects.get(window.id))
+        } else {
+          this.startRestoreAnimation(window)
+        }
+      }
+    }
+    for (const id of [...this.localMinimized.keys()]) {
+      if (!windows.some((window) => window.id === id)) {
+        this.localMinimized.delete(id)
+      }
+    }
+    for (const id of [...this.restoreRects.keys()]) {
+      if (!windows.some((window) => window.id === id)) {
+        this.restoreRects.delete(id)
+      }
+    }
     const surfaces = new Set<string>()
     let placedCount = 0
     for (const window of windows) {
@@ -232,6 +563,17 @@ export class Desktop {
         this.settleResize(window)
       }
     }
+    for (const [id, state] of [...this.animations]) {
+      const window = windows.find((w) => w.id === id)
+      if (
+        window &&
+        (state.kind === 'maximize' || state.kind === 'unmaximize') &&
+        state.animation.done() &&
+        this.animationSettled(window, state)
+      ) {
+        this.animations.delete(id)
+      }
+    }
     // the viewer decides where new windows go
     for (const window of windows) {
       if (window.placed || window.maximized || window.fullscreen || this.placementSent.has(window.id)) {
@@ -256,6 +598,7 @@ export class Desktop {
       }
     }
     this.scheduleRender()
+    this.notifyWindowsChanged()
   }
 
   /**
@@ -273,17 +616,7 @@ export class Desktop {
 
   /** The window geometry rect as shown, in output coordinates. */
   private shownGeometry(window: SceneWindow): Rect {
-    const override = this.resizeOverrides.get(window.id)
-    if (override) {
-      return override.rect
-    }
-    const position = this.windowPosition(window)
-    return {
-      x: position.x + window.geometry.x,
-      y: position.y + window.geometry.y,
-      width: window.geometry.width,
-      height: window.geometry.height,
-    }
+    return this.animatedState(window)?.rect ?? this.restingRect(window)
   }
 
   /**
@@ -291,9 +624,9 @@ export class Desktop {
    * geometry fills the override rect.
    */
   private surfaceRects(window: SceneWindow): { surface: SceneSurface; rect: Rect; scaleX: number; scaleY: number }[] {
-    const override = this.resizeOverrides.get(window.id)
+    const target = this.animatedState(window)?.rect ?? this.resizeOverrides.get(window.id)?.rect
     const { geometry } = window
-    if (override === undefined || geometry.width <= 0 || geometry.height <= 0) {
+    if (target === undefined || geometry.width <= 0 || geometry.height <= 0) {
       const position = this.windowPosition(window)
       return window.surfaces.map((surface) => ({
         surface,
@@ -302,13 +635,13 @@ export class Desktop {
         scaleY: 1,
       }))
     }
-    const scaleX = override.rect.width / geometry.width
-    const scaleY = override.rect.height / geometry.height
+    const scaleX = target.width / geometry.width
+    const scaleY = target.height / geometry.height
     return window.surfaces.map((surface) => ({
       surface,
       rect: {
-        x: override.rect.x + (surface.x - geometry.x) * scaleX,
-        y: override.rect.y + (surface.y - geometry.y) * scaleY,
+        x: target.x + (surface.x - geometry.x) * scaleX,
+        y: target.y + (surface.y - geometry.y) * scaleY,
         width: surface.width * scaleX,
         height: surface.height * scaleY,
       },
@@ -343,6 +676,7 @@ export class Desktop {
         window.fullscreen ||
         !window.placed ||
         this.resizeOverrides.has(window.id) ||
+        this.animations.has(window.id) ||
         this.interaction?.window === window.id
       ) {
         continue
@@ -372,11 +706,19 @@ export class Desktop {
   }
 
   private render() {
+    const animating = this.advanceAnimations()
     this.renderer.beginFrame()
     for (const window of this.windows) {
-      for (const { surface, rect } of this.surfaceRects(window)) {
-        this.renderer.drawSurface(surface.id, rect)
+      if (this.isHidden(window)) {
+        continue
       }
+      const opacity = this.animatedState(window)?.opacity ?? 1
+      for (const { surface, rect } of this.surfaceRects(window)) {
+        this.renderer.drawSurface(surface.id, rect, opacity)
+      }
+    }
+    if (animating) {
+      this.scheduleRender()
     }
     if (this.cursor.kind === 'surface') {
       const { surface, hotspot } = this.cursor
@@ -424,6 +766,10 @@ export class Desktop {
   private pick(point: Point): Pick | undefined {
     for (let w = this.windows.length - 1; w >= 0; w--) {
       const window = this.windows[w]
+      const kind = this.animations.get(window.id)?.kind
+      if (this.isHidden(window) || kind === 'minimize' || kind === 'restore') {
+        continue
+      }
       const rects = this.surfaceRects(window)
       for (let s = rects.length - 1; s >= 0; s--) {
         const { surface, rect, scaleX, scaleY } = rects[s]
