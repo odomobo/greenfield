@@ -40,7 +40,7 @@ import Region, {
   initRect,
 } from './Region'
 import { FrameDecoder, H264DecoderContext } from './remote/buffer-decoder'
-import Renderer from './render/Renderer'
+import { CompositorRenderer } from './render/CompositorRenderer'
 import Session from './Session'
 import { Size, sizeEquals } from './math/Size'
 import Subsurface from './Subsurface'
@@ -164,7 +164,7 @@ class Surface implements WlSurfaceRequests {
 
   private constructor(
     public readonly resource: WlSurfaceResource,
-    public readonly renderer: Renderer,
+    public readonly renderer: CompositorRenderer,
     public readonly session: Session,
     public readonly encoderFeedback = resource.client.userData.clientEncodersFeedback?.ensureSurfaceEncoderFeedback(
       resource.id,

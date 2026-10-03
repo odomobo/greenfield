@@ -137,8 +137,8 @@ export default class XdgWmBase implements XdgWmBaseRequests {
         this.setUnresponsive(resource.client, false)
         pingState.pingTimeoutActive = false
       }
-      self.clearTimeout(pingState.timeoutTimer)
-      pingState.pingTimer = self.setTimeout(() => this.doPing(resource, pingState), 5000)
+      clearTimeout(pingState.timeoutTimer)
+      pingState.pingTimer = setTimeout(() => this.doPing(resource, pingState), 5000)
     }
   }
 
@@ -146,7 +146,7 @@ export default class XdgWmBase implements XdgWmBaseRequests {
     resource: XdgWmBaseResource,
     pingState: { timeoutTimer: number; pingTimer: number; pingTimeoutActive: boolean },
   ) {
-    pingState.timeoutTimer = window.setTimeout(() => {
+    pingState.timeoutTimer = setTimeout(() => {
       if (!pingState.pingTimeoutActive) {
         // ping timed out, make view gray
         pingState.pingTimeoutActive = true

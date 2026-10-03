@@ -35,9 +35,8 @@ import {
   WlTouchResource,
 } from '@gfld/compositor-protocol'
 
-import { capabilities } from './browser/capabilities'
 import { DesktopSurface } from './desktop/Desktop'
-import { AxisEvent, ButtonEvent, CompositorSeat, KeyEvent, nrmlvo } from './index'
+import type { AxisEvent, ButtonEvent, CompositorSeat, KeyEvent, nrmlvo } from './index'
 import { Keyboard, KeyboardGrab } from './Keyboard'
 
 import { DragIconRole, Pointer, PointerDrag, PointerGrab } from './Pointer'
@@ -187,7 +186,7 @@ export class Seat implements WlSeatRequests, CompositorSeat, WlDataDeviceRequest
   }
 
   static create(session: Session): Seat {
-    return new Seat(session, [], capabilities.hasTouch)
+    return new Seat(session, [], session.platform.hasTouch)
   }
 
   focusSurfaceDestroyListener = () => this.activateNextFocus()

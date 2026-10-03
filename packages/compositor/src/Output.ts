@@ -26,21 +26,36 @@ import {
   WlOutputTransform,
 } from '@gfld/compositor-protocol'
 
-import { capabilities } from './browser/capabilities'
+import { Size } from './math/Size'
 
 export default class Output implements WlOutputRequests {
   private _global?: Global
   resources: WlOutputResource[] = []
 
-  static create(canvas: HTMLCanvasElement): Output {
-    return new Output(canvas)
+  /**
+   * @param size current size of the output in pixels, e.g. a canvas size
+   * @param model output model name
+   * @param orientationType screen orientation type, e.g. landscape-primary
+   */
+  static create(size: () => Size, model: string, orientationType: string): Output {
+    return new Output(size, model, orientationType)
   }
 
   private constructor(
-    public readonly canvas: HTMLCanvasElement,
+    private readonly size: () => Size,
+    private readonly model: string,
+    private readonly orientationType: string,
     private _x = 0,
     private _y = 0,
   ) {}
+
+  get width(): number {
+    return this.size().width
+  }
+
+  get height(): number {
+    return this.size().height
+  }
 
   get x(): number {
     return this._x
@@ -109,20 +124,20 @@ export default class Output implements WlOutputRequests {
     const flags = WlOutputMode.current
     // the refresh rate is impossible to query without manual measuring, which is error prone.
     const refresh = 60
-    wlOutputResource.mode(flags, this.canvas.width, this.canvas.height, refresh)
+    wlOutputResource.mode(flags, this.width, this.height, refresh)
   }
 
   private emitGeometry(wlOutputResource: WlOutputResource) {
     // this is really just an approximation as browsers don't offer a way to get the physical width :(
     // A css pixel is roughly 1/96 of an inch, so ~0.2646 mm
     // TODO test this on high dpi devices
-    const physicalWidth = Math.ceil(this.canvas.width * 0.2646)
-    const physicalHeight = Math.ceil(this.canvas.height * 0.2646)
+    const physicalWidth = Math.ceil(this.width * 0.2646)
+    const physicalHeight = Math.ceil(this.height * 0.2646)
     const subpixel = WlOutputSubpixel.unknown
     const make = 'Greenfield'
-    const model = capabilities.userAgent
+    const model = this.model
 
-    const orientation = capabilities.orientationType
+    const orientation = this.orientationType
     let transform = WlOutputTransform.normal
 
     // FIXME this requires some experimentation to get it right

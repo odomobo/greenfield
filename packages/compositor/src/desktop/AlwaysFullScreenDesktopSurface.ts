@@ -1,5 +1,5 @@
 import { WlShellSurfaceResize } from '@gfld/compositor-protocol'
-import { CompositorSurface } from '../index'
+import type { CompositorSurface } from '../index'
 import { ORIGIN, Point } from '../math/Point'
 import Surface from '../Surface'
 import { toCompositorSurface } from '../UserShellApi'

@@ -21,6 +21,7 @@ import Session, { GreenfieldLogger } from './Session'
 import { UserShellApi } from './UserShellApi'
 import { nrmlvo } from './Xkb'
 import { WebAppLauncher } from './web/WebAppLauncher'
+import { createBrowserPlatform } from './browser/platform'
 
 export { init as initWasm } from '@gfld/compositor-wasm'
 export * from './ButtonEvent'
@@ -29,11 +30,11 @@ export * from './KeyEvent'
 export type { nrmlvo }
 export type { GreenfieldLogger }
 
-export function createCompositorSession(
+export async function createCompositorSession(
   sessionConfig: SessionConfig,
   logger?: GreenfieldLogger,
 ): Promise<CompositorSession> {
-  return Session.create(sessionConfig, logger)
+  return Session.create(sessionConfig, await createBrowserPlatform(logger ?? console), logger)
 }
 
 export interface CompositorPointer {

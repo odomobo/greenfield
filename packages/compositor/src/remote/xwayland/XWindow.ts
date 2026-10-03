@@ -889,7 +889,7 @@ export class XWindow {
   legacyFullscreen(): Output | undefined {
     const minmax = PMinSize | PMaxSize
     return this.wm.session.globals.outputs.find((output) => {
-      if (output.canvas.width === this.width && output.canvas.height === this.height && this.overrideRedirect) {
+      if (output.width === this.width && output.height === this.height && this.overrideRedirect) {
         return true
       }
 
@@ -899,8 +899,8 @@ export class XWindow {
       if (
         sizeHintsFlags & (USSize | PSize) &&
         this.sizeHints &&
-        this.sizeHints.width === output.canvas.width &&
-        this.sizeHints.height === output.canvas.height
+        this.sizeHints.width === output.width &&
+        this.sizeHints.height === output.height
       ) {
         matchingSize = true
       }
@@ -908,10 +908,10 @@ export class XWindow {
       if (
         (sizeHintsFlags & minmax) === minmax &&
         this.sizeHints &&
-        this.sizeHints.minWidth === output.canvas.width &&
-        this.sizeHints.minHeight === output.canvas.height &&
-        this.sizeHints.maxWidth === output.canvas.width &&
-        this.sizeHints.maxHeight === output.canvas.height
+        this.sizeHints.minWidth === output.width &&
+        this.sizeHints.minHeight === output.height &&
+        this.sizeHints.maxWidth === output.width &&
+        this.sizeHints.maxHeight === output.height
       ) {
         matchingSize = true
       }

@@ -17,11 +17,11 @@
 
 import { Display } from '@gfld/compositor-protocol'
 import Globals from './Globals'
-import { ButtonCode, CompositorSession, SessionConfig } from './index'
+import { ButtonCode } from './ButtonEvent'
+import type { CompositorSession, SessionConfig } from './index'
 import { FrameDecoder } from './remote/buffer-decoder'
-import { createWasmFrameDecoder } from './remote/wasm-buffer-decoder'
-import { softwareDecoderConfig, webCodecFrameDecoderFactory } from './remote/webcodec-buffer-decoder'
-import Renderer from './render/Renderer'
+import { CompositorRenderer } from './render/CompositorRenderer'
+import { CompositorPlatform } from './Platform'
 import { createUserShellApi, UserShellApi } from './UserShellApi'
 import { InputQueue } from './InputQueue'
 import { KeyboardModifier } from './Seat'
@@ -88,28 +88,11 @@ export type GreenfieldLogger = {
    */
   trace: LogFn
 }
-async function webVideoDecoderConfig(): Promise<VideoDecoderConfig | undefined> {
-  if ('VideoDecoder' in window) {
-    // FIXME hardware decoding frame offset is wrong
-    // const hardwareDecoderSupport = await VideoDecoder.isConfigSupported(hardwareDecoderConfig)
-    // if (hardwareDecoderSupport.supported) {
-    //   return hardwareDecoderConfig
-    // }
-
-    const softwareDecoderSupport = await VideoDecoder.isConfigSupported(softwareDecoderConfig)
-    if (softwareDecoderSupport) {
-      return softwareDecoderConfig
-    }
-  }
-
-  return undefined
-}
-
 export type FrameDecoderFactory = (session: Session) => FrameDecoder
 
 class Session implements CompositorSession {
   readonly globals: Globals
-  readonly renderer: Renderer
+  readonly renderer: CompositorRenderer
   readonly userShell: UserShellApi
   public readonly frameDecoder: FrameDecoder
   public readonly inputQueue: InputQueue
@@ -118,17 +101,18 @@ class Session implements CompositorSession {
     public readonly display: Display,
     public readonly config: Required<SessionConfig>,
     public readonly logger: GreenfieldLogger,
-    frameDecoderFactory: FrameDecoderFactory,
+    public readonly platform: CompositorPlatform,
   ) {
     this.globals = Globals.create(this)
-    this.renderer = Renderer.create(this)
+    this.renderer = platform.createRenderer(this)
     this.userShell = createUserShellApi(this)
-    this.frameDecoder = frameDecoderFactory(this)
+    this.frameDecoder = platform.createFrameDecoder(this)
     this.inputQueue = new InputQueue(this)
   }
 
   static async create(
     sessionConfig: SessionConfig,
+    platform: CompositorPlatform,
     logger: GreenfieldLogger = {
       error: console.error,
       warn: console.warn,
@@ -150,17 +134,7 @@ class Session implements CompositorSession {
         return `sid${[...randomBytes].map((b) => b.toString(16).padStart(2, '0')).join('')}`
       })()
 
-    let decoderFactory: FrameDecoderFactory
-    const webCodecSupport = await webVideoDecoderConfig()
-    if (webCodecSupport) {
-      decoderFactory = webCodecFrameDecoderFactory(webCodecSupport)
-      logger.info('Will use H.264 WebCodecs Decoder.')
-    } else {
-      logger.info('Will use H.264 WASM Decoder.')
-      decoderFactory = createWasmFrameDecoder
-    }
-
-    const session = new Session(display, { ...sessionConfig, id }, logger, decoderFactory)
+    const session = new Session(display, { ...sessionConfig, id }, logger, platform)
     session.globals.seat.buttonBindings.push({
       modifiers: 0,
       button: ButtonCode.MAIN,

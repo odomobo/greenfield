@@ -1,3 +1,4 @@
+import Renderer from '../render/Renderer'
 import {
   createAxisEventFromWheelEvent,
   createButtonEventFromMouseEvent,
@@ -8,7 +9,8 @@ import { createDnd } from './dnd'
 import { initBrowserSelection } from './selection'
 
 export function addInputOutput(session: Session, canvasCreator: () => { canvas: HTMLCanvasElement; id: string }): void {
-  const scene = session.renderer.initScene(canvasCreator)
+  // TODO initScene is browser renderer specific
+  const scene = (session.renderer as Renderer).initScene(canvasCreator)
   const sceneId = scene.id
   const canvas = scene.canvas
 

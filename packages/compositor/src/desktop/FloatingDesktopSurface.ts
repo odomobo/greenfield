@@ -1,14 +1,13 @@
 import { WlShellSurfaceResize } from '@gfld/compositor-protocol'
 import { AxisEvent } from '../AxisEvent'
 import { ButtonEvent } from '../ButtonEvent'
-import { CompositorSurface } from '../index'
+import type { CompositorSurface } from '../index'
 import { minusPoint, ORIGIN, plusPoint, Point } from '../math/Point'
 import { RectWithInfo } from '../math/Rect'
 import { Size } from '../math/Size'
 import { PointerGrab } from '../Pointer'
 import Surface from '../Surface'
 import { toCompositorSurface } from '../UserShellApi'
-import { setCursor } from '../browser/pointer'
 import { DesktopSurface, DesktopSurfaceRole } from './Desktop'
 
 class ResizeGrab implements PointerGrab {
@@ -111,16 +110,16 @@ class ResizeGrab implements PointerGrab {
       (this.edges & WlShellSurfaceResize.top && this.edges & WlShellSurfaceResize.right) ||
       (this.edges & WlShellSurfaceResize.bottom && this.edges & WlShellSurfaceResize.left)
     ) {
-      setCursor('nesw-resize')
+      this.desktopSurface.surface.session.renderer.setCursorType('nesw-resize')
     } else if (
       (this.edges & WlShellSurfaceResize.top && this.edges & WlShellSurfaceResize.left) ||
       (this.edges & WlShellSurfaceResize.bottom && this.edges & WlShellSurfaceResize.right)
     ) {
-      setCursor('nwse-resize')
+      this.desktopSurface.surface.session.renderer.setCursorType('nwse-resize')
     } else if (this.edges & (WlShellSurfaceResize.top | WlShellSurfaceResize.bottom)) {
-      setCursor('ns-resize')
+      this.desktopSurface.surface.session.renderer.setCursorType('ns-resize')
     } else if (this.edges & (WlShellSurfaceResize.left | WlShellSurfaceResize.right)) {
-      setCursor('ew-resize')
+      this.desktopSurface.surface.session.renderer.setCursorType('ew-resize')
     }
   }
 }
@@ -195,7 +194,7 @@ class MoveGrab implements PointerGrab {
     this.desktopSurface.grabbed = true
     pointer.startGrab(this)
     pointer.clearFocus()
-    setCursor('move')
+    this.desktopSurface.surface.session.renderer.setCursorType('move')
   }
 }
 

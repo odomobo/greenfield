@@ -21,7 +21,7 @@ import {
   WlKeyboardRequests,
   WlKeyboardResource,
 } from '@gfld/compositor-protocol'
-import { CompositorKeyboard, KeyCode } from './index'
+import type { CompositorKeyboard, KeyCode } from './index'
 import { KeyEvent } from './KeyEvent'
 import { Seat, KeyboardLocks } from './Seat'
 import Surface from './Surface'
@@ -62,7 +62,7 @@ export class Keyboard implements WlKeyboardRequests, CompositorKeyboard {
     const nrmlvoEntries = buildNrmlvoEntries()
 
     // deduce from browser language settings
-    const langTokens = navigator.language.split('-')
+    const langTokens = seat.session.platform.keyboardLanguage().split('-')
     const lang = langTokens.length === 1 ? langTokens[0].toLowerCase() : langTokens[1].toLowerCase()
     const nrmlvoEntry =
       nrmlvoEntries.find((nrmlvo) => nrmlvo.layout === lang && nrmlvo.variant == null) ||

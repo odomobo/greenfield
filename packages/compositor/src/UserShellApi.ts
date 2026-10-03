@@ -16,9 +16,8 @@
 // along with Greenfield.  If not, see <https://www.gnu.org/licenses/>.
 
 import { WlSurfaceResource } from '@gfld/compositor-protocol'
-import { addInputOutput } from './browser/input'
 import { DesktopSurface } from './desktop/Desktop'
-import { CompositorClient, CompositorConfiguration, CompositorSurface } from './index'
+import type { CompositorClient, CompositorConfiguration, CompositorSurface } from './index'
 import Session from './Session'
 import Surface from './Surface'
 
@@ -75,7 +74,7 @@ export function createUserShellApi(session: Session): UserShellApi {
         surface.role?.desktopSurface?.activate()
       },
       initScene: (canvasCreator: () => { canvas: HTMLCanvasElement; id: string }) =>
-        addInputOutput(session, canvasCreator),
+        session.platform.initScene(session, canvasCreator),
       refreshScene: () => {
         session.renderer.render()
       },

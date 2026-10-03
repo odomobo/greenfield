@@ -1,6 +1,6 @@
 import Compositor from './Compositor'
 import DataDeviceManager from './DataDeviceManager'
-import { CompositorGlobals } from './index'
+import type { CompositorGlobals } from './index'
 import Output from './Output'
 import { Seat } from './Seat'
 import Session from './Session'

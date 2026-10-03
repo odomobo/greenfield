@@ -149,11 +149,11 @@ export default class ShellSurface implements WlShellSurfaceRequests, DesktopSurf
       this._pingTimeoutActive = false
     }
     clearTimeout(this._timeoutTimer)
-    this._pingTimer = self.setTimeout(() => this.doPing(resource), 5000)
+    this._pingTimer = setTimeout(() => this.doPing(resource), 5000)
   }
 
   doPing(resource: WlShellSurfaceResource): void {
-    this._timeoutTimer = self.setTimeout(() => {
+    this._timeoutTimer = setTimeout(() => {
       if (!this._pingTimeoutActive) {
         // ping timed out, make view gray
         this._pingTimeoutActive = true

@@ -2,7 +2,6 @@ import { ButtonEvent } from './ButtonEvent'
 import Session from './Session'
 import { AxisEvent } from './AxisEvent'
 import { KeyEvent } from './KeyEvent'
-import { createRenderFrame } from './render/Renderer'
 
 export class InputQueue {
   private motionQueue: ButtonEvent[] = []
@@ -90,7 +89,7 @@ export class InputQueue {
         this.queueDrainTask = undefined
       })
     } else {
-      this.queueDrainTask = createRenderFrame().then(() => {
+      this.queueDrainTask = this.session.platform.nextFrame().then(() => {
         this.drainQueues()
         this.queueDrainTask = undefined
       })

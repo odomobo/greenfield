@@ -24,8 +24,9 @@
   ],
   "scripts": {
     "prebuild": "yarn run rimraf dist types",
-    "build": "yarn run tsc && yarn run cpy './src/assets/**' './dist/assets/'",
-    "watch": "yarn run build && yarn run tsc -w"
+    "build": "yarn run tsc && yarn run cpy './src/assets/**' './dist/assets/' && yarn run build:server",
+    "watch": "yarn run build && yarn run tsc -w",
+    "build:server": "yarn run esbuild src/server/index.ts --bundle --platform=node --format=esm --sourcemap --outfile=dist-server/index.mjs"
   },
   "dependencies": {
     "@gfld/common": "workspace:^",

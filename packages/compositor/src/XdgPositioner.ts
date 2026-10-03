@@ -302,8 +302,8 @@ export default class XdgPositioner implements XdgPositionerRequests {
 
           const surfaceSpaceMinBound = parentView.sceneToViewSpace({ x: 0, y: 0 })
           const surfaceSpaceMaxBound = parentView.sceneToViewSpace({
-            x: window.document.documentElement.clientWidth,
-            y: document.documentElement.clientHeight,
+            x: parentView.surface.session.platform.viewportSize().width,
+            y: parentView.surface.session.platform.viewportSize().height,
           })
 
           let topViolation = 0

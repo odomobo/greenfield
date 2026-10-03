@@ -25,7 +25,6 @@ import {
   XdgToplevelResource,
   XdgWmBaseError,
 } from '@gfld/compositor-protocol'
-import { clientHeight, clientWidth } from './browser/attributes'
 import { queueCancellableMicrotask } from './Loop'
 import { minusPoint } from './math/Point'
 import { createRect, RectWithInfo, withSizeAndPosition } from './math/Rect'
@@ -315,7 +314,7 @@ function ensureGeometryConstraints(
       // we can't use slide or flip if if the height is greater than the screen height
       if (
         (violations.leftViolation || violations.rightViolation) &&
-        positionerState.sizeRect.size.width < clientWidth()
+        positionerState.sizeRect.size.width < parentXdgSurface.surface.session.platform.viewportSize().width
       ) {
         if (canFlipX) {
           // TODO try flipping
@@ -368,7 +367,7 @@ function ensureGeometryConstraints(
       if (
         violations &&
         (violations.topViolation || violations.bottomViolation) &&
-        positionerState.sizeRect.size.height < clientHeight()
+        positionerState.sizeRect.size.height < parentXdgSurface.surface.session.platform.viewportSize().height
       ) {
         if (canFlipY) {
           const oldAnchor = positionerState.anchor

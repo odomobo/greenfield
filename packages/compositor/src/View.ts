@@ -18,9 +18,9 @@
 import { IDENTITY, invert, Mat4, timesMat4, timesPoint, timesRectToBoundingBox, translation } from './math/Mat4'
 import { minusPoint, ORIGIN, plusPoint, Point } from './math/Point'
 import { RectWithInfo, withSizeAndPosition } from './math/Rect'
-import { copyTo, createPixmanRegion, destroyPixmanRegion, fini, initRect, intersect, notEmpty } from './Region'
-import RenderState from './render/RenderState'
-import { Scene } from './render/Scene'
+import { createPixmanRegion, fini, initRect } from './Region'
+import type RenderState from './render/RenderState'
+import type { Scene } from './render/Scene'
 import Surface from './Surface'
 
 export default class View {
@@ -120,12 +120,7 @@ export default class View {
   }
 
   destroy(): void {
-    if (this.renderStates) {
-      for (const renderState of Object.values(this.renderStates)) {
-        renderState.destroy()
-      }
-      this.renderStates = {}
-    }
+    this.surface.session.renderer.onViewDestroyed(this)
 
     this.destroyed = true
     this.destroyResolve()
@@ -168,49 +163,7 @@ export default class View {
     fini(this.pixmanRegion)
     initRect(this.pixmanRegion, this.regionRect)
 
-    this.ensureRenderStatesForMatchingScenes()
-  }
-
-  private ensureRenderStatesForMatchingScenes() {
-    // find visible region for scenes where this view is visible
-    const scenesWithVisibleRegion = Object.values(this.surface.session.renderer.scenes)
-      .map((scene) => {
-        const visibleRegion = createPixmanRegion()
-        intersect(visibleRegion, this.pixmanRegion, scene.region)
-        return [scene.id, { scene, visibleRegion }] as const
-      })
-      .filter(([, { visibleRegion }]) => {
-        return notEmpty(visibleRegion)
-      })
-
-    // update & add new renderstates for scenes where this view is visible
-    for (const [sceneId, { scene, visibleRegion }] of scenesWithVisibleRegion) {
-      const renderState = this.renderStates[sceneId]
-      if (renderState === undefined) {
-        const bufferSize = this.surface.state.bufferContents
-          ? this.surface.state.bufferContents.size
-          : { width: 0, height: 0 }
-        const { width, height } = bufferSize
-        this.renderStates[sceneId] = RenderState.create(scene.sceneShader.gl, { width, height }, scene, visibleRegion)
-      } else {
-        copyTo(renderState.visibleSceneRegion, visibleRegion)
-        fini(visibleRegion)
-        destroyPixmanRegion(visibleRegion)
-      }
-    }
-
-    // cleanup renderstates of scenes where this view is no longer visible on
-    const visibleRegionBySceneId = Object.fromEntries(scenesWithVisibleRegion)
-    for (const [sceneId, renderState] of Object.entries(this.renderStates)) {
-      const visibleRegion = visibleRegionBySceneId[renderState.scene.id]
-      if (visibleRegion === undefined) {
-        renderState.destroy()
-        delete this.renderStates[sceneId]
-      }
-    }
-
-    // TODO use scene with most visible coverage as relevant scene
-    this.relevantScene = Object.values(this.renderStates)[0]?.scene
+    this.surface.session.renderer.onViewRegionUpdated(this)
   }
 
   private calculateTransformation(): Mat4 {
