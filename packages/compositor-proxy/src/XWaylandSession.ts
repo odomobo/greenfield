@@ -129,6 +129,9 @@ export class XWaylandSession {
         (wmFd: number, wlClient: WlClient, displayFd: number) => resolve({ wmFd, wlClient, display, displayFd }),
         () => destroyResolve(),
       )
+      if (this.nativeXWayland === undefined) {
+        logger.error('Could not set up XWayland listener socket. X11 applications will not be available.')
+      }
     })
 
     return { onXWaylandStarting, onDestroyed }

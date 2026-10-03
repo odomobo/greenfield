@@ -360,7 +360,6 @@ westfield_xserver_listen(struct westfield_xserver *wxs) {
             wxs->display++;
             goto retry;
         } else {
-            free(wxs);
             return -1;
         }
     }
@@ -368,7 +367,6 @@ westfield_xserver_listen(struct westfield_xserver *wxs) {
     wxs->unix_fd = bind_to_unix_socket(wxs->display);
     if (wxs->unix_fd < 0) {
         unlink(lockfile);
-        free(wxs);
         return -1;
     }
 

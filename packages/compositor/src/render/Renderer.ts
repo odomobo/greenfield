@@ -42,7 +42,8 @@ function setupCanvasGLContext(canvas: HTMLCanvasElement): WebGLRenderingContext 
     alpha: true,
     premultipliedAlpha: false,
     preserveDrawingBuffer: false,
-    desynchronized: true,
+    // Low-latency mode leaves the canvas blank in Chrome on Windows with GPU acceleration.
+    desynchronized: false,
   })
   if (gl === null) {
     throw new Error("This browser doesn't support WebGL!")

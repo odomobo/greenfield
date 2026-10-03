@@ -63,6 +63,10 @@ function isKeyFrame(accessUnit: Uint8Array) {
   return false
 }
 
+function codedRectCopyOptions(videoFrame: VideoFrame): VideoFrameCopyToOptions {
+  return { rect: { x: 0, y: 0, width: videoFrame.codedWidth, height: videoFrame.codedHeight } }
+}
+
 class WebCodecFrameDecoder implements FrameDecoder {
   constructor(private readonly session: Session, private readonly videoDecoderConfig: VideoDecoderConfig) {}
 
@@ -195,14 +199,18 @@ class WebCodecH264DecoderContext implements H264DecoderContext {
     const alphaVideoFrame = decodeResult.alpha?.buffer
 
     if (opaqueVideoFrame.format === 'I420') {
-      const opaqueBuffer = new ArrayBuffer(opaqueVideoFrame.allocationSize())
-      const opaquePromise: Promise<PlaneLayout[]> = opaqueVideoFrame.copyTo(opaqueBuffer)
+      // Copy the full coded (padded) area. Without a rect, copyTo only copies the visible area, but the YUV upload
+      // expects tightly packed planes of the coded size.
+      const opaqueCopyOptions = codedRectCopyOptions(opaqueVideoFrame)
+      const opaqueBuffer = new ArrayBuffer(opaqueVideoFrame.allocationSize(opaqueCopyOptions))
+      const opaquePromise: Promise<PlaneLayout[]> = opaqueVideoFrame.copyTo(opaqueBuffer, opaqueCopyOptions)
 
       let alphaBuffer: ArrayBuffer | undefined
       let alphaPromise: Promise<PlaneLayout[]> | undefined
       if (alphaVideoFrame) {
-        alphaBuffer = new ArrayBuffer(alphaVideoFrame.allocationSize())
-        alphaPromise = alphaVideoFrame.copyTo(alphaBuffer)
+        const alphaCopyOptions = codedRectCopyOptions(alphaVideoFrame)
+        alphaBuffer = new ArrayBuffer(alphaVideoFrame.allocationSize(alphaCopyOptions))
+        alphaPromise = alphaVideoFrame.copyTo(alphaBuffer, alphaCopyOptions)
       }
 
       const dualPlaneYUVABuffer: DualPlaneYUVAArrayBuffer = {
