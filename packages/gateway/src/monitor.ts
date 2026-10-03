@@ -293,8 +293,10 @@ export class Monitor {
     }
     let child: ChildProcess
     if (this.config.authMode === 'dev') {
+      // never hand the dev password down (it would stay readable in /proc/<pid>/environ)
+      const { GREENFIELD_DEV_PASSWORD: _password, ...inherited } = process.env
       child = fork(sessionProcessPath, [], {
-        env: { ...process.env },
+        env: inherited,
         cwd: user.home,
         stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
       })
