@@ -182,21 +182,6 @@ export class Renderer {
   upload(surface: string, frame: DecodedFrame): void {
     const gl = this.gl
     let texture = this.textures.get(surface)
-
-    if (frame.kind === 'bitmap') {
-      if (texture?.kind !== 'rgba') {
-        this.delete(surface)
-        texture = { kind: 'rgba', texture: createTexture(gl), width: 0, height: 0 }
-        this.textures.set(surface, texture)
-      }
-      gl.bindTexture(gl.TEXTURE_2D, texture.texture)
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame.bitmap)
-      texture.width = frame.bitmap.width
-      texture.height = frame.bitmap.height
-      frame.bitmap.close()
-      return
-    }
-
     if (texture?.kind !== 'yuv') {
       this.delete(surface)
       texture = {

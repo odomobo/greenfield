@@ -60,8 +60,7 @@ static const char *vertex_shader =
         "}";
 
 enum frame_encoding_type {
-    h264,
-    png
+    h264
 };
 
 struct frame_encoding_result {
@@ -1025,49 +1024,20 @@ gst_frame_encoder_encode(struct gst_frame_encoder *gst_encoder, const struct fra
 }
 
 static inline bool
-png_gst_frame_encoder_supports_buffer(const struct frame_buffer *frame_buffer) {
-    if (frame_buffer->type == SHM) {
-        return (frame_buffer->width * frame_buffer->height) <= (256 * 256) &&
-               (frame_buffer->impl.shm.buffer_format == WL_SHM_FORMAT_ARGB8888 ||
-                frame_buffer->impl.shm.buffer_format == WL_SHM_FORMAT_XRGB8888);
-    }
-
-    if (frame_buffer->type == DMA) {
-        if ((frame_buffer->width * frame_buffer->height) <= (256 * 256)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static inline bool
 frame_encoder_description_supports_buffer(const struct frame_encoder_description *frame_encoder_description,
                                           const char *preferred_frame_encoder,
                                           const struct frame_buffer *frame_buffer) {
-    if (strcmp(frame_encoder_description->name, "png") == 0) {
-        return png_gst_frame_encoder_supports_buffer(frame_buffer);
-    }
-
     // different encoder preferred so not for this interface
     if (strcmp(frame_encoder_description->name, preferred_frame_encoder) != 0) {
         return false;
     }
 
+    // small buffers are padded to the encoder's minimum size (see gst_frame_encoder_pipeline_coded_size)
     if (frame_buffer->type == DMA) {
-        // Too small needs the png encoder so refuse
-        if ((frame_buffer->width * frame_buffer->height) <= (256 * 256)) {
-            return false;
-        }
         return true;
     }
 
     if (frame_buffer->type == SHM) {
-        // Too small needs the png encoder so refuse
-        if ((frame_buffer->width * frame_buffer->height) <= (256 * 256)) {
-            return false;
-        }
-
         if (frame_buffer->impl.shm.buffer_format == WL_SHM_FORMAT_ARGB8888 ||
             frame_buffer->impl.shm.buffer_format == WL_SHM_FORMAT_XRGB8888) {
             return true;
@@ -1172,27 +1142,6 @@ static const struct frame_encoder_description frame_encoder_descriptions[] = {
                 .height_multiple = 128,
                 .min_width = 128,
                 .min_height = 128,
-        },
-        // always keep png last as fallback encoder
-        {
-                .name = "png",
-                .frame_encoding_type = png,
-                .opaque_pipeline_definition = "appsrc name=src format=3 stream-type=0 ! "
-                                              "glupload ! "
-                                              "glcolorconvert ! "
-                                              "glshader name=shader ! "
-                                              "capsfilter name=shader_capsfilter ! "
-                                              "glcolorconvert ! video/x-raw(memory:GLMemory),format=RGBA ! "
-                                              "gldownload ! "
-                                              "queue silent=true ! "
-                                              "pngenc ! "
-                                              "appsink name=sink",
-                .alpha_pipeline_definition = NULL,
-                .split_alpha = false,
-                .width_multiple = 16,
-                .height_multiple = 16,
-                .min_width = 32,
-                .min_height = 32,
         }
 };
 

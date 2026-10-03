@@ -84,7 +84,10 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   /** bumped on every mode switch, results of encodings started before are dropped */
   private epoch = 0
   private lease?: V
-  /** the buffer can't be read as pixels (e.g. an external-only dmabuf), only streamed as video */
+  /**
+   * the buffer can't be read as pixels (e.g. an external-only dmabuf), only streamed as video, small ones too (the
+   * encoder pads them). An SHM format that neither supports shows nothing: its video encodings fail and are logged.
+   */
   private patchUnsupported = false
   private _destroyed = false
   /** video encodings in flight, they still read their buffer */

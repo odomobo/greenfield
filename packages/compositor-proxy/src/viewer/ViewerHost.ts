@@ -1,12 +1,7 @@
 import { WebSocket } from 'ws'
 import { createLogger } from '../Logger.js'
 import { onViewerFeedback, setViewerAttached } from '../FrameFeedback.js'
-import {
-  getVideoStreams,
-  requestKeyFrame,
-  requestKeyFramesForAllSurfaces,
-  setFrameSink,
-} from '../SurfaceBufferEncoding.js'
+import { requestKeyFrame, requestKeyFramesForAllSurfaces, setFrameSink } from '../SurfaceBufferEncoding.js'
 import { CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
 import { ControlMessage, ViewerTransport, WebSocketViewerTransport } from './ViewerTransport.js'
 
@@ -105,7 +100,7 @@ export class ViewerHost {
     setViewerAttached(true)
     transport.send({
       priority: 'control',
-      message: { type: 'welcome', protocolVersion: PROTOCOL_VERSION, videoStreams: getVideoStreams() },
+      message: { type: 'welcome', protocolVersion: PROTOCOL_VERSION },
     })
     this.scene.attach((message) => transport.send({ priority: 'control', message }))
     this.shellEndpoint?.attach((message) => transport.send({ priority: 'control', message }))

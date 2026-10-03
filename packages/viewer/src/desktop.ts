@@ -1,5 +1,5 @@
 import { Connection } from './connection'
-import { KeyFrameNeeded, SurfaceDecoder, VideoDecoderPool } from './decoder'
+import { KeyFrameNeeded, SurfaceDecoder } from './decoder'
 import { Rect, Renderer } from './gl/renderer'
 import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
 import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
@@ -72,7 +72,6 @@ export class Desktop {
   private output: Size = { width: 0, height: 0 }
   private readonly placementSent = new Set<string>()
   private readonly decoders = new Map<string, SurfaceDecoder>()
-  private readonly decoderPool = new VideoDecoderPool()
   private readonly keyFrameRequested = new Set<string>()
   private cursor: Cursor = { kind: 'default' }
   /** minimized state the viewer asked for, until the server's scene agrees */
@@ -470,23 +469,19 @@ export class Desktop {
         }
         break
       }
-      case 'welcome':
-        // two decoders (opaque and alpha) for every surface the server may stream as video at once
-        this.decoderPool.warm(2 * (message.videoStreams ?? 0))
-        break
     }
   }
 
   private decoderFor(surface: string): SurfaceDecoder {
     let decoder = this.decoders.get(surface)
     if (decoder === undefined) {
-      decoder = new SurfaceDecoder(this.decoderPool)
+      decoder = new SurfaceDecoder()
       this.decoders.set(surface, decoder)
     }
     return decoder
   }
 
-  /** A whole-surface frame (video, or a PNG of a small surface). */
+  /** A whole-surface video frame. */
   handleFrame(surface: string, data: Uint8Array): void {
     const frame = parseEncodedFrame(data)
     this.frameSizes.set(surface, frame.size)

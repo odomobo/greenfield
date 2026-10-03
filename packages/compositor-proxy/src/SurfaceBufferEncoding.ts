@@ -73,7 +73,6 @@ export function setFrameSink(sink: FrameSink): void {
 }
 
 let encodingContext: EncodingContext<Encoder> | undefined
-let videoStreams = DEFAULT_VIDEO_STREAMS
 
 /**
  * Set up the session's video encoder pool (warm, so the first video frame doesn't wait for an encoder) and the
@@ -87,16 +86,11 @@ export function configureEncoding(config: {
   if (encodingContext) {
     return
   }
-  videoStreams = Math.max(0, Math.floor(config.videoStreams ?? DEFAULT_VIDEO_STREAMS))
+  const videoStreams = Math.max(0, Math.floor(config.videoStreams ?? DEFAULT_VIDEO_STREAMS))
   const pool = new EncoderPool(() => new Encoder(config.h264Encoder, config.drmContext), videoStreams)
   pool.warm()
   encodingContext = new EncodingContext(currentSink, pool, encodePng, logger)
   encodingContext.startTicking()
-}
-
-/** The size of the video encoder pool, the viewer warms as many decoders. */
-export function getVideoStreams(): number {
-  return videoStreams
 }
 
 /**

@@ -20,7 +20,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 3
 
 export const enum EnvelopeKind {
   CONTROL = 1,
@@ -61,8 +61,7 @@ export type SceneWindow = {
 }
 
 export type ServerMessage =
-  /** videoStreams: how many surfaces the server streams as video at most at once (its encoder pool size) */
-  | { type: 'welcome'; protocolVersion: number; videoStreams: number }
+  | { type: 'welcome'; protocolVersion: number }
   /** Full snapshot, sent on attach and whenever anything changes. Windows are ordered bottom to top. */
   | { type: 'scene'; windows: SceneWindow[]; focus: string | null }
   | { type: 'cursor'; kind: 'default' | 'hidden' }
@@ -279,7 +278,6 @@ export function decodeEnvelope(data: ArrayBuffer): DecodedEnvelope {
 
 export type EncodedFrame = {
   contentSerial: number
-  mimeType: 'video/h264' | 'image/png'
   /** real image size */
   size: { width: number; height: number }
   /** padded size the encoder used, the image sits in the bottom right corner */
@@ -295,7 +293,7 @@ export function parseEncodedFrame(frame: Uint8Array): EncodedFrame {
   let offset = 8
   const contentSerial = view.getUint32(offset, true)
   offset += 4
-  const encodingType = view.getUint16(offset, true)
+  // encoding type (u16 + padding), always H.264
   offset += 4
   const width = view.getUint32(offset, true)
   offset += 4
@@ -314,7 +312,6 @@ export function parseEncodedFrame(frame: Uint8Array): EncodedFrame {
   const alpha = alphaLength > 0 ? frame.subarray(offset, offset + alphaLength) : undefined
   return {
     contentSerial,
-    mimeType: encodingType === 1 ? 'image/png' : 'video/h264',
     size: { width, height },
     encodedSize: { width: encodedWidth, height: encodedHeight },
     opaque,
@@ -323,17 +320,12 @@ export function parseEncodedFrame(frame: Uint8Array): EncodedFrame {
 }
 
 /**
- * True if a viewer can start decoding the surface's stream at this frame (PNG, or H.264 IDR in every plane).
+ * True if a viewer can start decoding the surface's stream at this frame (H.264 IDR in every plane).
  */
 export function isKeyFrame(frame: Uint8Array): boolean {
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
   // u32 bufferId, u32 creationSerial, u32 contentSerial
   let offset = 12
-  const encodingType = view.getUint16(offset, true)
-  if (encodingType === 1) {
-    // png
-    return true
-  }
   offset += 4 // encoding type (u16 + padding)
   offset += 16 // width, height, encoded width, encoded height
   const opaqueLength = view.getUint32(offset, true)

@@ -3,19 +3,16 @@ import { EncodedFrame, Patch } from './protocol'
 /**
  * A decoded surface frame, ready to upload as textures.
  */
-export type DecodedFrame =
-  | {
-      kind: 'yuv'
-      /** real image size */
-      size: { width: number; height: number }
-      /** padded encoder size, the image sits in its bottom right corner */
-      encodedSize: { width: number; height: number }
-      /** I420 planes of the full coded frame */
-      opaque: YUVPlanes
-      /** luma plane of the alpha stream */
-      alpha?: YUVPlanes
-    }
-  | { kind: 'bitmap'; size: { width: number; height: number }; bitmap: ImageBitmap }
+export type DecodedFrame = {
+  /** real image size */
+  size: { width: number; height: number }
+  /** padded encoder size, the image sits in its bottom right corner */
+  encodedSize: { width: number; height: number }
+  /** I420 planes of the full coded frame */
+  opaque: YUVPlanes
+  /** luma plane of the alpha stream */
+  alpha?: YUVPlanes
+}
 
 /** A decoded lossless update of a rectangle of a surface. */
 export type DecodedPatch = {
@@ -42,113 +39,42 @@ function isKeyFrame(accessUnit: Uint8Array): boolean {
   return false
 }
 
-type DecoderOwner = { onOutput(frame: VideoFrame): void; onError(error: DOMException): void }
-
-/** A configured VideoDecoder whose output goes to whichever stream currently uses it. */
-type PooledDecoder = { decoder: VideoDecoder; owner?: DecoderOwner }
-
-/**
- * Warm video decoders, as many as the server streams video at once (two per stream: opaque and alpha). A stream takes
- * one when its key frame arrives and gives it back when the surface switches to patches. More are made if needed, the
- * server's encoder pool is the real limit.
- */
-export class VideoDecoderPool {
-  private readonly free: PooledDecoder[] = []
-  private target = 0
-
-  /** Keep this many decoders ready. */
-  warm(count: number): void {
-    this.target = count
-    while (this.free.length < this.target) {
-      this.free.push(this.create())
-    }
-  }
-
-  acquire(owner: DecoderOwner): PooledDecoder {
-    let pooled = this.free.pop()
-    while (pooled && pooled.decoder.state === 'closed') {
-      pooled = this.free.pop()
-    }
-    pooled ??= this.create()
-    pooled.owner = owner
-    return pooled
-  }
-
-  /** Give a decoder back. Only when nothing is being decoded with it, or a later owner could get stale output. */
-  release(pooled: PooledDecoder): void {
-    pooled.owner = undefined
-    if (pooled.decoder.state === 'closed') {
-      return
-    }
-    if (this.free.length < this.target) {
-      this.free.push(pooled)
-    } else {
-      pooled.decoder.close()
-    }
-  }
-
-  private create(): PooledDecoder {
-    const pooled: PooledDecoder = {
-      decoder: new VideoDecoder({
-        output: (frame) => (pooled.owner ? pooled.owner.onOutput(frame) : frame.close()),
-        error: (error) => pooled.owner?.onError(error),
-      }),
-    }
-    pooled.decoder.configure(decoderConfig)
-    return pooled
-  }
-}
-
 /**
  * Decodes one H.264 stream into I420 planes, one frame at a time.
  */
-class StreamDecoder implements DecoderOwner {
-  private lease?: PooledDecoder
+class StreamDecoder {
+  private decoder?: VideoDecoder
   private pending: { resolve: (planes: YUVPlanes) => void; reject: (error: Error) => void }[] = []
-
-  constructor(private readonly pool: VideoDecoderPool) {}
 
   async decode(accessUnit: Uint8Array): Promise<YUVPlanes> {
     const key = isKeyFrame(accessUnit)
-    if (this.lease === undefined || this.lease.decoder.state === 'closed') {
+    if (this.decoder === undefined || this.decoder.state === 'closed') {
       if (!key) {
         throw new KeyFrameNeeded()
       }
-      this.lease = this.pool.acquire(this)
+      this.decoder = new VideoDecoder({
+        output: (frame) => this.onOutput(frame),
+        error: (error) => this.onError(error),
+      })
+      this.decoder.configure(decoderConfig)
     }
     const result = new Promise<YUVPlanes>((resolve, reject) => this.pending.push({ resolve, reject }))
-    this.lease.decoder.decode(new EncodedVideoChunk({ timestamp: 0, type: key ? 'key' : 'delta', data: accessUnit }))
+    this.decoder.decode(new EncodedVideoChunk({ timestamp: 0, type: key ? 'key' : 'delta', data: accessUnit }))
     return result
   }
 
-  /** The stream ended (the surface switched to patches): give the decoder back, the next stream starts with a key. */
-  release() {
-    if (this.lease && this.pending.length === 0) {
-      this.pool.release(this.lease)
-      this.lease = undefined
-    }
-  }
-
   close() {
-    if (this.lease) {
-      if (this.pending.length) {
-        // output for this stream may still come, don't hand the decoder to someone else
-        this.lease.owner = undefined
-        if (this.lease.decoder.state !== 'closed') {
-          this.lease.decoder.close()
-        }
-      } else {
-        this.pool.release(this.lease)
-      }
+    if (this.decoder && this.decoder.state !== 'closed') {
+      this.decoder.close()
     }
-    this.lease = undefined
+    this.decoder = undefined
     for (const pending of this.pending) {
       pending.reject(new Error('Decoder closed.'))
     }
     this.pending = []
   }
 
-  async onOutput(frame: VideoFrame) {
+  private async onOutput(frame: VideoFrame) {
     const pending = this.pending.shift()
     try {
       if (frame.format !== 'I420') {
@@ -176,14 +102,10 @@ class StreamDecoder implements DecoderOwner {
     }
   }
 
-  onError(error: DOMException) {
+  private onError(error: DOMException) {
     const pending = this.pending
     this.pending = []
-    // a decoder that failed is closed, it doesn't go back to the pool
-    if (this.lease) {
-      this.lease.owner = undefined
-    }
-    this.lease = undefined
+    this.decoder = undefined
     for (const p of pending) {
       p.reject(new Error(error.message))
     }
@@ -200,14 +122,9 @@ export class KeyFrameNeeded extends Error {
  * Decodes the frames and patches of one surface, strictly in order.
  */
 export class SurfaceDecoder {
-  private readonly opaque: StreamDecoder
-  private readonly alpha: StreamDecoder
+  private readonly opaque = new StreamDecoder()
+  private readonly alpha = new StreamDecoder()
   private queue: Promise<unknown> = Promise.resolve()
-
-  constructor(pool: VideoDecoderPool) {
-    this.opaque = new StreamDecoder(pool)
-    this.alpha = new StreamDecoder(pool)
-  }
 
   decode(frame: EncodedFrame): Promise<DecodedFrame> {
     return this.enqueue(() => this.decodeNow(frame))
@@ -215,9 +132,8 @@ export class SurfaceDecoder {
 
   decodePatch(patch: Patch): Promise<DecodedPatch> {
     return this.enqueue(async () => {
-      // the surface is on patches now, its video stream (if any) is over
-      this.opaque.release()
-      this.alpha.release()
+      // the surface is on patches now, its video stream (if any) is over: the next one starts with a key frame
+      this.close()
       const blob = new Blob([patch.png], { type: 'image/png' })
       // the exact pixels: no color space conversion, no premultiplication round trip
       const bitmap = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
@@ -239,24 +155,12 @@ export class SurfaceDecoder {
   }
 
   private async decodeNow(frame: EncodedFrame): Promise<DecodedFrame> {
-    if (frame.mimeType === 'image/png') {
-      const blob = new Blob([frame.opaque], { type: 'image/png' })
-      const bitmap = await createImageBitmap(
-        blob,
-        frame.encodedSize.width - frame.size.width,
-        frame.encodedSize.height - frame.size.height,
-        frame.size.width,
-        frame.size.height,
-      )
-      return { kind: 'bitmap', size: frame.size, bitmap }
-    }
-
     try {
       const [opaque, alpha] = await Promise.all([
         this.opaque.decode(frame.opaque),
         frame.alpha ? this.alpha.decode(frame.alpha) : Promise.resolve(undefined),
       ])
-      return { kind: 'yuv', size: frame.size, encodedSize: frame.encodedSize, opaque, alpha }
+      return { size: frame.size, encodedSize: frame.encodedSize, opaque, alpha }
     } catch (e) {
       // start over from the next key frame
       this.close()
