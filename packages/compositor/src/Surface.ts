@@ -39,7 +39,6 @@ import Region, {
   initInfinite,
   initRect,
 } from './Region'
-import { FrameDecoder, H264DecoderContext } from './remote/buffer-decoder'
 import { CompositorRenderer } from './render/CompositorRenderer'
 import Session from './Session'
 import { Size, sizeEquals } from './math/Size'
@@ -104,7 +103,6 @@ const bufferTransformations = [
   { transformation: FLIPPED_270, inverseTransformation: invert(FLIPPED_270) } as const, // 7
 ] as const
 
-let surfaceH264DecodeId = 0
 
 class Surface implements WlSurfaceRequests {
   readonly surfaceChildSelf: SurfaceChild = createSurfaceChild(this)
@@ -159,16 +157,13 @@ class Surface implements WlSurfaceRequests {
   private _surfaceChildren: SurfaceChild[] = []
   mapped = false
 
-  // set by a remote out of band message, used by remote streaming buffers
+  // set by an out of band message from the proxy
   readonly commitSerials: number[] = []
 
   private constructor(
     public readonly resource: WlSurfaceResource,
     public readonly renderer: CompositorRenderer,
     public readonly session: Session,
-    public readonly encoderFeedback = resource.client.userData.clientEncodersFeedback?.ensureSurfaceEncoderFeedback(
-      resource.id,
-    ),
   ) {}
 
   private _parent?: Surface
@@ -181,17 +176,6 @@ class Surface implements WlSurfaceRequests {
     if (this._parent !== parent) {
       this._parent = parent
       this.role?.view.markDirty()
-    }
-  }
-
-  private h264DecoderContext?: H264DecoderContext
-
-  getH264DecoderContext(frameDecoder: FrameDecoder): H264DecoderContext {
-    if (this.h264DecoderContext === undefined) {
-      this.h264DecoderContext = frameDecoder.createH264DecoderContext(this, `${surfaceH264DecodeId++}`)
-      return this.h264DecoderContext
-    } else {
-      return this.h264DecoderContext
     }
   }
 
@@ -484,11 +468,9 @@ class Surface implements WlSurfaceRequests {
   }
 
   private handleDestruction() {
-    this.encoderFeedback?.destroy()
     this.parent?.removeChild(this.surfaceChildSelf)
     this.destroyed = true
     this.role?.view?.destroy()
-    this.h264DecoderContext?.destroy()
   }
 
   get geometry(): RectWithInfo {

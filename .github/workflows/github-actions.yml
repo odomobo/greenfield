@@ -37,10 +37,3 @@ jobs:
 
       - name: Build
         run: yarn workspaces foreach --parallel --topological-dev run build
-
-      - name: Deploy Compositor Shell
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy packages/compositor-shell/dist --project-name=greenfield

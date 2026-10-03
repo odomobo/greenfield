@@ -33,15 +33,9 @@ export interface UserShellApiEvents {
   surfaceActivationUpdated?: (compositorSurface: CompositorSurface, active: boolean) => void
 
   notify?: (variant: 'warn' | 'info' | 'error', message: string) => void
-
-  sceneRefreshed?: (sceneId: string) => void
 }
 
 export interface UserShellApiActions {
-  initScene(canvasCreator: () => { canvas: HTMLCanvasElement; id: string }): void
-  refreshScene(): void
-  destroyScene(sceneId: string): void
-
   setUserConfiguration(userConfiguration: Partial<CompositorConfiguration>): void
 
   closeClient(applicationClient: Pick<CompositorClient, 'id'>): void
@@ -73,12 +67,6 @@ export function createUserShellApi(session: Session): UserShellApi {
         const surface = lookupSurface(session, compositorSurface)
         surface.role?.desktopSurface?.activate()
       },
-      initScene: (canvasCreator: () => { canvas: HTMLCanvasElement; id: string }) =>
-        session.platform.initScene(session, canvasCreator),
-      refreshScene: () => {
-        session.renderer.render()
-      },
-      destroyScene: (sceneId) => session.renderer.scenes[sceneId].destroy(),
       setUserConfiguration: (userConfiguration) => {
         const { pointer, keyboard } = session.globals.seat
         pointer.scrollFactor = userConfiguration.scrollFactor ?? pointer.scrollFactor

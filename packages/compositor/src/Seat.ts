@@ -36,7 +36,7 @@ import {
 } from '@gfld/compositor-protocol'
 
 import { DesktopSurface } from './desktop/Desktop'
-import type { AxisEvent, ButtonEvent, CompositorSeat, KeyEvent, nrmlvo } from './index'
+import type { AxisEvent, ButtonEvent, KeyEvent, nrmlvo } from './index'
 import { Keyboard, KeyboardGrab } from './Keyboard'
 
 import { DragIconRole, Pointer, PointerDrag, PointerGrab } from './Pointer'
@@ -151,7 +151,7 @@ export class PopupGrab implements KeyboardGrab, PointerGrab {
   }
 }
 
-export class Seat implements WlSeatRequests, CompositorSeat, WlDataDeviceRequests {
+export class Seat implements WlSeatRequests, WlDataDeviceRequests {
   readonly pointer: Pointer
   readonly keyboard: Keyboard
   readonly touch?: Touch

@@ -1,13 +1,12 @@
 import { queueCancellableMicrotask } from '../Loop'
 import { Point } from '../math/Point'
 import { CompositorRenderer } from '../render/CompositorRenderer'
-import type { Scene } from '../render/Scene'
 import { SceneGraph } from '../render/SceneGraph'
 import Session from '../Session'
 import Surface from '../Surface'
 import View from '../View'
 import BufferImplementation from '../BufferImplementation'
-import type { CursorType } from '../browser/pointer'
+import type { CursorType } from '../render/CompositorRenderer'
 
 /**
  * Headless renderer. Keeps the scene graph (stacking, view transformations) up to date but draws nothing. Pixels are
@@ -21,7 +20,6 @@ export type ServerCursor =
 
 export class ServerRenderer implements CompositorRenderer {
   readonly sceneGraph: SceneGraph = new SceneGraph(() => this.render())
-  readonly scenes: { [key: string]: Scene } = {}
   renderFrame?: Promise<void>
   /**
    * The viewer does hit testing. While set, pickView returns its pick instead of searching the scene.

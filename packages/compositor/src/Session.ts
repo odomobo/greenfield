@@ -19,8 +19,7 @@ import { Display } from '@gfld/compositor-protocol'
 import Globals from './Globals'
 import type { RemoteWindowManager } from './desktop/Desktop'
 import { ButtonCode } from './ButtonEvent'
-import type { CompositorSession, SessionConfig } from './index'
-import { FrameDecoder } from './remote/buffer-decoder'
+import type { SessionConfig } from './index'
 import { CompositorRenderer } from './render/CompositorRenderer'
 import { CompositorPlatform } from './Platform'
 import { createUserShellApi, UserShellApi } from './UserShellApi'
@@ -89,13 +88,10 @@ export type GreenfieldLogger = {
    */
   trace: LogFn
 }
-export type FrameDecoderFactory = (session: Session) => FrameDecoder
-
-class Session implements CompositorSession {
+class Session {
   readonly globals: Globals
   readonly renderer: CompositorRenderer
   readonly userShell: UserShellApi
-  public readonly frameDecoder: FrameDecoder
   public readonly inputQueue: InputQueue
   /**
    * Set when window management (move, resize, placement) is done by an external viewer.
@@ -111,7 +107,6 @@ class Session implements CompositorSession {
     this.globals = Globals.create(this)
     this.renderer = platform.createRenderer(this)
     this.userShell = createUserShellApi(this)
-    this.frameDecoder = platform.createFrameDecoder(this)
     this.inputQueue = new InputQueue(this)
   }
 

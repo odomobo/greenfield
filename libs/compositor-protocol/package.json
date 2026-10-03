@@ -25,10 +25,9 @@
     "url": "https://github.com/udevbe/greenfield/tree/master/libs/web/compositor/protocol"
   },
   "scripts": {
-    "generate:webbuffer": "yarn run compositor-generator ../../protocol/web-bitmapbuf-unstable-v1.xml -o src/protocol",
     "generate:xdgshell": "yarn run compositor-generator ../../protocol/xdg-shell.xml -o src/protocol",
     "generate:wayland": "yarn run compositor-generator ../../protocol/wayland.xml -o src/protocol",
-    "generate": "yarn run rimraf dist types && yarn run mkdirp src/protocol/ && yarn generate:wayland && yarn generate:xdgshell && yarn generate:webbuffer",
+    "generate": "yarn run rimraf dist types && yarn run mkdirp src/protocol/ && yarn generate:wayland && yarn generate:xdgshell",
     "build": "yarn run tsc"
   },
   "dependencies": {

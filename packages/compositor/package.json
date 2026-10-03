@@ -1,51 +1,34 @@
 {
   "name": "@gfld/compositor",
   "version": "1.0.0-rc1",
-  "description": "A Wayland HTML5 Compositor.",
+  "description": "Wayland compositor core, runs server-side inside a session process.",
   "keywords": [
     "linux",
     "wayland",
-    "javascript",
     "typescript",
     "compositor",
-    "html5",
-    "browser",
-    "canvas",
-    "webgl",
-    "websocket",
-    "remote",
-    "web"
+    "remote"
   ],
-  "main": "dist/index.js",
-  "typings": "types/index.d.ts",
   "files": [
-    "dist",
-    "types"
+    "dist-server"
   ],
   "scripts": {
-    "prebuild": "yarn run rimraf dist types",
-    "build": "yarn run tsc && yarn run cpy './src/assets/**' './dist/assets/' && yarn run build:server",
-    "watch": "yarn run build && yarn run tsc -w",
+    "build": "yarn run tsc --noEmit && yarn run build:server",
     "build:server": "yarn run esbuild src/server/index.ts --bundle --platform=node --format=esm --sourcemap --outfile=dist-server/index.mjs"
   },
   "dependencies": {
     "@gfld/common": "workspace:^",
-    "@gfld/compositor-ffmpeg-h264": "workspace:^",
     "@gfld/compositor-protocol": "workspace:^",
-    "@gfld/compositor-wasm": "workspace:^",
-    "@gfld/xtsb": "workspace:^"
+    "@gfld/compositor-wasm": "workspace:^"
   },
   "devDependencies": {
-    "@types/dom-webcodecs": "^0.1.11",
     "@typescript-eslint/eslint-plugin": "^7.14.1",
     "@typescript-eslint/parser": "^7.14.1",
-    "cpy-cli": "^5.0.0",
     "esbuild": "0.21.5",
     "eslint": "^8.57.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-prettier": "^5.1.3",
     "prettier": "^3.3.2",
-    "rimraf": "^5.0.7",
     "typescript": "^5.5.2"
   },
   "author": "Erik De Rijcke",

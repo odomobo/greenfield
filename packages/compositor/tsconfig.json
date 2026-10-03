@@ -4,9 +4,8 @@
     "target": "ES2020",
     "module": "ES2020",
     "lib": [
-      "ES2020",
-      "DOM",
-      "DOM.Iterable"
+      "ES2022",
+      "DOM"
     ],
     "allowJs": true,
     "checkJs": false,

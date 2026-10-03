@@ -1,6 +1,5 @@
 import { Size } from './math/Size'
 import type { CompositorRenderer } from './render/CompositorRenderer'
-import type { FrameDecoder } from './remote/buffer-decoder'
 import type Session from './Session'
 
 /**
@@ -10,7 +9,6 @@ import type Session from './Session'
 export interface CompositorPlatform {
   createRenderer(session: Session): CompositorRenderer
 
-  createFrameDecoder(session: Session): FrameDecoder
 
   /**
    * Resolves on the next display frame. Used to batch input.
@@ -28,10 +26,6 @@ export interface CompositorPlatform {
    */
   keyboardLanguage(): string
 
-  /**
-   * Attach a browser canvas as an output. Browser only.
-   */
-  initScene(session: Session, canvasCreator: () => { canvas: HTMLCanvasElement; id: string }): void
 
   readonly hasTouch: boolean
   readonly userAgent: string

@@ -19,20 +19,16 @@ import { IDENTITY, invert, Mat4, timesMat4, timesPoint, timesRectToBoundingBox, 
 import { minusPoint, ORIGIN, plusPoint, Point } from './math/Point'
 import { RectWithInfo, withSizeAndPosition } from './math/Rect'
 import { createPixmanRegion, fini, initRect } from './Region'
-import type RenderState from './render/RenderState'
-import type { Scene } from './render/Scene'
 import Surface from './Surface'
 
 export default class View {
   readonly pixmanRegion: number = createPixmanRegion()
-  relevantScene?: Scene
   regionRect: RectWithInfo = withSizeAndPosition({
     x0: 0,
     y0: 0,
     x1: 0,
     y1: 0,
   })
-  prepareRender?: (renderState: RenderState) => void
   private inverseTransformation: Mat4
   private readonly destroyPromise: Promise<void>
   // @ts-ignore
@@ -41,7 +37,6 @@ export default class View {
   private constructor(
     public readonly surface: Surface,
     private _transformation: Mat4 = IDENTITY,
-    public renderStates: { [sceneId: string]: RenderState } = {},
     private _positionOffset: Point = { x: 0, y: 0 },
     public destroyed = false,
     public mapped = true,

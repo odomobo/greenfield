@@ -21,7 +21,7 @@ import {
   WlKeyboardRequests,
   WlKeyboardResource,
 } from '@gfld/compositor-protocol'
-import type { CompositorKeyboard, KeyCode } from './index'
+import type { KeyCode } from './index'
 import { KeyEvent } from './KeyEvent'
 import { Seat, KeyboardLocks } from './Seat'
 import Surface from './Surface'
@@ -57,7 +57,7 @@ export interface KeyboardGrab {
   cancel(): void
 }
 
-export class Keyboard implements WlKeyboardRequests, CompositorKeyboard {
+export class Keyboard implements WlKeyboardRequests {
   static create(seat: Seat): Keyboard {
     const nrmlvoEntries = buildNrmlvoEntries()
 

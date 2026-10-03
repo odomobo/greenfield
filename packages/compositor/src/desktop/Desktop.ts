@@ -3,7 +3,6 @@ import Surface from '../Surface'
 import { RectWithInfo } from '../math/Rect'
 import { Size } from '../math/Size'
 import SurfaceRole from '../SurfaceRole'
-import { AlwaysFullscreenDesktopSurface } from './AlwaysFullScreenDesktopSurface'
 import { FloatingDesktopSurface } from './FloatingDesktopSurface'
 
 export interface DesktopSurfaceRole extends SurfaceRole {
@@ -66,11 +65,5 @@ export interface DesktopSurface {
 }
 
 export function createDesktopSurface(surface: Surface, desktopSurfaceRole: DesktopSurfaceRole): DesktopSurface {
-  switch (surface.session.config.mode) {
-    case 'experimental-fullscreen':
-      return new AlwaysFullscreenDesktopSurface(surface, desktopSurfaceRole)
-    case 'floating':
-    default:
-      return new FloatingDesktopSurface(surface, desktopSurfaceRole)
-  }
+  return new FloatingDesktopSurface(surface, desktopSurfaceRole)
 }

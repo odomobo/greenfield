@@ -1,8 +1,6 @@
 import { Point } from '../math/Point'
 import Surface from '../Surface'
 import View from '../View'
-import type { Scene } from './Scene'
-import type { CursorType } from '../browser/pointer'
 import { SceneGraph } from './SceneGraph'
 
 /**
@@ -11,11 +9,6 @@ import { SceneGraph } from './SceneGraph'
  */
 export interface CompositorRenderer {
   readonly sceneGraph: SceneGraph
-  /**
-   * Browser outputs (canvases). Always empty on the server.
-   * TODO replace with logical outputs reported by the viewer, so maximize/fullscreen work server-side.
-   */
-  readonly scenes: { [key: string]: Scene }
   readonly topLevelViews: View[]
   renderFrame?: Promise<void>
 
@@ -53,3 +46,46 @@ export interface CompositorRenderer {
 
   onViewDestroyed(view: View): void
 }
+
+/**
+ * CSS cursor names, used for compositor defined cursors (e.g. during interactive resize).
+ */
+export type CursorType =
+  | 'default'
+  | 'unset'
+  | 'inherit'
+  | 'none'
+  | 'context-menu'
+  | 'help'
+  | 'pointer'
+  | 'progress'
+  | 'wait'
+  | 'cell'
+  | 'crosshair'
+  | 'text'
+  | 'vertical-text'
+  | 'alias'
+  | 'copy'
+  | 'move'
+  | 'no-drop'
+  | 'not-allowed'
+  | 'all_scroll'
+  | 'col-resize'
+  | 'row-resize'
+  | 'n-resize'
+  | 'e-resize'
+  | 's-resize'
+  | 'w-resize'
+  | 'ne-resize'
+  | 'nw-resize'
+  | 'se-resize'
+  | 'sw-resize'
+  | 'ew-resize'
+  | 'ns-resize'
+  | 'nesw-resize'
+  | 'nwse-resize'
+  | 'zoom-in'
+  | 'zoom-out'
+  | 'grab'
+  | 'grabbing'
+  | 'all-scroll'

@@ -326,12 +326,7 @@ export class FloatingDesktopSurface implements DesktopSurface {
    * Size of the output this window is on.
    */
   private outputSize(): Size {
-    // FIXME views should have their relevant scene set explicitly based on their location instead of re-calculated each time.
-    const scene = this.role.view.relevantScene ?? Object.values(this.surface.session.renderer.scenes)[0]
-    if (scene) {
-      return { width: scene.canvas.width, height: scene.canvas.height }
-    }
-    // no browser canvas (server-side compositor): the viewer's output
+    // TODO multiple outputs: the output the window is on
     return this.surface.session.platform.viewportSize()
   }
 

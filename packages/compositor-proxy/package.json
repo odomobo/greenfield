@@ -26,7 +26,6 @@
     "watch": "yarn run build && yarn run tsc -w"
   },
   "dependencies": {
-    "@gfld/xtsb": "workspace:^",
     "ws": "^8.17.1"
   },
   "devDependencies": {
