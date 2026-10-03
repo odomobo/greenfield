@@ -47,7 +47,11 @@ function sessionInfo({ id, name, createdAt }: SessionEntry): SessionInfo {
 }
 
 const pamHelperPath = path.resolve(__dirname, 'pam-helper')
-const sessionProcessPath = path.resolve(__dirname, 'session-process.js')
+// GFLD_WLROOTS=1: sessions run on the wlroots prototype (ROADMAP.md, Core item 1) instead of the libwayland fork
+const sessionProcessPath = path.resolve(
+  __dirname,
+  process.env.GFLD_WLROOTS === '1' ? 'session-process-wlroots.js' : 'session-process.js',
+)
 
 export class Monitor {
   private readonly tickets = new Map<string, Ticket>()

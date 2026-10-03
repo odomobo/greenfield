@@ -1,89 +1,11 @@
 import { destroyWlResourceSilently, flush, sendEvents, WlClient } from './wayland-server.js'
-import { performance } from 'node:perf_hooks'
+import { ProcessingDuration, scheduleFrameCallback } from './FramePacing.js'
 
-let tickInterval = 16.667
-let nextTickInterval = tickInterval
-let feedbackClockTimer: NodeJS.Timeout | undefined
-type Feedback = { callback: (time: number) => void; frameCallbackDelay: number }
-let feedbackClockQueue: Feedback[] = []
-
-function configureFramePipelineTicks(interval: number) {
-  if (feedbackClockTimer) {
-    return
-  }
-
-  tickInterval = interval
-  feedbackClockTimer = setInterval(() => {
-    if (feedbackClockQueue.length) {
-      const time = performance.now() >>> 0
-      for (const feedback of feedbackClockQueue) {
-        feedback.frameCallbackDelay -= tickInterval
-        if (feedback.frameCallbackDelay <= 0) {
-          feedback.callback(time)
-        }
-      }
-      feedbackClockQueue = feedbackClockQueue.filter((feedback) => feedback.frameCallbackDelay > 0)
-    }
-
-    if (tickInterval !== nextTickInterval) {
-      if (feedbackClockTimer) {
-        clearInterval(feedbackClockTimer)
-        feedbackClockTimer = undefined
-      }
-      configureFramePipelineTicks(nextTickInterval)
-    }
-  }, tickInterval)
-}
-
-configureFramePipelineTicks(nextTickInterval)
-
-/**
- * Frame callback pacing shared by all surfaces of the session, driven by the attached viewer.
- */
-const viewerPacing = {
-  attached: false,
-  /** ms the viewer needs to decode a frame */
-  decodeDuration: 0,
-  lastFeedbackTimestamp: 0,
-}
-
-/**
- * Without a viewer (or one that stopped reporting), apps are throttled to roughly this frame callback interval so they
- * keep working but don't burn CPU rendering frames nobody sees.
- */
-const DETACHED_FRAME_CALLBACK_DELAY = 1000
-const VIEWER_FEEDBACK_TIMEOUT = 1500
-const DETACHED_TICK_INTERVAL = 100
-
-export function setViewerAttached(attached: boolean): void {
-  viewerPacing.attached = attached
-  viewerPacing.lastFeedbackTimestamp = performance.now()
-  if (!attached) {
-    nextTickInterval = DETACHED_TICK_INTERVAL
-  }
-}
-
-export function onViewerFeedback(refreshInterval: number, decodeDuration: number): void {
-  viewerPacing.lastFeedbackTimestamp = performance.now()
-  viewerPacing.decodeDuration = decodeDuration
-  if (refreshInterval > 0) {
-    nextTickInterval = Math.floor(refreshInterval)
-    if (Math.abs(tickInterval - nextTickInterval) > 500 && feedbackClockTimer) {
-      clearInterval(feedbackClockTimer)
-      feedbackClockTimer = undefined
-      configureFramePipelineTicks(nextTickInterval)
-    }
-  }
-}
-
-function viewerIsPacing(): boolean {
-  return viewerPacing.attached && performance.now() - viewerPacing.lastFeedbackTimestamp < VIEWER_FEEDBACK_TIMEOUT
-}
+export { onViewerFeedback, setViewerAttached } from './FramePacing.js'
 
 export class FrameFeedback {
-  private serverProcessingDurations: number[] = []
   private destroyed = false
-  private avgServerProcessingDuration = 0
+  private readonly processingDuration = new ProcessingDuration()
 
   constructor(
     private wlClient: WlClient,
@@ -95,29 +17,16 @@ export class FrameFeedback {
   }
 
   commitNotify(frameCallbacksIds: number[]): void {
-    feedbackClockQueue.push({
-      callback: (time) => {
-        if (this.destroyed) {
-          return
-        }
-        this.sendFrameDoneEventsWithCallbacks(time, frameCallbacksIds)
-      },
-      frameCallbackDelay: viewerIsPacing()
-        ? Math.floor(Math.max(this.avgServerProcessingDuration, viewerPacing.decodeDuration))
-        : DETACHED_FRAME_CALLBACK_DELAY,
+    scheduleFrameCallback(this.processingDuration.average, (time) => {
+      if (this.destroyed) {
+        return
+      }
+      this.sendFrameDoneEventsWithCallbacks(time, frameCallbacksIds)
     })
   }
 
   encodingDone(commitTimestamp: number): void {
-    this.serverProcessingDurations.push(performance.now() - commitTimestamp)
-    if (this.serverProcessingDurations.length > 60) {
-      this.serverProcessingDurations.shift()
-    }
-    let serverProcessingDurationSum = 0
-    for (const serverProcessingDuration of this.serverProcessingDurations) {
-      serverProcessingDurationSum += serverProcessingDuration
-    }
-    this.avgServerProcessingDuration = serverProcessingDurationSum / this.serverProcessingDurations.length
+    this.processingDuration.record(commitTimestamp)
   }
 
   sendFrameDoneEventsWithCallbacks(frameDoneTimestamp: number, frameCallbackIds: number[]) {

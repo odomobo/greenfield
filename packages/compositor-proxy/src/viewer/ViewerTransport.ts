@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws'
 import { Socket } from 'node:net'
 import { createLogger } from '../Logger.js'
-import { setSocketSendBuffer, setTcpNotSentLowat } from '../wayland-server.js'
+import { setSocketSendBuffer, setTcpNotSentLowat } from '../socket-options.js'
 import { decodeControl, encodeControl, encodeFrame, encodePatch, isKeyFrame, Patch } from './protocol.js'
 
 const logger = createLogger('viewer-transport')

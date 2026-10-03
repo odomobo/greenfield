@@ -7,6 +7,7 @@ import { Session } from './Session.js'
 import { getBufferSize } from './wayland-server.js'
 import { ProxyFD } from './io/types.js'
 import { ViewerHost, WindowSceneEndpoint } from './viewer/ViewerHost.js'
+import { requestKeyFrame, requestKeyFramesForAllSurfaces, setFrameSink } from './SurfaceBufferEncoding.js'
 
 const logger = createLogger('in-process-compositor')
 
@@ -60,7 +61,13 @@ export async function startServerCompositor(session: Session): Promise<{ viewerH
   setProtocolChannelConnector((channel) => connectProtocolChannel(channel, session, serverCompositor))
 
   logger.info(`Server-side compositor started.`)
-  return { viewerHost: new ViewerHost(serverCompositor.scene) }
+  return {
+    viewerHost: new ViewerHost(serverCompositor.scene, {
+      setFrameSink,
+      requestKeyFrame,
+      requestKeyFramesForAllSurfaces,
+    }),
+  }
 }
 
 function connectProtocolChannel(channel: InProcessChannel, session: Session, serverCompositor: ServerCompositor) {

@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws'
 import { createLogger } from '../Logger.js'
-import { onViewerFeedback, setViewerAttached } from '../FrameFeedback.js'
-import { requestKeyFrame, requestKeyFramesForAllSurfaces, setFrameSink } from '../SurfaceBufferEncoding.js'
+import { onViewerFeedback, setViewerAttached } from '../FramePacing.js'
+import type { EncodingSink } from '../encoding/SurfaceEncoder.js'
 import { CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
 import { ControlMessage, ViewerTransport, WebSocketViewerTransport } from './ViewerTransport.js'
 
@@ -19,6 +19,19 @@ export interface WindowSceneEndpoint {
 
   /** Input, window management and output messages from the viewer. */
   handleMessage(message: ControlMessage): void
+}
+
+/**
+ * The session's surface contents (its encoders): where encoded frames and patches go, and resending a surface's whole
+ * content. Implemented by SurfaceBufferEncoding.ts (libwayland fork) and wlroots/WlrCompositor.ts (prototype).
+ */
+export interface SurfaceContent {
+  setFrameSink(sink: EncodingSink): void
+
+  /** Send the whole current content of a surface again (a video key frame or a full set of patches). */
+  requestKeyFrame(surface: string): void
+
+  requestKeyFramesForAllSurfaces(): void
 }
 
 /**
@@ -41,9 +54,12 @@ export class ViewerHost {
   private transport?: ViewerTransport
   private shellEndpoint?: ShellEndpoint
 
-  constructor(private readonly scene: WindowSceneEndpoint) {
+  constructor(
+    private readonly scene: WindowSceneEndpoint,
+    private readonly content: SurfaceContent,
+  ) {
     const isAttached = () => this.transport !== undefined
-    setFrameSink({
+    content.setFrameSink({
       get active() {
         return isAttached()
       },
@@ -83,7 +99,7 @@ export class ViewerHost {
 
     const transport = new WebSocketViewerTransport(ws)
     this.transport = transport
-    transport.onKeyFrameNeeded = (surface) => requestKeyFrame(surface)
+    transport.onKeyFrameNeeded = (surface) => this.content.requestKeyFrame(surface)
     transport.onMessage = (message) => this.onMessage(transport, message)
     transport.onClose = (code, reason) => {
       if (this.transport !== transport) {
@@ -105,7 +121,7 @@ export class ViewerHost {
     this.scene.attach((message) => transport.send({ priority: 'control', message }))
     this.shellEndpoint?.attach((message) => transport.send({ priority: 'control', message }))
     // the viewer has nothing yet, every surface starts with its whole current content (key frame or patches)
-    requestKeyFramesForAllSurfaces()
+    this.content.requestKeyFramesForAllSurfaces()
   }
 
   private onMessage(transport: ViewerTransport, message: ControlMessage) {
@@ -116,7 +132,7 @@ export class ViewerHost {
       case 'keyframe':
         if (typeof message.surface === 'string') {
           transport.requireKeyFrame(message.surface)
-          requestKeyFrame(message.surface)
+          this.content.requestKeyFrame(message.surface)
         }
         break
       default:

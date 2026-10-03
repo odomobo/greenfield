@@ -1,6 +1,7 @@
 /**
- * Socket tuning helpers, importable without loading the rest of the proxy (used by the gateway's web process).
+ * Socket tuning helpers, importable without loading the rest of the proxy (used by the gateway's web process). They
+ * live in the small poll addon, which doesn't link libwayland.
  */
-import westfieldAddon from './addons/wayland-server-addon'
+import pollAddon from './addons/proxy-poll-addon'
 
-export const { setTcpNotSentLowat, setSocketSendBuffer } = westfieldAddon
+export const { setTcpNotSentLowat, setSocketSendBuffer } = pollAddon
