@@ -16,7 +16,7 @@ everything.
 
 Query parameters:
 
-- `test=1` expose test hooks (`window.__viewerTest`), used by `scripts/test-gateway.sh`
+- `test=1` expose test hooks (`window.__viewerTest`), used by `scripts/e2e/desktop.sh`
 
 ## Desktop shell
 

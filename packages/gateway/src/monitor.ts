@@ -102,6 +102,7 @@ export class Monitor {
       allowedOrigins: config.allowedOrigins,
       viewerDir: config.viewerDir,
       devMode: config.authMode === 'dev',
+      timeScale: config.timeScale,
     }
     // the web process owns the listening socket from now on; closing our copy only after the handle was passed
     child.send(start, listener, () => listener.close())
