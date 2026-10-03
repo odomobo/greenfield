@@ -80,7 +80,7 @@ export function createNativeClientSession(
     for (const destroyListener of nativeClientSession.destroyListeners) {
       destroyListener()
     }
-    nativeAppContext.sendClientConnectionsDisconnect()
+    nativeAppContext.sendClientConnectionsDisconnect(nativeClientSession.id)
     nativeClientSession.destroyListeners = []
     nativeClientSession.destroyed = true
   })

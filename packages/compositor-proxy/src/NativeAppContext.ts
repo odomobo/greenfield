@@ -185,9 +185,13 @@ export class NativeAppContext {
     this.signalingSend(textEncoder.encode(JSON.stringify(clientDisconnect)))
   }
 
-  sendClientConnectionsDisconnect() {
+  sendClientConnectionsDisconnect(clientId: string) {
+    // Only disconnect the channels of this client. An app can have several Wayland connections, e.g. Mesa opens a
+    // short-lived one while probing EGL, and closing one must not take down the others.
     for (const channel of Object.values(this.channels)) {
-      this.sendChannelDisconnect(channel)
+      if (channel.desc.clientId === clientId) {
+        this.sendChannelDisconnect(channel)
+      }
     }
   }
 
