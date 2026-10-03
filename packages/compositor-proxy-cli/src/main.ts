@@ -142,13 +142,16 @@ function main() {
   const host = config.server.http.bindIP
 
   server.on('listening', () => {
-    process.on('SIGTERM', () => {
-      logger.info('Received SIGTERM. Closing connections.')
+    const shutdown = (signal: string) => {
+      logger.info(`Received ${signal}. Stopping sessions.`)
       server.closeAllConnections()
-      // TODO gracefully terminate child processes
-      logger.info('All Connections closed. Goodbye.')
-      process.exit()
-    })
+      for (const childProcess of Object.values(sessionProcesses)) {
+        childProcess.kill('SIGTERM')
+      }
+      setTimeout(() => process.exit(), 1000)
+    }
+    process.once('SIGTERM', () => shutdown('SIGTERM'))
+    process.once('SIGINT', () => shutdown('SIGINT'))
 
     logger.info(`Compositor proxy started. Listening on ${host}:${port}`)
   })

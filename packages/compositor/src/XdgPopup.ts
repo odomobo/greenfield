@@ -24,6 +24,7 @@ import {
 } from '@gfld/compositor-protocol'
 import { createDesktopSurface, DesktopSurface, DesktopSurfaceRole } from './desktop/Desktop'
 
+import { minusPoint, Point } from './math/Point'
 import { RectWithInfo } from './math/Rect'
 import { Size, ZERO_SIZE } from './math/Size'
 import { Seat } from './Seat'
@@ -47,6 +48,8 @@ export default class XdgPopup implements XdgPopupRequests, SurfaceRole, DesktopS
     public readonly positionerState: XdgPositionerState,
     public readonly view: View,
     public readonly geometry: RectWithInfo,
+    /** where the popup's window geometry goes, in the parent's surface space */
+    private readonly surfaceSpacePosition: Point,
   ) {
     this.desktopSurface = createDesktopSurface(view.surface, this)
     this.desktopSurface.init()
@@ -60,10 +63,20 @@ export default class XdgPopup implements XdgPopupRequests, SurfaceRole, DesktopS
     positionerState: XdgPositionerState,
     seat: Seat,
     geometry: RectWithInfo,
+    surfaceSpacePosition: Point,
   ): XdgPopup {
     const surface = xdgSurface.surface
     const view = View.create(surface)
-    const xdgPopup = new XdgPopup(session, xdgPopupResource, xdgSurface, parent, positionerState, view, geometry)
+    const xdgPopup = new XdgPopup(
+      session,
+      xdgPopupResource,
+      xdgSurface,
+      parent,
+      positionerState,
+      view,
+      geometry,
+      surfaceSpacePosition,
+    )
     xdgPopupResource.implementation = xdgPopup
     surface.role = xdgPopup
     return xdgPopup
@@ -80,6 +93,13 @@ export default class XdgPopup implements XdgPopupRequests, SurfaceRole, DesktopS
       this.xdgSurface.scheduleConfigure(false, () => this.sendConfigure())
     }
     this.committed = true
+    // The window geometry (e.g. excluding shadows) is only known now, keep it where the positioner wants it.
+    const position = minusPoint(this.surfaceSpacePosition, surface.geometry.position)
+    const { position: current } = surface.surfaceChildSelf
+    if (current.x !== position.x || current.y !== position.y) {
+      surface.surfaceChildSelf.position = position
+      this.view.markDirty()
+    }
     surface.session.renderer.render()
   }
 

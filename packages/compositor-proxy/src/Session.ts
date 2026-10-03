@@ -52,6 +52,15 @@ export class Session {
     }
   }
 
+  /**
+   * Ask all apps of this session to quit.
+   */
+  terminateApps() {
+    for (const nativeAppContext of this.nativeAppContexts) {
+      nativeAppContext.kill('SIGTERM')
+    }
+  }
+
   createNativeAppContext(pid: number, name: string, external: boolean) {
     const nativeAppContext = new NativeAppContext(this, pid, name, external)
     this.nativeAppContexts.push(nativeAppContext)

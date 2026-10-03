@@ -101,6 +101,15 @@ function start({ config, compositorSessionId }: Extract<ToSessionProcessMessage,
   session.closeListeners.push(() => {
     process.exit()
   })
+  const terminate = () => {
+    logger.info('Session ending, terminating its apps.')
+    session.terminateApps()
+    setTimeout(() => process.exit(), 500)
+  }
+  // the main process went away (or asked us to stop): don't leave orphaned sessions and apps behind
+  process.once('disconnect', terminate)
+  process.once('SIGTERM', terminate)
+  process.once('SIGINT', terminate)
   logger.info(`Session started.`)
 }
 

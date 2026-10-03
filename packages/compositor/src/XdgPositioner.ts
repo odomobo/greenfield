@@ -29,15 +29,15 @@ const anchorCalculation = {
    */
   0: (anchorRect: RectWithInfo): Point => {
     // calculate center
-    const x = Math.round((anchorRect.x0 + anchorRect.size.width) / 2)
-    const y = Math.round((anchorRect.y0 + anchorRect.size.height) / 2)
+    const x = Math.round(anchorRect.x0 + anchorRect.size.width / 2)
+    const y = Math.round(anchorRect.y0 + anchorRect.size.height / 2)
     return { x, y }
   },
   /**
    * top
    */
   1: (anchorRect: RectWithInfo): Point => {
-    const x = Math.round((anchorRect.x0 + anchorRect.size.width) / 2)
+    const x = Math.round(anchorRect.x0 + anchorRect.size.width / 2)
     const y = anchorRect.y0
     return { x, y }
   },
@@ -45,7 +45,7 @@ const anchorCalculation = {
    * bottom
    */
   2: (anchorRect: RectWithInfo): Point => {
-    const x = Math.round((anchorRect.x0 + anchorRect.size.width) / 2)
+    const x = Math.round(anchorRect.x0 + anchorRect.size.width / 2)
     const y = anchorRect.y1
     return { x, y }
   },
@@ -54,7 +54,7 @@ const anchorCalculation = {
    */
   3: (anchorRect: RectWithInfo): Point => {
     const x = anchorRect.x0
-    const y = Math.round((anchorRect.y0 + anchorRect.size.height) / 2)
+    const y = Math.round(anchorRect.y0 + anchorRect.size.height / 2)
     return { x, y }
   },
   /**
@@ -62,7 +62,7 @@ const anchorCalculation = {
    */
   4: (anchorRect: RectWithInfo): Point => {
     const x = anchorRect.x1
-    const y = Math.round((anchorRect.y0 + anchorRect.size.height) / 2)
+    const y = Math.round(anchorRect.y0 + anchorRect.size.height / 2)
     return { x, y }
   },
   /**

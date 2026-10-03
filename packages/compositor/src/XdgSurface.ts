@@ -199,16 +199,27 @@ export default class XdgSurface implements XdgSurfaceRequests {
       return
     }
 
-    const geometry = ensureGeometryConstraints(parentXdgSurface, positionerState) ?? positionerState.sizeRect
+    const constrainedSize = (ensureGeometryConstraints(parentXdgSurface, positionerState) ?? positionerState.sizeRect)
+      .size
+    // where the popup's window geometry goes, in the parent's surface space
+    const surfaceSpacePosition = positionerState.surfaceSpaceAnchorPoint(parentXdgSurface) ?? { x: 0, y: 0 }
+    // xdg_popup.configure is relative to the parent's window geometry
+    const geometry = createRect(minusPoint(surfaceSpacePosition, parentXdgSurface.surface.geometry.position), constrainedSize)
 
     const xdgPopupResource = new XdgPopupResource(resource.client, id, resource.version)
-    XdgPopup.create(this.session, xdgPopupResource, this, parentXdgSurface, positionerState, this.seat, geometry)
+    XdgPopup.create(
+      this.session,
+      xdgPopupResource,
+      this,
+      parentXdgSurface,
+      positionerState,
+      this.seat,
+      geometry,
+      surfaceSpacePosition,
+    )
     this.ackConfigure = (resource, serial) => this.handleAckConfigure(resource, serial)
 
-    const surfaceSpaceAnchorPoint = positionerState.surfaceSpaceAnchorPoint(parentXdgSurface)
-    if (surfaceSpaceAnchorPoint) {
-      this.surface.surfaceChildSelf.position = minusPoint(surfaceSpaceAnchorPoint, this.surface.geometry.position)
-    }
+    this.surface.surfaceChildSelf.position = minusPoint(surfaceSpacePosition, this.surface.geometry.position)
     parentXdgSurface.surface.addChild(this.surface.surfaceChildSelf)
   }
 
@@ -303,12 +314,12 @@ function ensureGeometryConstraints(
         return
       }
 
-      const canFlipX = (positionerState.constraintAdjustment | flipX) !== 0
-      const canFlipY = (positionerState.constraintAdjustment | flipY) !== 0
-      const canSlideX = (positionerState.constraintAdjustment | slideX) !== 0
-      const canSlideY = (positionerState.constraintAdjustment | slideY) !== 0
-      const canResizeX = (positionerState.constraintAdjustment | resizeX) !== 0
-      const canResizeY = (positionerState.constraintAdjustment | resizeY) !== 0
+      const canFlipX = (positionerState.constraintAdjustment & flipX) !== 0
+      const canFlipY = (positionerState.constraintAdjustment & flipY) !== 0
+      const canSlideX = (positionerState.constraintAdjustment & slideX) !== 0
+      const canSlideY = (positionerState.constraintAdjustment & slideY) !== 0
+      const canResizeX = (positionerState.constraintAdjustment & resizeX) !== 0
+      const canResizeY = (positionerState.constraintAdjustment & resizeY) !== 0
 
       // X-Axis:
       // we can't use slide or flip if if the height is greater than the screen height

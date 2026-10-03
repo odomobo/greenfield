@@ -132,7 +132,17 @@ export default class View {
 
   setInitialPosition(): void {
     if (this.parent) {
-      // TODO center of parent
+      // center the window geometry on the parent's window geometry (positions are relative to the parent)
+      const parentGeometry = this.parent.surface.geometry
+      const geometry = this.surface.geometry
+      this.positionOffset = {
+        x: Math.round(
+          parentGeometry.position.x + parentGeometry.size.width / 2 - geometry.position.x - geometry.size.width / 2,
+        ),
+        y: Math.round(
+          parentGeometry.position.y + parentGeometry.size.height / 2 - geometry.position.y - geometry.size.height / 2,
+        ),
+      }
     } else {
       // TODO set position center of the screen within surface geometry & size constraints
       this.positionOffset = minusPoint(ORIGIN, this.surface.geometry.position)
