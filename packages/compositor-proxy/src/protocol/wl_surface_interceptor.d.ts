@@ -1,6 +1,8 @@
-import { Encoder } from '../../encoding/Encoder'
-import { FrameFeedback } from '../../FrameFeedback'
-import { NativeClientSession } from '../../NativeClientSession'
+import { Encoder } from '../encoding/Encoder'
+import { SurfaceEncoder } from '../encoding/SurfaceEncoder'
+import { Rect } from '../encoding/region'
+import { FrameFeedback } from '../FrameFeedback'
+import { NativeClientSession } from '../NativeClientSession'
 import type { Channel } from '../../Channel'
 import type { WlClient, MessageDestination } from '../wayland-server'
 
@@ -16,11 +18,20 @@ export default class wl_surface_interceptor {
     readonly bufferResourceId: number
     readonly bufferCreationSerial: number
     readonly bufferContentSerial: number
-    encodingPromise: Promise<void>
+    /** buffer size in pixels, 0 if unknown */
+    readonly width: number
+    readonly height: number
   }
   bufferDestroyListener?: () => void
 
-  encoder: Encoder
+  /** damage of the next commit, in surface (wl_surface.damage) or buffer (damage_buffer) coordinates */
+  pendingDamage?: { rect: Rect; bufferCoordinates: boolean }[]
+  pendingBufferScale?: number
+  bufferScale?: number
+  pendingBufferTransform?: number
+  bufferTransform?: number
+
+  surfaceEncoder?: SurfaceEncoder<Encoder>
   userData: {
     protocolChannel: Channel
     drmContext: unknown

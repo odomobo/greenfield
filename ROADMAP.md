@@ -180,11 +180,12 @@ Other rules:
 - Instant resizing, left/top anchoring, windows kept on screen.
 - Back-navigation protection.
 - Desktop shell: top taskbar, Apps menu, hover previews, pinned apps, notifications, window animations.
+- Smart encoding: per-surface video/patch modes with encoder and decoder pools (hardware encoders and dmabuf
+  readback untested).
 
 ### Core
 
-1. **Smart encoding + encoder/decoder pool** (see [Encoding policy](#encoding-policy)).
-2. **Gaps that make it usable day to day**:
+1. **Gaps that make it usable day to day**:
    - X11 apps: port XWayland support to the new architecture.
    - Clipboard between remote apps and the local machine; drag and drop.
    - Child dialogs move with their parent.
@@ -192,21 +193,21 @@ Other rules:
      against them in the viewer, so clicks on a window's shadow margin go to whatever is underneath. This is metadata
      only; it doesn't depend on pixels or alpha.
    - HiDPI rendering.
-3. **Two-factor sign-in via PAM prompts.**
+2. **Two-factor sign-in via PAM prompts.**
 
 ### First extra feature
 
-4. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle.
+3. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle.
 
 ### Lower priority
 
-5. Browser-drawn window decorations via `xdg-decoration` (GTK apps will still draw their own).
-6. Hidden/minimized windows: the viewer tells the server to stop sending updates (and the app gets no frame callbacks /
+4. Browser-drawn window decorations via `xdg-decoration` (GTK apps will still draw their own).
+5. Hidden/minimized windows: the viewer tells the server to stop sending updates (and the app gets no frame callbacks /
    is marked suspended). On re-show, briefly show the last image scaled to the window until fresh frames arrive.
-7. Hardware video decoding in the browser.
-8. Downloadable/user-written CSS themes.
-9. WebTransport, only if the single WebSocket ever becomes a bottleneck.
-10. **Browser-drawn window shadows** (very low priority, nice-to-have). Follow the Windows 11 approach: only draw a
+6. Hardware video decoding in the browser.
+7. Downloadable/user-written CSS themes.
+8. WebTransport, only if the single WebSocket ever becomes a bottleneck.
+9. **Browser-drawn window shadows** (very low priority, nice-to-have). Follow the Windows 11 approach: only draw a
     shadow when the compositor knows the window's shape.
     - Opaque windows (the `wl_surface.set_opaque_region` covers the `xdg_surface.set_window_geometry` rectangle,
       allowing for corners): crop the app's own shadow off at the encoder (saves bandwidth), round the corners in the
@@ -218,13 +219,13 @@ Other rules:
     - Verify which toolkits (GTK, Qt, Chromium) declare their opaque region reliably; ones that don't simply keep their
       own shadow.
 
-11. **Viewer improvements.** Details to come from the user when this item is reached; ask before starting.
+10. **Viewer improvements.** Details to come from the user when this item is reached; ask before starting.
 
 ### Last
 
-12. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
+11. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
     is manual (see `packages/gateway` docs).
-13. **Replace `@gfld/compositor-wasm` with native bindings.** pixman (region math) and libxkbcommon (keymaps) are
+12. **Replace `@gfld/compositor-wasm` with native bindings.** pixman (region math) and libxkbcommon (keymaps) are
     compiled to WASM only because upstream's compositor ran in the browser. It now runs in Node, so native bindings
     would remove the emsdk download and cross-compile from the build. Not needed for anything; it just speeds up builds.
 

@@ -50,5 +50,10 @@ export interface Configschema {
      *
      */
     h264Encoder: 'x264' | 'nvh264' | 'vaapih264'
+    /**
+     * How many surfaces can be streamed as video at once (the size of the warm video encoder pool). Other busy
+     * surfaces are sent as lossless patches. Default 4.
+     */
+    videoStreams?: number
   }
 }

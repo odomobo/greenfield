@@ -1,7 +1,12 @@
 import { WebSocket } from 'ws'
 import { createLogger } from '../Logger.js'
 import { onViewerFeedback, setViewerAttached } from '../FrameFeedback.js'
-import { requestKeyFrame, requestKeyFramesForAllSurfaces, setFrameSink } from '../SurfaceBufferEncoding.js'
+import {
+  getVideoStreams,
+  requestKeyFrame,
+  requestKeyFramesForAllSurfaces,
+  setFrameSink,
+} from '../SurfaceBufferEncoding.js'
 import { CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
 import { ControlMessage, ViewerTransport, WebSocketViewerTransport } from './ViewerTransport.js'
 
@@ -48,6 +53,15 @@ export class ViewerHost {
         return isAttached()
       },
       sendFrame: (surfaceKey, frame) => this.transport?.send({ priority: 'frame', surface: surfaceKey, frame }),
+      sendPatch: (surfaceKey, patch, done) => {
+        if (this.transport) {
+          this.transport.send({ priority: 'patch', surface: surfaceKey, patch, done })
+        } else {
+          done(false)
+        }
+      },
+      requireKeyFrame: (surfaceKey) => this.transport?.requireKeyFrame(surfaceKey),
+      dropPatches: (surfaceKey) => this.transport?.dropPatches(surfaceKey),
     })
   }
 
@@ -89,10 +103,13 @@ export class ViewerHost {
 
     logger.info('Viewer attached.')
     setViewerAttached(true)
-    transport.send({ priority: 'control', message: { type: 'welcome', protocolVersion: PROTOCOL_VERSION } })
+    transport.send({
+      priority: 'control',
+      message: { type: 'welcome', protocolVersion: PROTOCOL_VERSION, videoStreams: getVideoStreams() },
+    })
     this.scene.attach((message) => transport.send({ priority: 'control', message }))
     this.shellEndpoint?.attach((message) => transport.send({ priority: 'control', message }))
-    // the viewer has nothing yet, every surface starts with a key frame of its current content
+    // the viewer has nothing yet, every surface starts with its whole current content (key frame or patches)
     requestKeyFramesForAllSurfaces()
   }
 

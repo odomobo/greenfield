@@ -76,6 +76,8 @@ set_target_properties(proxy-poll-addon PROPERTIES PREFIX "" SUFFIX ".node")
 add_library(proxy-encoding-addon SHARED
         ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/encoder.h
         ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/node_encoder.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/pixels.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/pixels.c
 )
 set_property(
     TARGET proxy-encoding-addon
@@ -86,12 +88,16 @@ target_include_directories(proxy-encoding-addon PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/native/node-api
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src/wayland-server
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src
+        ${EGL_INCLUDE_DIRS}
+        ${OPENGL_INCLUDE_DIRS}
 )
 set_target_properties(proxy-encoding-addon PROPERTIES PREFIX "" SUFFIX ".node")
 target_link_libraries(proxy-encoding-addon PRIVATE
         westfield
         wayland-server
         proxy-encoding
+        PkgConfig::EGL
+        PkgConfig::OPENGL
 )
 
 add_library(wayland-server SHARED

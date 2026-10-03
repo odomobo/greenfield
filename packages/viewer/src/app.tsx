@@ -185,8 +185,10 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
         } else {
           desktop.handleMessage(envelope.message)
         }
-      } else {
+      } else if (envelope.kind === 'frame') {
         desktop.handleFrame(envelope.surface, envelope.frame)
+      } else {
+        desktop.handlePatch(envelope.surface, envelope.patch)
       }
     }
     connection.onStateChange = (state) => {

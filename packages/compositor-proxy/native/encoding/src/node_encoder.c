@@ -7,6 +7,7 @@
 #include "node_api.h"
 #include "wlr_linux_dmabuf_v1.h"
 #include "wlr_drm.h"
+#include "pixels.h"
 
 #define DECLARE_NAPI_METHOD(name, func)                          \
   { name, 0, func, 0, 0, 0, napi_default, 0 }
@@ -90,7 +91,7 @@ encoded_frame_to_node_buffer_cb(napi_env env, napi_value js_callback, void *cont
 /**
  *  expected nodejs arguments in order:
  *  - string encoder_type - argv[0] // 'x264' | 'nvh264'
- *  - object wl_client - argv[1]
+ *  - object wl_client - argv[1] (null: pass the client with every encodeFrame, e.g. for pooled encoders)
  *  - object westfield_egl - argv[2]
  *  - function opaque_callback - argv[3]
  * return:
@@ -112,7 +113,12 @@ createFrameEncoder(napi_env env, napi_callback_info info) {
     NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
     NAPI_CALL(env, napi_get_value_string_latin1(env, argv[0], preferred_encoder, sizeof(preferred_encoder),
                                                 &encoder_type_length))
-    NAPI_CALL(env, napi_get_value_external(env, argv[1], (void **) &client))
+    client = NULL;
+    napi_valuetype client_type;
+    NAPI_CALL(env, napi_typeof(env, argv[1], &client_type))
+    if (client_type == napi_external) {
+        NAPI_CALL(env, napi_get_value_external(env, argv[1], (void **) &client))
+    }
     NAPI_CALL(env, napi_get_value_external(env, argv[2], (void **) &westfield_egl))
 
     node_frame_encoder = calloc(1, sizeof(struct node_frame_encoder));
@@ -180,17 +186,19 @@ destroyFrameEncoder(napi_env env, napi_callback_info info) {
 // - number buffer_id - argv[1]
 // - number buffer_content_serial - argv[2]
 // - number buffer_creation_serial - argv[3]
+// - object wl_client - argv[4] (optional, the client owning the buffer if the encoder was created without one)
 // return:
 // - undefined
 static napi_value
 encodeFrame(napi_env env, napi_callback_info info) {
-    static size_t argc = 4;
-    napi_value argv[argc], return_value;
+    size_t argc = 5;
+    napi_value argv[5], return_value;
 
     struct node_frame_encoder *node_frame_encoder;
     uint32_t buffer_id, buffer_content_serial, buffer_creation_serial;
 
     struct wl_resource *buffer_resource;
+    struct wl_client *client;
 
     NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
     NAPI_CALL(env, napi_get_value_external(env, argv[0], (void **) &node_frame_encoder))
@@ -198,7 +206,15 @@ encodeFrame(napi_env env, napi_callback_info info) {
     NAPI_CALL(env, napi_get_value_uint32(env, argv[2], &buffer_content_serial))
     NAPI_CALL(env, napi_get_value_uint32(env, argv[3], &buffer_creation_serial))
 
-    buffer_resource = wl_client_get_object(node_frame_encoder->client, buffer_id);
+    client = node_frame_encoder->client;
+    if (argc >= 5) {
+        napi_valuetype client_type;
+        NAPI_CALL(env, napi_typeof(env, argv[4], &client_type))
+        if (client_type == napi_external) {
+            NAPI_CALL(env, napi_get_value_external(env, argv[4], (void **) &client))
+        }
+    }
+    buffer_resource = client ? wl_client_get_object(client, buffer_id) : NULL;
     if (buffer_resource == NULL) {
         NAPI_CALL(env, napi_throw_error((env), NULL, "Can't encode frame buffer, buffer does not exist."))
         NAPI_CALL(env, napi_get_undefined(env, &return_value))
@@ -270,6 +286,80 @@ requestKeyUnit(napi_env env, napi_callback_info info) {
     return return_value;
 }
 
+static void
+finalize_pixels(napi_env env, void *finalize_data, void *finalize_hint) {
+    free(finalize_data);
+}
+
+// expected arguments in order:
+// - object wl_client - argv[0]
+// - object westfield_egl - argv[1] (for dmabufs)
+// - number buffer_id - argv[2]
+// - number x, y, width, height - argv[3..6]
+// return:
+// - Buffer of width * height RGBA pixels, rows top to bottom, or undefined if the buffer can't be read
+static napi_value
+readPixels(napi_env env, napi_callback_info info) {
+    size_t argc = 7;
+    napi_value argv[7], return_value;
+    struct wl_client *client;
+    struct westfield_egl *westfield_egl = NULL;
+    uint32_t buffer_id;
+    int32_t x, y, width, height;
+
+    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
+    NAPI_CALL(env, napi_get_value_external(env, argv[0], (void **) &client))
+    napi_valuetype egl_type;
+    NAPI_CALL(env, napi_typeof(env, argv[1], &egl_type))
+    if (egl_type == napi_external) {
+        NAPI_CALL(env, napi_get_value_external(env, argv[1], (void **) &westfield_egl))
+    }
+    NAPI_CALL(env, napi_get_value_uint32(env, argv[2], &buffer_id))
+    NAPI_CALL(env, napi_get_value_int32(env, argv[3], &x))
+    NAPI_CALL(env, napi_get_value_int32(env, argv[4], &y))
+    NAPI_CALL(env, napi_get_value_int32(env, argv[5], &width))
+    NAPI_CALL(env, napi_get_value_int32(env, argv[6], &height))
+
+    struct wl_resource *buffer_resource = wl_client_get_object(client, buffer_id);
+    uint8_t *pixels = buffer_resource ? read_buffer_pixels(buffer_resource, westfield_egl, x, y, width, height) : NULL;
+    if (pixels == NULL) {
+        NAPI_CALL(env, napi_get_undefined(env, &return_value))
+        return return_value;
+    }
+    NAPI_CALL(env, napi_create_external_buffer(env, (size_t) width * height * 4, pixels, finalize_pixels, NULL,
+                                               &return_value))
+    return return_value;
+}
+
+// expected arguments in order:
+// - object wl_client - argv[0]
+// - number buffer_id - argv[1]
+// return:
+// - [width, height], or undefined if it's not a buffer we know
+static napi_value
+bufferSize(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2], return_value, value;
+    struct wl_client *client;
+    uint32_t buffer_id, width, height;
+
+    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
+    NAPI_CALL(env, napi_get_value_external(env, argv[0], (void **) &client))
+    NAPI_CALL(env, napi_get_value_uint32(env, argv[1], &buffer_id))
+
+    struct wl_resource *buffer_resource = wl_client_get_object(client, buffer_id);
+    if (buffer_resource == NULL || !get_buffer_size(buffer_resource, &width, &height)) {
+        NAPI_CALL(env, napi_get_undefined(env, &return_value))
+        return return_value;
+    }
+    NAPI_CALL(env, napi_create_array_with_length(env, 2, &return_value))
+    NAPI_CALL(env, napi_create_uint32(env, width, &value))
+    NAPI_CALL(env, napi_set_element(env, return_value, 0, value))
+    NAPI_CALL(env, napi_create_uint32(env, height, &value))
+    NAPI_CALL(env, napi_set_element(env, return_value, 1, value))
+    return return_value;
+}
+
 static napi_value
 init(napi_env env, napi_value exports) {
     napi_value discard_frame_buffer_cb_name;
@@ -292,6 +382,8 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("destroyFrameEncoder", destroyFrameEncoder),
             DECLARE_NAPI_METHOD("encodeFrame", encodeFrame),
             DECLARE_NAPI_METHOD("requestKeyUnit", requestKeyUnit),
+            DECLARE_NAPI_METHOD("readPixels", readPixels),
+            DECLARE_NAPI_METHOD("bufferSize", bufferSize),
     };
 
     NAPI_CALL(env, napi_define_properties(env, exports, sizeof(desc) / sizeof(napi_property_descriptor), desc))

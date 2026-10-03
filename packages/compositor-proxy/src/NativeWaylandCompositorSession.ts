@@ -38,6 +38,7 @@ import { webcrypto } from 'node:crypto'
 import { Session } from './Session.js'
 import { readFileSync } from 'node:fs'
 import { NativeAppContext } from './NativeAppContext.js'
+import { configureEncoding } from './SurfaceBufferEncoding.js'
 
 const logger = createLogger('native-compositor-session')
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567' as const
@@ -113,6 +114,11 @@ export class NativeWaylandCompositorSession {
     this.waylandDisplay = addSocketAuto(this.wlDisplay)
     initShm(this.wlDisplay)
     this.drmContext = initDrm(this.wlDisplay, this.session.config.encoder.renderDevice)
+    configureEncoding({
+      h264Encoder: this.session.config.encoder.h264Encoder,
+      drmContext: this.drmContext,
+      videoStreams: this.session.config.encoder.videoStreams,
+    })
 
     this.wlDisplayFdWatcher = startPoll(getFd(this.wlDisplay), (status) => {
       if (status < 0) {

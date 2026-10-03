@@ -16,14 +16,13 @@
 // along with Greenfield.  If not, see <https://www.gnu.org/licenses/>.
 
 import appEndpointNative from '../addons/proxy-encoding-addon'
-import { Session } from '../Session.js'
 
-export function createEncoder(session: Session, wlClient: unknown, drmContext: unknown): Encoder {
-  // TODO we could probably use a pool here?
-  // TODO implement encoder destruction
-  return new Encoder(session, wlClient, drmContext)
-}
+export type H264Encoder = 'x264' | 'nvh264' | 'vaapih264'
 
+/**
+ * A native video encoder. Not tied to a client: the encoder pool lends it to one surface at a time, and every encode
+ * names the client that owns the buffer.
+ */
 export class Encoder {
   private readonly nativeEncoder: unknown
 
@@ -34,48 +33,48 @@ export class Encoder {
     bufferContentSerial: number
   }[] = []
 
-  constructor(session: Session, wlClient: unknown, drmContext: unknown) {
-    this.nativeEncoder = appEndpointNative.createFrameEncoder(
-      session.config.encoder.h264Encoder,
-      wlClient,
-      drmContext,
-      (buffer: Buffer) => {
-        const encodingTask = this.encodingQueue.shift()
-        if (encodingTask) {
-          if (buffer) {
-            // console.debug(`Resolve encoding ${encodingTask.bufferContentSerial} with success`)
-            encodingTask.resolve(buffer)
-          } else {
-            const e = new Error('Buffer encoding failed.')
-            console.error(`\tname: ${e.name} message: ${e.message}`)
-            console.error('error object stack: ')
-            console.error(e.stack ?? '')
-            console.debug(`Resolve encoding ${encodingTask.bufferContentSerial} with error`)
-            encodingTask.reject(e)
-          }
+  constructor(h264Encoder: H264Encoder, drmContext: unknown) {
+    this.nativeEncoder = appEndpointNative.createFrameEncoder(h264Encoder, null, drmContext, (buffer: Buffer) => {
+      const encodingTask = this.encodingQueue.shift()
+      if (encodingTask) {
+        if (buffer) {
+          encodingTask.resolve(buffer)
         } else {
-          console.error('BUG? No buffer callback')
-          // TODO log better error
+          const e = new Error('Buffer encoding failed.')
+          console.error(`\tname: ${e.name} message: ${e.message}`)
+          console.error('error object stack: ')
+          console.error(e.stack ?? '')
+          console.debug(`Resolve encoding ${encodingTask.bufferContentSerial} with error`)
+          encodingTask.reject(e)
         }
-      },
-    )
+      } else {
+        console.error('BUG? No buffer callback')
+      }
+    })
   }
 
   encodeBuffer({
+    wlClient,
     bufferResourceId,
     bufferCreationSerial,
     bufferContentSerial,
   }: {
+    wlClient: unknown
     bufferResourceId: number
     bufferCreationSerial: number
     bufferContentSerial: number
   }): Promise<Buffer> {
-    // console.debug(`Start encoding: ${bufferContentSerial}`)
     return new Promise<Buffer>((resolve, reject) => {
       const encodingTask = { resolve, reject, bufferResourceId, bufferContentSerial }
       this.encodingQueue.push(encodingTask)
       try {
-        appEndpointNative.encodeFrame(this.nativeEncoder, bufferResourceId, bufferContentSerial, bufferCreationSerial)
+        appEndpointNative.encodeFrame(
+          this.nativeEncoder,
+          bufferResourceId,
+          bufferContentSerial,
+          bufferCreationSerial,
+          wlClient,
+        )
       } catch (e) {
         // No callback will come for this frame, so it must not stay in the queue or later results get misassigned.
         this.encodingQueue.splice(this.encodingQueue.indexOf(encodingTask), 1)

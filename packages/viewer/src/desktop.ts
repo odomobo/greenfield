@@ -1,8 +1,8 @@
 import { Connection } from './connection'
-import { KeyFrameNeeded, SurfaceDecoder } from './decoder'
+import { KeyFrameNeeded, SurfaceDecoder, VideoDecoderPool } from './decoder'
 import { Rect, Renderer } from './gl/renderer'
 import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
-import { parseEncodedFrame, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
+import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 
 type Point = { x: number; y: number }
 
@@ -72,6 +72,7 @@ export class Desktop {
   private output: Size = { width: 0, height: 0 }
   private readonly placementSent = new Set<string>()
   private readonly decoders = new Map<string, SurfaceDecoder>()
+  private readonly decoderPool = new VideoDecoderPool()
   private readonly keyFrameRequested = new Set<string>()
   private cursor: Cursor = { kind: 'default' }
   /** minimized state the viewer asked for, until the server's scene agrees */
@@ -470,36 +471,65 @@ export class Desktop {
         break
       }
       case 'welcome':
+        // two decoders (opaque and alpha) for every surface the server may stream as video at once
+        this.decoderPool.warm(2 * (message.videoStreams ?? 0))
         break
     }
   }
 
-  handleFrame(surface: string, data: Uint8Array): void {
+  private decoderFor(surface: string): SurfaceDecoder {
     let decoder = this.decoders.get(surface)
     if (decoder === undefined) {
-      decoder = new SurfaceDecoder()
+      decoder = new SurfaceDecoder(this.decoderPool)
       this.decoders.set(surface, decoder)
     }
+    return decoder
+  }
+
+  /** A whole-surface frame (video, or a PNG of a small surface). */
+  handleFrame(surface: string, data: Uint8Array): void {
     const frame = parseEncodedFrame(data)
     this.frameSizes.set(surface, frame.size)
     const start = performance.now()
-    decoder.decode(frame).then(
-      (decoded) => {
-        this.recordDecodeDuration(performance.now() - start)
-        this.keyFrameRequested.delete(surface)
-        this.renderer.upload(surface, decoded)
-        this.scheduleRender()
-      },
-      (error) => {
-        if (!(error instanceof KeyFrameNeeded)) {
-          console.warn(`Failed to decode frame of surface ${surface}:`, error)
-        }
-        if (!this.keyFrameRequested.has(surface)) {
-          this.keyFrameRequested.add(surface)
-          this.connection.send({ type: 'keyframe', surface })
-        }
-      },
-    )
+    this.decoderFor(surface)
+      .decode(frame)
+      .then(
+        (decoded) => {
+          this.recordDecodeDuration(performance.now() - start)
+          this.keyFrameRequested.delete(surface)
+          this.renderer.upload(surface, decoded)
+          this.scheduleRender()
+        },
+        (error) => this.decodeFailed(surface, error),
+      )
+  }
+
+  /** A lossless update of part of a surface, drawn over what it shows now (applied right away, in order). */
+  handlePatch(surface: string, patch: Patch): void {
+    this.frameSizes.set(surface, patch.surfaceSize)
+    const start = performance.now()
+    this.decoderFor(surface)
+      .decodePatch(patch)
+      .then(
+        (decoded) => {
+          this.recordDecodeDuration(performance.now() - start)
+          this.keyFrameRequested.delete(surface)
+          this.renderer.patch(surface, decoded)
+          this.scheduleRender()
+        },
+        (error) => this.decodeFailed(surface, error),
+      )
+  }
+
+  /** Ask the server for the whole surface again (once until something decodes). */
+  private decodeFailed(surface: string, error: unknown) {
+    if (!(error instanceof KeyFrameNeeded)) {
+      console.warn(`Failed to decode content of surface ${surface}:`, error)
+    }
+    if (!this.keyFrameRequested.has(surface)) {
+      this.keyFrameRequested.add(surface)
+      this.connection.send({ type: 'keyframe', surface })
+    }
   }
 
   private updateScene(windows: SceneWindow[]) {

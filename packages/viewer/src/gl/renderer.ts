@@ -1,4 +1,4 @@
-import { DecodedFrame } from '../decoder'
+import { DecodedFrame, DecodedPatch } from '../decoder'
 
 const VERTEX_SHADER = `
   precision mediump float;
@@ -106,7 +106,7 @@ type SurfaceTexture =
       /** texture coordinates of the real image inside the padded coded frame */
       src: [number, number, number, number]
     }
-  | { kind: 'rgba'; texture: WebGLTexture }
+  | { kind: 'rgba'; texture: WebGLTexture; width: number; height: number }
 
 export type Rect = { x: number; y: number; width: number; height: number }
 
@@ -186,11 +186,13 @@ export class Renderer {
     if (frame.kind === 'bitmap') {
       if (texture?.kind !== 'rgba') {
         this.delete(surface)
-        texture = { kind: 'rgba', texture: createTexture(gl) }
+        texture = { kind: 'rgba', texture: createTexture(gl), width: 0, height: 0 }
         this.textures.set(surface, texture)
       }
       gl.bindTexture(gl.TEXTURE_2D, texture.texture)
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame.bitmap)
+      texture.width = frame.bitmap.width
+      texture.height = frame.bitmap.height
       frame.bitmap.close()
       return
     }
@@ -229,6 +231,61 @@ export class Renderer {
       encodedWidth / opaque.codedWidth,
       encodedHeight / opaque.codedHeight,
     ]
+  }
+
+  /**
+   * Draw a lossless patch into a surface's content. The surface keeps showing what it had elsewhere: a video frame is
+   * converted to an RGBA image first, and on a size change the old content is stretched to the new size until patches
+   * replace it.
+   */
+  patch(surface: string, patch: DecodedPatch): void {
+    const gl = this.gl
+    const { width, height } = patch.surfaceSize
+    let texture = this.textures.get(surface)
+    if (texture?.kind !== 'rgba' || texture.width !== width || texture.height !== height) {
+      const next = createTexture(gl)
+      gl.bindTexture(gl.TEXTURE_2D, next)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+      if (texture) {
+        this.drawInto(next, width, height, surface)
+      }
+      this.delete(surface)
+      texture = { kind: 'rgba', texture: next, width, height }
+      this.textures.set(surface, texture)
+    }
+    gl.bindTexture(gl.TEXTURE_2D, texture.texture)
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, patch.rect.x, patch.rect.y, gl.RGBA, gl.UNSIGNED_BYTE, patch.bitmap)
+    patch.bitmap.close()
+  }
+
+  /** Render a surface's current content, stretched, into a texture of the given size (exact copy, no blending). */
+  private drawInto(target: WebGLTexture, width: number, height: number, surface: string) {
+    const gl = this.gl
+    const framebuffer = gl.createFramebuffer()
+    if (framebuffer === null) {
+      return
+    }
+    const screen = { width: this.width, height: this.height }
+    try {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer)
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target, 0)
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        return
+      }
+      this.width = width
+      this.height = height
+      gl.viewport(0, 0, width, height)
+      gl.disable(gl.BLEND)
+      // drawSurface maps y down from the top, which would land upside down in a texture: flip with a negative height
+      this.drawSurface(surface, { x: 0, y: height, width, height: -height })
+    } finally {
+      this.width = screen.width
+      this.height = screen.height
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+      gl.deleteFramebuffer(framebuffer)
+      gl.viewport(0, 0, this.width, this.height)
+      gl.enable(gl.BLEND)
+    }
   }
 
   delete(surface: string): void {

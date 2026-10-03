@@ -189,9 +189,11 @@ gf_gst_main_loop_ini(gpointer data) {
     g_source_unref(worker);
     g_source_set_callback(worker, G_SOURCE_FUNC(main_loop_handle_message), NULL, NULL);
 
-    main_loop = malloc(sizeof(struct gf_gst_main_loop));
-    main_loop->main = main;
-    main_loop->src = (struct SyncSource *) worker;
+    struct gf_gst_main_loop *loop = malloc(sizeof(struct gf_gst_main_loop));
+    loop->main = main;
+    loop->src = (struct SyncSource *) worker;
+    // publish only once it's complete, send_message waits for it
+    g_atomic_pointer_set(&main_loop, loop);
 
     do_gst_init();
     g_main_loop_run(main);
@@ -204,6 +206,11 @@ gf_gst_main_loop_ini(gpointer data) {
 
 static int
 send_message(struct gf_message *message) {
+    // The loop thread starts when the library loads, a message can come before it's ready (e.g. warming up encoders
+    // right at startup).
+    while (g_atomic_pointer_get(&main_loop) == NULL) {
+        g_usleep(1000);
+    }
     g_async_queue_push(main_loop->src->work_queue, message);
     guint64 event = 1;
     if (write(main_loop->src->fd, &event, sizeof(event)) == -1) {

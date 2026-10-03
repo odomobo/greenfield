@@ -7,18 +7,25 @@
  *   u8 protocol version, u8 kind, payload
  * CONTROL payload: UTF-8 JSON object with a `type` field (both directions).
  * FRAME payload (server -> viewer): u16le surface key length, surface key, encoded frame blob as produced by the
- * proxy encoder (u32 bufferId, u32 bufferCreationSerial, u32 contentSerial, u16 encoding type, ...).
+ * proxy encoder (u32 bufferId, u32 bufferCreationSerial, u32 contentSerial, u16 encoding type, ...). The whole surface.
+ * PATCH payload (server -> viewer): u16le surface key length, surface key, then (all u32le) contentSerial, surface
+ * width, surface height, x, y, width, height, followed by an RGBA PNG of that rectangle of the surface.
+ *
+ * A surface is either streamed as video (FRAME, H.264) or updated with lossless PNG patches (PATCH) of its changed
+ * areas, see the encoding policy in ROADMAP.md. Frames and patches of one surface arrive in order and are applied in
+ * order: a patch draws over whatever the surface showed (including the last video frame), a video frame replaces it.
  *
  * Surfaces are identified by a key "<clientId>/<surfaceId>". Coordinates are in output (canvas CSS) pixels.
  *
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
 export const enum EnvelopeKind {
   CONTROL = 1,
   FRAME = 2,
+  PATCH = 3,
 }
 
 /** The session was taken over by another viewer. Don't reconnect automatically. */
@@ -54,7 +61,8 @@ export type SceneWindow = {
 }
 
 export type ServerMessage =
-  | { type: 'welcome'; protocolVersion: number }
+  /** videoStreams: how many surfaces the server streams as video at most at once (its encoder pool size) */
+  | { type: 'welcome'; protocolVersion: number; videoStreams: number }
   /** Full snapshot, sent on attach and whenever anything changes. Windows are ordered bottom to top. */
   | { type: 'scene'; windows: SceneWindow[]; focus: string | null }
   | { type: 'cursor'; kind: 'default' | 'hidden' }
@@ -189,9 +197,60 @@ export function decodeControl(data: Uint8Array): ControlMessage {
   return message
 }
 
+/** A lossless update of a rectangle of a surface, see the PATCH envelope. */
+export type Patch = {
+  contentSerial: number
+  /** size of the whole surface at the time the patch was made */
+  surfaceSize: { width: number; height: number }
+  /** the patched rectangle, in surface (buffer) pixels */
+  rect: { x: number; y: number; width: number; height: number }
+  /** RGBA PNG of the rectangle */
+  png: Uint8Array
+}
+
+const PATCH_HEADER_BYTES = 7 * 4
+
+/** Encode a server -> viewer patch as a binary envelope addressed to the surface's key. */
+export function encodePatch(surfaceKey: string, patch: Patch): Uint8Array {
+  const key = textEncoder.encode(surfaceKey)
+  const envelope = new Uint8Array(4 + key.byteLength + PATCH_HEADER_BYTES + patch.png.byteLength)
+  const view = new DataView(envelope.buffer)
+  envelope[0] = PROTOCOL_VERSION
+  envelope[1] = EnvelopeKind.PATCH
+  view.setUint16(2, key.byteLength, true)
+  envelope.set(key, 4)
+  let offset = 4 + key.byteLength
+  for (const value of [
+    patch.contentSerial,
+    patch.surfaceSize.width,
+    patch.surfaceSize.height,
+    patch.rect.x,
+    patch.rect.y,
+    patch.rect.width,
+    patch.rect.height,
+  ]) {
+    view.setUint32(offset, value, true)
+    offset += 4
+  }
+  envelope.set(patch.png, offset)
+  return envelope
+}
+
+function parsePatch(payload: Uint8Array): Patch {
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
+  const u32 = (index: number) => view.getUint32(index * 4, true)
+  return {
+    contentSerial: u32(0),
+    surfaceSize: { width: u32(1), height: u32(2) },
+    rect: { x: u32(3), y: u32(4), width: u32(5), height: u32(6) },
+    png: payload.subarray(PATCH_HEADER_BYTES),
+  }
+}
+
 export type DecodedEnvelope =
   | { kind: 'control'; message: ServerMessage }
   | { kind: 'frame'; surface: string; frame: Uint8Array }
+  | { kind: 'patch'; surface: string; patch: Patch }
 
 /** Decode a server -> viewer envelope. Throws on an unsupported version or unknown kind. */
 export function decodeEnvelope(data: ArrayBuffer): DecodedEnvelope {
@@ -206,6 +265,11 @@ export function decodeEnvelope(data: ArrayBuffer): DecodedEnvelope {
     const keyLength = bytes[2] | (bytes[3] << 8)
     const surface = textDecoder.decode(bytes.subarray(4, 4 + keyLength))
     return { kind: 'frame', surface, frame: bytes.subarray(4 + keyLength) }
+  }
+  if (bytes[1] === EnvelopeKind.PATCH) {
+    const keyLength = bytes[2] | (bytes[3] << 8)
+    const surface = textDecoder.decode(bytes.subarray(4, 4 + keyLength))
+    return { kind: 'patch', surface, patch: parsePatch(bytes.subarray(4 + keyLength)) }
   }
   throw new Error(`Unknown envelope kind ${bytes[1]}`)
 }

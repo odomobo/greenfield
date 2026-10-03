@@ -738,8 +738,12 @@ gst_frame_encoder_create(struct frame_encoder *encoder, const struct frame_encod
 }
 
 
-static inline int
+static inline void
 gst_frame_encoder_request_key_unit(struct gst_frame_encoder *gst_encoder) {
+    if (gst_encoder == NULL) {
+        // no pipeline yet, the next one starts with a key frame anyway
+        return;
+    }
     gst_element_send_event(gst_encoder->opaque_pipeline->pipeline, gst_event_new_custom(GST_EVENT_CUSTOM_DOWNSTREAM,
                                                                                         gst_structure_new(
                                                                                                 "GstForceKeyUnit",
@@ -1211,6 +1215,15 @@ do_gst_frame_encoder_create(char preferred_frame_encoder[16], frame_callback_fun
     frame_encoder->user_data = user_data;
     frame_encoder->frame_encoding_results = g_queue_new();
     frame_encoder->westfield_egl = westfield_egl;
+
+    // Warm up: create the preferred (video) encoder's pipelines right away, so the first frame doesn't pay for it.
+    const size_t nro_encoders = sizeof(frame_encoder_descriptions) / sizeof(frame_encoder_descriptions[0]);
+    for (size_t i = 0; i < nro_encoders; i++) {
+        if (strcmp(frame_encoder_descriptions[i].name, frame_encoder->preferred_frame_encoder) == 0) {
+            gst_frame_encoder_create(frame_encoder, &frame_encoder_descriptions[i]);
+            break;
+        }
+    }
 
     *frame_encoder_pp = frame_encoder;
 }
