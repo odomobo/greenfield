@@ -55,7 +55,7 @@ const MIN_VISIBLE = 80
 /** Give up waiting for a client to commit the final size of a resize after this long. */
 const RESIZE_SETTLE_TIMEOUT = 2000
 /** Durations of the window state animations, ms. Subtle and short. */
-const STATE_ANIMATION_MS = 300
+const STATE_ANIMATION_MS = 150
 
 export type ShellWindow = SceneWindow & { shownMinimized: boolean }
 
@@ -318,7 +318,7 @@ export class Desktop {
       from,
       to: this.minimizedRect(window, from),
       fromOpacity: 1,
-      toOpacity: 0,
+      toOpacity: 1,
     })
     this.interruptInteraction(window.id)
   }
@@ -330,7 +330,7 @@ export class Desktop {
       animation: new Animation(STATE_ANIMATION_MS, EASE_OUT),
       from: this.minimizedRect(window, to),
       to,
-      fromOpacity: 0,
+      fromOpacity: 1,
       toOpacity: 1,
     })
   }

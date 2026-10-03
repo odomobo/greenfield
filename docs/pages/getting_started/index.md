@@ -39,7 +39,7 @@ yarn build
 ```
 
 {: .note }
->The build includes the `compositor-proxy` packages as these only build on Linux environments.
+>The build includes the `compositor-proxy` packages, so it only works on Linux.
 >We'll come back to this under the chapter [Remote Applications](#remote-applications).
 
 After all packages have been build, we can spin up the Greenfield compositor shell.

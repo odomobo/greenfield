@@ -33,9 +33,9 @@ export function cubicBezier(x1: number, y1: number, x2: number, y2: number): Eas
 }
 
 /** Starts slow and accelerates out (minimize, maximize). Subtle, like CSS ease-in. */
-export const EASE_IN = cubicBezier(0.42, 0, 1, 1)
+export const EASE_IN = cubicBezier(0.7, 0, 1, 1)
 /** Starts fast and eases out (restore). Subtle, like CSS ease-out. */
-export const EASE_OUT = cubicBezier(0, 0, 0.58, 1)
+export const EASE_OUT = cubicBezier(0, 0, 0.3, 1)
 
 /** Eased progress (0..1) of something that started now and lasts `duration` ms. */
 export class Animation {

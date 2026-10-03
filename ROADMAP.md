@@ -194,10 +194,15 @@ Drawn by the browser in HTML/CSS.
     - Verify which toolkits (GTK, Qt, Chromium) declare their opaque region reliably; ones that don't simply keep their
       own shadow.
 
+11. **Viewer improvements.** Details to come from the user when this item is reached; ask before starting.
+
 ### Last
 
-11. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
+12. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
     is manual (see `packages/gateway` docs).
+13. **Replace `@gfld/compositor-wasm` with native bindings.** pixman (region math) and libxkbcommon (keymaps) are
+    compiled to WASM only because upstream's compositor ran in the browser. It now runs in Node, so native bindings
+    would remove the emsdk download and cross-compile from the build. Not needed for anything; it just speeds up builds.
 
 ### Needs verification on other hardware
 
