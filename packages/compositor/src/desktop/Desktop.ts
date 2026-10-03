@@ -14,6 +14,9 @@ export interface DesktopSurfaceRole extends SurfaceRole {
 
   queryGeometry(): RectWithInfo
 
+  /** size of the configure the committed state reflects, if the role has configures (xdg_toplevel) */
+  queryConfiguredSize?(): Size
+
   queryMinSize(): Size
 
   queryMaxSize(): Size

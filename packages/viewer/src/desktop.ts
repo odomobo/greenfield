@@ -1,15 +1,25 @@
 import { Connection } from './connection'
 import { KeyFrameNeeded, SurfaceDecoder } from './decoder'
 import { Rect, Renderer } from './gl/renderer'
-import { parseEncodedFrame, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
+import { parseEncodedFrame, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 
 type Point = { x: number; y: number }
 
 type Pick = { window: SceneWindow; surface: string; sx: number; sy: number }
 
+type Size = { width: number; height: number }
+
 type Interaction =
   | { mode: 'move'; window: string; startPointer: Point; startPosition: Point; lastSent: number }
-  | { mode: 'resize'; window: string; edges: number; startPointer: Point; startSize: { width: number; height: number } }
+  /** startRect: the window geometry rect (output coordinates) when the resize started */
+  | { mode: 'resize'; window: string; edges: number; startPointer: Point; startRect: Rect }
+
+/**
+ * A window being resized is shown at the size the user is dragging to, without waiting for the client: its latest
+ * content is stretched into `rect` (window geometry, output coordinates). Once the drag ended and the client committed
+ * the final size, the window is positioned so the anchored edges stay put and the override is dropped.
+ */
+type ResizeOverride = { rect: Rect; edges: number; finalSize?: Size; settleTimer?: ReturnType<typeof setTimeout> }
 
 type Cursor =
   | { kind: 'default' | 'hidden' }
@@ -23,6 +33,10 @@ const EDGE_LEFT = 4
 const EDGE_RIGHT = 8
 
 const MOVE_SEND_INTERVAL = 50
+/** How much of a window (geometry) must stay inside the output, so it can always be grabbed and moved back. */
+const MIN_VISIBLE = 80
+/** Give up waiting for a client to commit the final size of a resize after this long. */
+const RESIZE_SETTLE_TIMEOUT = 2000
 
 /**
  * The viewer side of a session: shows the server's window scene and acts as its window manager. Everything that
@@ -33,12 +47,16 @@ export class Desktop {
   private windows: SceneWindow[] = []
   /** window positions overridden locally during an interactive move, until the server confirms them */
   private readonly localPositions = new Map<string, Point>()
+  private readonly resizeOverrides = new Map<string, ResizeOverride>()
+  private output: Size = { width: 0, height: 0 }
   private readonly placementSent = new Set<string>()
   private readonly decoders = new Map<string, SurfaceDecoder>()
   private readonly keyFrameRequested = new Set<string>()
   private cursor: Cursor = { kind: 'default' }
 
   private pointer: Point = { x: 0, y: 0 }
+  /** where the current button press started; interactions the client starts on a press are measured from here */
+  private pressPointer: Point = { x: 0, y: 0 }
   private buttons = 0
   /** implicit grab: while a button is held, pointer events go to the surface the press started on */
   private grab?: Pick
@@ -58,7 +76,9 @@ export class Desktop {
     this.installInputHandlers()
     new ResizeObserver(() => {
       const output = this.renderer.resize()
+      this.output = output
       this.connection.send({ type: 'output', width: output.width, height: output.height })
+      this.keepWindowsVisible()
       this.scheduleRender()
     }).observe(canvas)
     setInterval(() => this.sendFeedback(), 500)
@@ -78,11 +98,16 @@ export class Desktop {
     this.renderer.clearAll()
     this.windows = []
     this.localPositions.clear()
+    for (const override of this.resizeOverrides.values()) {
+      clearTimeout(override.settleTimer)
+    }
+    this.resizeOverrides.clear()
     this.placementSent.clear()
     this.grab = undefined
     this.interaction = undefined
     this.buttons = 0
     const output = this.renderer.resize()
+    this.output = output
     this.connection.send({ type: 'hello', output })
     if (document.hasFocus() && document.activeElement === this.canvas) {
       this.connection.send({ type: 'focus', focused: true })
@@ -93,16 +118,32 @@ export class Desktop {
   /**
    * Current windows as shown (with local position overrides). For tests.
    */
-  debugWindows(): (SceneWindow & { shownX: number; shownY: number; hasContent: boolean })[] {
+  debugWindows(): (SceneWindow & { shownX: number; shownY: number; shownGeometry: Rect; hasContent: boolean })[] {
     return this.windows.map((window) => {
       const position = this.windowPosition(window)
       return {
         ...window,
         shownX: position.x,
         shownY: position.y,
+        shownGeometry: this.shownGeometry(window),
         hasContent: window.surfaces.every((surface) => this.renderer.hasContent(surface.id)),
       }
     })
+  }
+
+  /** The output size the viewer reports. For tests. */
+  debugOutput(): Size {
+    return this.output
+  }
+
+  /** The running move/resize interaction, if any. For tests. */
+  debugInteraction(): string | null {
+    return this.interaction?.mode ?? null
+  }
+
+  /** Whether a resize is still waiting for its client to commit the final size. For tests. */
+  debugResizing(): boolean {
+    return this.resizeOverrides.size > 0
   }
 
   // -------------------------------------------------------------------------------------------------------------------
@@ -175,6 +216,15 @@ export class Desktop {
         this.localPositions.delete(id)
       }
     }
+    for (const [id, override] of [...this.resizeOverrides]) {
+      const window = windows.find((w) => w.id === id)
+      if (window === undefined) {
+        clearTimeout(override.settleTimer)
+        this.resizeOverrides.delete(id)
+      } else if (override.finalSize && this.clientCaughtUp(window, override.finalSize)) {
+        this.settleResize(window)
+      }
+    }
     // the viewer decides where new windows go
     for (const window of windows) {
       if (window.placed || window.maximized || window.fullscreen || this.placementSent.has(window.id)) {
@@ -182,11 +232,12 @@ export class Desktop {
       }
       this.placementSent.add(window.id)
       const cascade = 40 + (placedCount++ % 10) * 32
-      const x = cascade - window.geometry.x
-      const y = cascade - window.geometry.y
-      this.localPositions.set(window.id, { x, y })
-      this.connection.send({ type: 'window.move', window: window.id, x, y })
+      const position = this.keepVisible(window, { x: cascade - window.geometry.x, y: cascade - window.geometry.y })
+      this.localPositions.set(window.id, position)
+      this.connection.send({ type: 'window.move', window: window.id, ...position })
     }
+    // also covers positions chosen by the server or client (e.g. dialogs) and windows coming back after a reattach
+    this.keepWindowsVisible()
     // Content of surfaces that are gone. The cursor surface isn't part of any window.
     const cursorSurface = this.cursor.kind === 'surface' ? this.cursor.surface : undefined
     for (const surface of [...this.decoders.keys()]) {
@@ -213,6 +264,92 @@ export class Desktop {
     return this.localPositions.get(window.id) ?? { x: window.x, y: window.y }
   }
 
+  /** The window geometry rect as shown, in output coordinates. */
+  private shownGeometry(window: SceneWindow): Rect {
+    const override = this.resizeOverrides.get(window.id)
+    if (override) {
+      return override.rect
+    }
+    const position = this.windowPosition(window)
+    return {
+      x: position.x + window.geometry.x,
+      y: position.y + window.geometry.y,
+      width: window.geometry.width,
+      height: window.geometry.height,
+    }
+  }
+
+  /**
+   * Where each surface of a window is shown, in output coordinates. A window being resized is stretched so its
+   * geometry fills the override rect.
+   */
+  private surfaceRects(window: SceneWindow): { surface: SceneSurface; rect: Rect; scaleX: number; scaleY: number }[] {
+    const override = this.resizeOverrides.get(window.id)
+    const { geometry } = window
+    if (override === undefined || geometry.width <= 0 || geometry.height <= 0) {
+      const position = this.windowPosition(window)
+      return window.surfaces.map((surface) => ({
+        surface,
+        rect: { x: position.x + surface.x, y: position.y + surface.y, width: surface.width, height: surface.height },
+        scaleX: 1,
+        scaleY: 1,
+      }))
+    }
+    const scaleX = override.rect.width / geometry.width
+    const scaleY = override.rect.height / geometry.height
+    return window.surfaces.map((surface) => ({
+      surface,
+      rect: {
+        x: override.rect.x + (surface.x - geometry.x) * scaleX,
+        y: override.rect.y + (surface.y - geometry.y) * scaleY,
+        width: surface.width * scaleX,
+        height: surface.height * scaleY,
+      },
+      scaleX,
+      scaleY,
+    }))
+  }
+
+  /**
+   * A position for the window such that at least MIN_VISIBLE of its geometry is inside the output and its top edge
+   * (where client side title bars are) isn't above the output, so it can always be grabbed and moved back.
+   */
+  private keepVisible(window: SceneWindow, position: Point): Point {
+    const { geometry } = window
+    if (this.output.width <= 0 || this.output.height <= 0) {
+      return position
+    }
+    const visibleWidth = Math.min(MIN_VISIBLE, geometry.width)
+    const visibleHeight = Math.min(MIN_VISIBLE, geometry.height)
+    let x = position.x + geometry.x
+    let y = position.y + geometry.y
+    x = Math.max(visibleWidth - geometry.width, Math.min(x, this.output.width - visibleWidth))
+    y = Math.max(0, Math.min(y, this.output.height - visibleHeight))
+    return { x: Math.round(x - geometry.x), y: Math.round(y - geometry.y) }
+  }
+
+  /** Move windows that ended up (mostly) outside the output back in, and tell the server. */
+  private keepWindowsVisible() {
+    for (const window of this.windows) {
+      if (
+        window.maximized ||
+        window.fullscreen ||
+        !window.placed ||
+        this.resizeOverrides.has(window.id) ||
+        this.interaction?.window === window.id
+      ) {
+        continue
+      }
+      const position = this.windowPosition(window)
+      const visible = this.keepVisible(window, position)
+      if (visible.x !== position.x || visible.y !== position.y) {
+        this.localPositions.set(window.id, visible)
+        this.connection.send({ type: 'window.move', window: window.id, ...visible })
+        this.scheduleRender()
+      }
+    }
+  }
+
   // -------------------------------------------------------------------------------------------------------------------
   // rendering
 
@@ -230,14 +367,8 @@ export class Desktop {
   private render() {
     this.renderer.beginFrame()
     for (const window of this.windows) {
-      const position = this.windowPosition(window)
-      for (const surface of window.surfaces) {
-        this.renderer.drawSurface(surface.id, {
-          x: position.x + surface.x,
-          y: position.y + surface.y,
-          width: surface.width,
-          height: surface.height,
-        })
+      for (const { surface, rect } of this.surfaceRects(window)) {
+        this.renderer.drawSurface(surface.id, rect)
       }
     }
     if (this.cursor.kind === 'surface') {
@@ -286,15 +417,9 @@ export class Desktop {
   private pick(point: Point): Pick | undefined {
     for (let w = this.windows.length - 1; w >= 0; w--) {
       const window = this.windows[w]
-      const position = this.windowPosition(window)
-      for (let s = window.surfaces.length - 1; s >= 0; s--) {
-        const surface = window.surfaces[s]
-        const rect: Rect = {
-          x: position.x + surface.x,
-          y: position.y + surface.y,
-          width: surface.width,
-          height: surface.height,
-        }
+      const rects = this.surfaceRects(window)
+      for (let s = rects.length - 1; s >= 0; s--) {
+        const { surface, rect, scaleX, scaleY } = rects[s]
         // TODO respect the surface input region (e.g. client side shadows)
         if (
           point.x >= rect.x &&
@@ -302,7 +427,7 @@ export class Desktop {
           point.x < rect.x + rect.width &&
           point.y < rect.y + rect.height
         ) {
-          return { window, surface: surface.id, sx: point.x - rect.x, sy: point.y - rect.y }
+          return { window, surface: surface.id, sx: (point.x - rect.x) / scaleX, sy: (point.y - rect.y) / scaleY }
         }
       }
     }
@@ -317,16 +442,16 @@ export class Desktop {
       return undefined
     }
     const window = this.windows.find((w) => w.id === this.grab!.window.id)
-    const surface = window?.surfaces.find((s) => s.id === this.grab!.surface)
-    if (window === undefined || surface === undefined) {
+    const placed = window && this.surfaceRects(window).find(({ surface }) => surface.id === this.grab!.surface)
+    if (window === undefined || placed === undefined) {
       return undefined
     }
-    const position = this.windowPosition(window)
+    const { surface, rect, scaleX, scaleY } = placed
     return {
       window,
       surface: surface.id,
-      sx: point.x - position.x - surface.x,
-      sy: point.y - position.y - surface.y,
+      sx: (point.x - rect.x) / scaleX,
+      sy: (point.y - rect.y) / scaleY,
     }
   }
 
@@ -365,6 +490,7 @@ export class Desktop {
       canvas.setPointerCapture(event.pointerId)
       this.pointer = point(event)
       if (this.buttons === 0) {
+        this.pressPointer = this.pointer
         this.grab = this.pick(this.pointer)
         if (this.grab && !this.grab.window.activated) {
           this.connection.send({ type: 'window.activate', window: this.grab.window.id })
@@ -400,6 +526,9 @@ export class Desktop {
     })
 
     canvas.addEventListener('pointercancel', () => {
+      if (this.interaction) {
+        this.endInteraction()
+      }
       this.interaction = undefined
       this.grab = undefined
       this.buttons = 0
@@ -448,24 +577,82 @@ export class Desktop {
     if (window === undefined || this.buttons === 0) {
       return
     }
+    // The client asks for the interaction in response to the press, a round trip later. Measure from the press so the
+    // window catches up with pointer movement made in the meantime.
     if (message.mode === 'move') {
       this.interaction = {
         mode: 'move',
         window: window.id,
-        startPointer: this.pointer,
+        startPointer: this.pressPointer,
         startPosition: this.windowPosition(window),
         lastSent: 0,
       }
       this.canvas.style.cursor = 'grabbing'
     } else {
+      const startRect = this.shownGeometry(window)
+      const previous = this.resizeOverrides.get(window.id)
+      clearTimeout(previous?.settleTimer)
+      this.resizeOverrides.set(window.id, { rect: startRect, edges: message.edges })
       this.interaction = {
         mode: 'resize',
         window: window.id,
         edges: message.edges,
-        startPointer: this.pointer,
-        startSize: { width: window.geometry.width, height: window.geometry.height },
+        startPointer: this.pressPointer,
+        startRect,
       }
     }
+    this.continueInteraction()
+  }
+
+  /** The geometry rect a resize interaction shows for the current pointer position. The opposite edges stay put. */
+  private resizeRect(interaction: Extract<Interaction, { mode: 'resize' }>): Rect {
+    const dx = this.pointer.x - interaction.startPointer.x
+    const dy = this.pointer.y - interaction.startPointer.y
+    const { edges, startRect } = interaction
+    let { x, y, width, height } = startRect
+    if (edges & EDGE_RIGHT) {
+      width = Math.max(1, Math.round(startRect.width + dx))
+    } else if (edges & EDGE_LEFT) {
+      width = Math.max(1, Math.round(startRect.width - dx))
+      x = startRect.x + startRect.width - width
+    }
+    if (edges & EDGE_BOTTOM) {
+      height = Math.max(1, Math.round(startRect.height + dy))
+    } else if (edges & EDGE_TOP) {
+      height = Math.max(1, Math.round(startRect.height - dy))
+      y = startRect.y + startRect.height - height
+    }
+    return { x, y, width, height }
+  }
+
+  /** Did the client commit content for the size we asked for? */
+  private clientCaughtUp(window: SceneWindow, size: Size): boolean {
+    const configured = window.configuredSize
+    if (configured) {
+      return configured.width === size.width && configured.height === size.height
+    }
+    return window.geometry.width === size.width && window.geometry.height === size.height
+  }
+
+  /**
+   * The client committed the final size (or took too long): position the window so the edges that didn't move during
+   * the drag stay where they were, using the size the client actually chose, and show it unstretched again.
+   */
+  private settleResize(window: SceneWindow) {
+    const override = this.resizeOverrides.get(window.id)
+    if (override === undefined) {
+      return
+    }
+    clearTimeout(override.settleTimer)
+    this.resizeOverrides.delete(window.id)
+    const { rect, edges } = override
+    const { geometry } = window
+    const x = edges & EDGE_LEFT ? rect.x + rect.width - geometry.width : rect.x
+    const y = edges & EDGE_TOP ? rect.y + rect.height - geometry.height : rect.y
+    const position = this.keepVisible(window, { x: x - geometry.x, y: y - geometry.y })
+    this.localPositions.set(window.id, position)
+    this.connection.send({ type: 'window.move', window: window.id, ...position })
+    this.scheduleRender()
   }
 
   private continueInteraction() {
@@ -473,7 +660,9 @@ export class Desktop {
     const dx = this.pointer.x - interaction.startPointer.x
     const dy = this.pointer.y - interaction.startPointer.y
     if (interaction.mode === 'move') {
-      const position = { x: interaction.startPosition.x + dx, y: interaction.startPosition.y + dy }
+      const window = this.windows.find((w) => w.id === interaction.window)
+      const wanted = { x: interaction.startPosition.x + dx, y: interaction.startPosition.y + dy }
+      const position = window ? this.keepVisible(window, wanted) : wanted
       this.localPositions.set(interaction.window, position)
       const now = performance.now()
       if (now - interaction.lastSent > MOVE_SEND_INTERVAL) {
@@ -482,15 +671,18 @@ export class Desktop {
       }
       this.scheduleRender()
     } else {
-      const { edges, startSize } = interaction
-      const width = startSize.width + (edges & EDGE_RIGHT ? dx : edges & EDGE_LEFT ? -dx : 0)
-      const height = startSize.height + (edges & EDGE_BOTTOM ? dy : edges & EDGE_TOP ? -dy : 0)
+      const rect = this.resizeRect(interaction)
+      const override = this.resizeOverrides.get(interaction.window)
+      if (override) {
+        override.rect = rect
+      }
+      this.scheduleRender()
       const first = this.pendingResize === undefined
       this.pendingResize = {
         window: interaction.window,
-        width: Math.max(1, Math.round(width)),
-        height: Math.max(1, Math.round(height)),
-        edges,
+        width: rect.width,
+        height: rect.height,
+        edges: interaction.edges,
       }
       // at most one resize request per frame
       if (first) {
@@ -515,20 +707,33 @@ export class Desktop {
       this.applyCursor()
     } else {
       const window = this.windows.find((w) => w.id === interaction.window)
-      const dx = this.pointer.x - interaction.startPointer.x
-      const dy = this.pointer.y - interaction.startPointer.y
-      const { edges, startSize } = interaction
-      if (window) {
-        this.connection.send({
-          type: 'window.resize',
-          window: window.id,
-          width: Math.max(1, Math.round(startSize.width + (edges & EDGE_RIGHT ? dx : edges & EDGE_LEFT ? -dx : 0))),
-          height: Math.max(1, Math.round(startSize.height + (edges & EDGE_BOTTOM ? dy : edges & EDGE_TOP ? -dy : 0))),
-          edges,
-          done: true,
-        })
-      }
+      const override = this.resizeOverrides.get(interaction.window)
+      const rect = this.resizeRect(interaction)
       this.pendingResize = undefined
+      if (window === undefined || override === undefined) {
+        this.resizeOverrides.delete(interaction.window)
+        return
+      }
+      override.rect = rect
+      override.finalSize = { width: rect.width, height: rect.height }
+      this.connection.send({
+        type: 'window.resize',
+        window: window.id,
+        width: rect.width,
+        height: rect.height,
+        edges: interaction.edges,
+        done: true,
+      })
+      override.settleTimer = setTimeout(() => {
+        const current = this.windows.find((w) => w.id === interaction.window)
+        if (current) {
+          this.settleResize(current)
+        }
+      }, RESIZE_SETTLE_TIMEOUT)
+      if (this.clientCaughtUp(window, override.finalSize)) {
+        this.settleResize(window)
+      }
+      this.scheduleRender()
     }
   }
 

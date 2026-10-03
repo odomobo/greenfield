@@ -68,10 +68,13 @@ export default class XdgToplevel implements XdgToplevelRequests, DesktopSurfaceR
   }
   current: {
     state: ToplevelState
+    /** size of the configure the committed state reflects (0x0 if the client may choose) */
+    size: Size
     minSize: Size
     maxSize: Size
   } = {
     state: {},
+    size: ZERO_SIZE,
     minSize: ZERO_SIZE,
     maxSize: {
       width: Number.MAX_SAFE_INTEGER,
@@ -158,6 +161,7 @@ export default class XdgToplevel implements XdgToplevelRequests, DesktopSurfaceR
     // }
 
     this.current.state = { ...this.next.state }
+    this.current.size = this.next.size
     this.current.minSize = this.next.minSize
     this.current.maxSize = this.next.maxSize
 
@@ -268,6 +272,10 @@ export default class XdgToplevel implements XdgToplevelRequests, DesktopSurfaceR
 
   queryGeometry(): RectWithInfo {
     return this.xdgSurface.surface.geometry
+  }
+
+  queryConfiguredSize(): Size {
+    return this.current.size
   }
 
   configureSize(size: Size): void {

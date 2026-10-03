@@ -82,6 +82,10 @@ export async function createServerCompositor(
   }
 }
 
+// This module only runs in Node; the compositor's tsconfig doesn't include Node's types.
+const runSoon: (callback: () => void) => void =
+  (globalThis as { setImmediate?: (callback: () => void) => void }).setImmediate ?? ((callback) => setTimeout(callback))
+
 function connectClient(session: Session, options: ServerClientOptions): ServerClientConnection {
   const client = session.display.createClient(options.clientId)
   client.userData = {
@@ -113,6 +117,23 @@ function connectClient(session: Session, options: ServerClientOptions): ServerCl
       return
     }
     options.send(serializeWireMessages(client.display.eventSerial, wireMessages))
+  }
+  // Flush whatever gets queued, no matter where it came from. Many events are sent from microtasks or timers (e.g.
+  // xdg_surface.configure is scheduled in a microtask), after the code that triggered them already flushed; without
+  // this they'd sit in the queue until the next unrelated flush.
+  const connection = client.connection
+  const queueMessage = connection.onSend.bind(connection)
+  let flushScheduled = false
+  connection.onSend = (wireMessage: SendMessage) => {
+    queueMessage(wireMessage)
+    if (!flushScheduled) {
+      flushScheduled = true
+      // after pending microtasks (so it includes e.g. configures scheduled by the code that queued this message)
+      runSoon(() => {
+        flushScheduled = false
+        connection.flush()
+      })
+    }
   }
 
   const outOfBandHandlers: Record<number, (payload: Uint32Array) => void> = {

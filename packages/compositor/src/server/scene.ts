@@ -11,7 +11,6 @@ import { WlSurfaceResource } from '@gfld/compositor-protocol'
 import { AxisEvent } from '../AxisEvent'
 import { ButtonCode, ButtonEvent } from '../ButtonEvent'
 import { DesktopSurface, RemoteWindowManager } from '../desktop/Desktop'
-import { FloatingDesktopSurface } from '../desktop/FloatingDesktopSurface'
 import { KeyEvent } from '../KeyEvent'
 import { ORIGIN, minusPoint, Point } from '../math/Point'
 import { Size } from '../math/Size'
@@ -41,6 +40,11 @@ export type SceneWindow = {
   y: number
   /** window geometry (excludes e.g. client side shadows), relative to the main surface origin */
   geometry: { x: number; y: number; width: number; height: number }
+  /**
+   * Size of the configure the committed content reflects (xdg_toplevel only; 0x0 = client's choice). Lets the viewer
+   * tell when the client caught up with a size it asked for, even if the client rounds the size (e.g. to cells).
+   */
+  configuredSize?: { width: number; height: number }
   /** all surfaces of the window (subsurfaces, popups, child windows), bottom to top, relative to the window origin */
   surfaces: SceneSurface[]
 }
@@ -68,7 +72,6 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
   private send?: (message: ControlMessage) => void
   private lastSceneJSON = ''
   private readonly metadata = new Map<string, WindowMetadata>()
-  private readonly resizeEndTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   constructor(
     private readonly session: Session,
@@ -197,6 +200,7 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
           width: geometry.size.width,
           height: geometry.size.height,
         },
+        configuredSize: desktopSurface.role.queryConfiguredSize?.(),
         surfaces: this.windowSurfaces(view, origin),
       })
     }
@@ -435,26 +439,10 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
     }
     const width = Math.max(1, Math.round(Number(message.width)))
     const height = Math.max(1, Math.round(Number(message.height)))
-    const edges = Number(message.edges) || 0
-    const key = surfaceKey(desktopSurface.surface)
-
-    // FloatingDesktopSurface keeps the opposite edge in place while resizeEdges is set
-    clearTimeout(this.resizeEndTimers.get(key))
-    if (desktopSurface instanceof FloatingDesktopSurface) {
-      desktopSurface.resizeEdges = edges
-    }
+    // The viewer runs the interaction: it keeps the anchored edge in place and sends the final position (window.move)
+    // once the client committed the final size, so the window isn't moved here.
     desktopSurface.role.configureResizing(!message.done)
     desktopSurface.role.configureSize({ width, height })
-    if (message.done && desktopSurface instanceof FloatingDesktopSurface) {
-      // the client commits the final size a bit later
-      this.resizeEndTimers.set(
-        key,
-        setTimeout(() => {
-          desktopSurface.resizeEdges = 0
-          this.resizeEndTimers.delete(key)
-        }, 500),
-      )
-    }
     this.session.flush()
   }
 }

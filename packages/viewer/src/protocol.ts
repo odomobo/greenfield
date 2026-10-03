@@ -38,6 +38,8 @@ export type SceneWindow = {
   y: number
   /** window geometry relative to the main surface origin (excludes client side shadows) */
   geometry: { x: number; y: number; width: number; height: number }
+  /** size of the configure the committed content reflects (xdg_toplevel only), see the server's SceneWindow */
+  configuredSize?: { width: number; height: number }
   /** bottom to top, relative to the window origin */
   surfaces: SceneSurface[]
 }

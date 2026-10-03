@@ -56,6 +56,9 @@ if (testMode) {
   ;(window as any).__viewerTest = {
     connected: () => connection.open,
     windows: () => desktop.debugWindows(),
+    output: () => desktop.debugOutput(),
+    interaction: () => desktop.debugInteraction(),
+    resizing: () => desktop.debugResizing(),
     readLuma: (x: number, y: number, width: number, height: number) => renderer.readLuma(x, y, width, height),
   }
 }
