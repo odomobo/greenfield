@@ -27,5 +27,8 @@ ${body}
 
 export function errorPage(status: number): string {
   const text = status === 404 ? 'Not found' : status === 403 ? 'Forbidden' : 'Something went wrong'
-  return layout(text, `<main class="card"><h1>${escapeHTML(text)}</h1><p class="subtitle"><a href="/">Back</a></p></main>`)
+  return layout(
+    text,
+    `<main class="card"><h1>${escapeHTML(text)}</h1><p class="subtitle"><a href="/">Back</a></p></main>`,
+  )
 }

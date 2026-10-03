@@ -14,7 +14,9 @@
   "scripts": {
     "build:native": "sh ./native/build.sh",
     "build": "yarn run rimraf dist && yarn run tsc && yarn build:native",
-    "run": "yarn node dist/main.js"
+    "run": "yarn node dist/main.js",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write 'src/**/*.ts'"
   },
   "dependencies": {
     "@gfld/compositor-proxy": "workspace:^",
@@ -25,6 +27,12 @@
     "@tsconfig/node18": "^18.2.4",
     "@types/node": "^20.14.8",
     "@types/ws": "^8.5.10",
+    "@typescript-eslint/eslint-plugin": "^7.14.1",
+    "@typescript-eslint/parser": "^7.14.1",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.1.3",
+    "prettier": "^3.3.2",
     "rimraf": "^5.0.7",
     "typescript": "^5.5.2"
   },

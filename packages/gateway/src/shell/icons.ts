@@ -25,7 +25,11 @@ export class IconResolver {
     const home = env.HOME ?? ''
     const dataHome = env.XDG_DATA_HOME || path.join(home, '.local/share')
     const dataDirs = (env.XDG_DATA_DIRS || '/usr/local/share:/usr/share').split(':').filter(Boolean)
-    this.baseDirs = [path.join(home, '.icons'), path.join(dataHome, 'icons'), ...dataDirs.map((d) => path.join(d, 'icons'))]
+    this.baseDirs = [
+      path.join(home, '.icons'),
+      path.join(dataHome, 'icons'),
+      ...dataDirs.map((d) => path.join(d, 'icons')),
+    ]
     this.themeChain = this.resolveChain(userIconTheme(env))
   }
 
@@ -47,7 +51,7 @@ export class IconResolver {
       name.startsWith('/') || name.startsWith('file://')
         ? this.absolute(name)
         : // newer themes (Adwaita) only have symbolic versions of many icons
-          (this.lookup(name) ?? this.lookup(`${name}-symbolic`))
+          this.lookup(name) ?? this.lookup(`${name}-symbolic`)
     return file ? dataURL(file) : null
   }
 
@@ -103,7 +107,8 @@ export class IconResolver {
           continue
         }
         // lower is better: scalable first, then the closest size, preferring larger
-        const score = scalable || extension === '.svg' ? 0 : size >= ICON_SIZE ? size - ICON_SIZE + 1 : (ICON_SIZE - size) * 4
+        const score =
+          scalable || extension === '.svg' ? 0 : size >= ICON_SIZE ? size - ICON_SIZE + 1 : (ICON_SIZE - size) * 4
         if (best === undefined || score < best.score) {
           best = { file, score }
         }
@@ -169,7 +174,10 @@ export class IconResolver {
       const type = group.get('Type') ?? 'Threshold'
       // only app-ish contexts: launcher and notification icons
       const context = group.get('Context') ?? ''
-      if (context && !['Applications', 'Apps', 'Status', 'Devices', 'Places', 'Categories', 'Legacy'].includes(context)) {
+      if (
+        context &&
+        !['Applications', 'Apps', 'Status', 'Devices', 'Places', 'Categories', 'Legacy'].includes(context)
+      ) {
         continue
       }
       for (const root of roots) {
@@ -248,7 +256,10 @@ function dataURL(file: string): string | null {
     } finally {
       closeSync(fd)
     }
-    if (extension === '.png' && !data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    if (
+      extension === '.png' &&
+      !data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    ) {
       return null
     }
     if (extension === '.svg' && !/<svg[\s>]/.test(data.subarray(0, 16384).toString('utf8'))) {

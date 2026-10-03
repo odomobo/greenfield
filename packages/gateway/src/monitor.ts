@@ -7,6 +7,7 @@ import { ChildProcess, execFile, execFileSync, fork, spawn } from 'node:child_pr
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { chmodSync, chownSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { createServer, Server } from 'node:net'
+import { userInfo } from 'node:os'
 import path from 'node:path'
 import { GatewayConfig } from './config'
 import {
@@ -261,7 +262,7 @@ export class Monitor {
     if (!passwordOk || username !== this.config.devUser) {
       return undefined
     }
-    const info = require('node:os').userInfo()
+    const info = userInfo()
     return { username: info.username, uid: info.uid, gid: info.gid, home: info.homedir }
   }
 

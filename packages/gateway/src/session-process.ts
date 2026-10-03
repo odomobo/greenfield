@@ -31,7 +31,12 @@ process.on('uncaughtException', (e) => {
 
 // Apps inherit this environment: drop everything that isn't theirs to see.
 for (const name of Object.keys(process.env)) {
-  if (name.startsWith('GREENFIELD_') || name.startsWith('NODE_CHANNEL') || name === 'DISPLAY' || name === 'WAYLAND_DISPLAY') {
+  if (
+    name.startsWith('GREENFIELD_') ||
+    name.startsWith('NODE_CHANNEL') ||
+    name === 'DISPLAY' ||
+    name === 'WAYLAND_DISPLAY'
+  ) {
     delete process.env[name]
   }
 }
@@ -85,7 +90,7 @@ function listen(socketPath: string, session: Session, controller: SessionControl
       socket.destroy()
       return
     }
-    controller.onWsUpgrade(request as Parameters<SessionController["onWsUpgrade"]>[0], socket, head)
+    controller.onWsUpgrade(request as Parameters<SessionController['onWsUpgrade']>[0], socket, head)
   })
   return new Promise((resolve, reject) => {
     if (existsSync(socketPath)) {
@@ -166,7 +171,10 @@ function setupSessionEnvironment() {
     ],
     [
       'secrets service (gnome-keyring)',
-      ['/usr/share/dbus-1/services/org.freedesktop.secrets.service', '/usr/share/dbus-1/services/org.gnome.keyring.service'],
+      [
+        '/usr/share/dbus-1/services/org.freedesktop.secrets.service',
+        '/usr/share/dbus-1/services/org.gnome.keyring.service',
+      ],
     ],
   ]
   const missing = services.filter(([, files]) => !files.some((file) => existsSync(file))).map(([name]) => name)
@@ -177,10 +185,14 @@ function setupSessionEnvironment() {
 
 function startDBus(): string {
   // --fork: the parent prints the address and pid once the bus is up, then exits
-  const output = execFileSync('dbus-daemon', ['--session', '--fork', '--nopidfile', '--print-address=1', '--print-pid=1'], {
-    encoding: 'utf8',
-    timeout: 5000,
-  })
+  const output = execFileSync(
+    'dbus-daemon',
+    ['--session', '--fork', '--nopidfile', '--print-address=1', '--print-pid=1'],
+    {
+      encoding: 'utf8',
+      timeout: 5000,
+    },
+  )
   const [address, pid] = output.trim().split('\n')
   if (!address?.startsWith('unix:')) {
     throw new Error('dbus-daemon did not report an address')

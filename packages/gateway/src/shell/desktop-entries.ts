@@ -70,7 +70,10 @@ export function parseDesktopFile(text: string, locales: string[]): Map<string, s
 }
 
 function unescapeValue(value: string): string {
-  return value.replace(/\\([sntr\\;])/g, (_, c: string) => ({ s: ' ', n: '\n', t: '\t', r: '\r', '\\': '\\', ';': '\\;' })[c]!)
+  return value.replace(
+    /\\([sntr\\;])/g,
+    (_, c: string) => ({ s: ' ', n: '\n', t: '\t', r: '\r', '\\': '\\', ';': '\\;' })[c]!,
+  )
 }
 
 function list(value: string | undefined): string[] {

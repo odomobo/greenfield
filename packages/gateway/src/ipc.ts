@@ -22,7 +22,10 @@ export function normalizeSessionName(name: unknown): string | undefined {
     return undefined
   }
   // eslint-disable-next-line no-control-regex
-  const normalized = name.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim()
+  const normalized = name
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
   if (normalized.length === 0 || [...normalized].length > MAX_SESSION_NAME_LENGTH) {
     return undefined
   }

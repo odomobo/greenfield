@@ -548,14 +548,20 @@ function closeWebSocket(socket: Socket, code: number, reason: string) {
  */
 async function handleViewer(request: IncomingMessage, socket: Socket, head: Buffer, url: URL) {
   const key = request.headers['sec-websocket-key']
-  if (typeof key !== 'string' || !/^[A-Za-z0-9+/]{22}==$/.test(key) || request.headers['sec-websocket-version'] !== '13') {
+  if (
+    typeof key !== 'string' ||
+    !/^[A-Za-z0-9+/]{22}==$/.test(key) ||
+    request.headers['sec-websocket-version'] !== '13'
+  ) {
     rejectUpgrade(socket, 400)
     return
   }
   // no extensions or subprotocols: the bytes are relayed as they are
   socket.write(
     'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
-      `Sec-WebSocket-Accept: ${createHash('sha1').update(key + WS_GUID).digest('base64')}\r\n\r\n`,
+      `Sec-WebSocket-Accept: ${createHash('sha1')
+        .update(key + WS_GUID)
+        .digest('base64')}\r\n\r\n`,
   )
 
   const first = await readFirstFrame(socket, head)
@@ -565,7 +571,11 @@ async function handleViewer(request: IncomingMessage, socket: Socket, head: Buff
     return
   }
   const [, signIn] = current
-  const reply = await monitor({ type: 'sessionSocket', ticket: signIn.ticket, sessionId: url.searchParams.get('session') ?? '' })
+  const reply = await monitor({
+    type: 'sessionSocket',
+    ticket: signIn.ticket,
+    sessionId: url.searchParams.get('session') ?? '',
+  })
   if (!reply.ok || reply.type !== 'socket') {
     closeWebSocket(socket, CLOSE_NOT_FOUND, 'not found')
     return
@@ -647,6 +657,8 @@ function tuneSocket(socket: Socket) {
   }
   try {
     // keep unsent data in the session's priority queue rather than in the kernel (see ViewerTransport)
+    // a lazy require: it pulls in the proxy's native addon, which must stay optional here
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { setTcpNotSentLowat } = require('@gfld/compositor-proxy/dist/socket-options.js')
     setTcpNotSentLowat(fd, TCP_NOTSENT_LOWAT_BYTES)
   } catch {
@@ -692,7 +704,9 @@ function serve(listener: NetServer) {
     const where = typeof address === 'object' && address ? `${address.address}:${address.port}` : `${address}`
     log.info(`Listening on ${tls ? 'https' : 'http'}://${where}`)
     if (!tls) {
-      log.warn('!!! PLAINTEXT MODE: passwords and sessions travel unencrypted. Only use this on a trusted home LAN. !!!')
+      log.warn(
+        '!!! PLAINTEXT MODE: passwords and sessions travel unencrypted. Only use this on a trusted home LAN. !!!',
+      )
     }
     if (start.devMode) {
       log.warn('!!! DEV AUTH MODE: no PAM, sessions run as the current user. Never use this outside development. !!!')

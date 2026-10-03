@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util'
-import { readFileSync } from 'node:fs'
-import { hostname } from 'node:os'
+import { hostname, userInfo } from 'node:os'
+import { resolve } from 'node:path'
 import { isIP } from 'node:net'
 
 export type AuthMode = 'pam' | 'dev'
@@ -54,7 +54,9 @@ function fail(message: string): never {
 export function isPrivateAddress(ip: string): boolean {
   if (isIP(ip) === 4) {
     const [a, b] = ip.split('.').map(Number)
-    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
+    return (
+      a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
+    )
   }
   if (isIP(ip) === 6) {
     const lower = ip.toLowerCase()
@@ -132,7 +134,7 @@ export function parseConfig(argv: string[]): GatewayConfig {
     if (devPassword === undefined || devPassword.length < 8) {
       fail('--dev-auth needs GREENFIELD_DEV_PASSWORD (at least 8 characters)')
     }
-    devUser = require('node:os').userInfo().username as string
+    devUser = userInfo().username
   } else if (process.getuid?.() !== 0) {
     fail('PAM mode must be started as root (it drops privileges itself). For development use --dev-auth.')
   }
@@ -140,11 +142,11 @@ export function parseConfig(argv: string[]): GatewayConfig {
   const home = process.env.HOME ?? '/tmp'
   const stateDir =
     values['state-dir'] ??
-    (authMode === 'dev' ? `${process.env.XDG_STATE_HOME ?? `${home}/.local/state`}/greenfield-dev` : '/var/lib/greenfield')
+    (authMode === 'dev'
+      ? `${process.env.XDG_STATE_HOME ?? `${home}/.local/state`}/greenfield-dev`
+      : '/var/lib/greenfield')
   const runtimeDir =
-    authMode === 'dev'
-      ? `${process.env.XDG_RUNTIME_DIR ?? '/tmp'}/greenfield-dev-${bindPort}`
-      : '/run/greenfield'
+    authMode === 'dev' ? `${process.env.XDG_RUNTIME_DIR ?? '/tmp'}/greenfield-dev-${bindPort}` : '/run/greenfield'
 
   const encoder = values.encoder
   if (encoder !== 'x264' && encoder !== 'nvh264' && encoder !== 'vaapih264') {
@@ -167,6 +169,6 @@ export function parseConfig(argv: string[]): GatewayConfig {
     allowedOrigins: values['allowed-origin'] as string[],
     encoder,
     renderDevice: values['render-device']!,
-    viewerDir: require('node:path').resolve(__dirname, '../../viewer/dist'),
+    viewerDir: resolve(__dirname, '../../viewer/dist'),
   }
 }
