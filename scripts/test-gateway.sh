@@ -7,7 +7,11 @@
 #      CSRF enforced, and unsafe flag combinations refused;
 #   2. in a browser: logs in, starts a session, launches foot from the viewer, types a command, closes the browser,
 #      logs in again, finds the session listed, opens it and checks the same window comes back with the earlier
-#      output, with foot still running.
+#      output, with foot still running;
+#   3. window management in the viewer: a resize follows the pointer immediately (without waiting for the server),
+#      resizing from the left/top edge keeps the right/bottom edge in place, and shrinking the viewport moves a window
+#      back into view;
+#   4. renaming the session from the session list (a name with HTML in it shows as text).
 #
 # Requires: foot, playwright-cli (with its Chromium), curl, node, built packages (yarn build in packages/compositor
 # (incl. build:server), compositor-proxy, viewer, gateway). Run from anywhere:
@@ -214,14 +218,22 @@ $PW goto "$SESSION_URL&test=1" >/dev/null
 wait_for "() => !!window.__viewerTest && window.__viewerTest.connected()" "viewer connection"
 
 step "launching foot from the viewer"
-FOOTS_BEFORE=" $( (pgrep -x foot -u "$ME" || true) | tr '\n' ' ') "
 wait_for "() => !!document.querySelector('#apps button')" "app buttons"
 pw_eval "() => { document.querySelector('#apps button').click(); return true }" >/dev/null
 wait_for "() => { const w = window.__viewerTest.windows(); return w.length === 1 && w[0].placed && w[0].hasContent }" "foot window" 40
 sleep 1
+# Our foot is the one started by this test's gateway (other foots, e.g. in the user's own sessions, aren't ours).
+descends_from() {
+  local pid="$1" ancestor="$2"
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
+    [ "$pid" = "$ancestor" ] && return 0
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  done
+  return 1
+}
 FOOT_PID=""
 for pid in $(pgrep -x foot -u "$ME" || true); do
-  case "$FOOTS_BEFORE" in *" $pid "*) ;; *) FOOT_PID="$pid" ;; esac
+  descends_from "$pid" "$GATEWAY_PID" && FOOT_PID="$pid"
 done
 [ -n "$FOOT_PID" ] || fail "foot is not running"
 
@@ -290,12 +302,91 @@ if (reattached > typed / 4) {
 }
 EOF
 
-step "ending the session"
+# --- 3. window management ---
+
+# foot's window geometry as shown: "x y width height" (output coordinates)
+shown_geometry() {
+  # (with a trailing newline, so `read` succeeds)
+  echo "$(pw_eval "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return [g.x, g.y, g.width, g.height].join(' ') }" | tr -d '"')"
+}
+
+CANVAS_Y="$(pw_eval "() => Math.round(document.querySelector('canvas').getBoundingClientRect().y)")"
+
+# Press on one of foot's resize borders (page coordinates) and drag by (dx, dy) in 3 steps. Prints the shown geometry
+# right after each step, without waiting for the server.
+resize_drag() {
+  local px="$1" py="$2" dx="$3" dy="$4" i
+  $PW mousemove "$px" "$py" >/dev/null
+  $PW mousedown >/dev/null
+  # the client starts the resize in response to the press
+  wait_for "() => window.__viewerTest.interaction() === 'resize'" "the resize to start" 10
+  for i in 1 2 3; do
+    $PW mousemove $((px + dx * i / 3)) $((py + dy * i / 3)) >/dev/null
+    echo "$(shown_geometry)"
+  done
+  $PW mouseup >/dev/null
+  wait_for "() => !window.__viewerTest.resizing()" "the client to commit the final size" 10
+}
+
+step "resizing from the left edge: immediate, and the right edge stays put"
+read -r GX GY GW GH < <(shown_geometry)
+RIGHT=$((GX + GW))
+# foot draws its left border as a 5px subsurface just outside the window geometry
+STEPS="$(resize_drag $((GX - 3)) $((CANVAS_Y + GY + GH / 2)) 60 0 | awk '{ printf "%s,%s ", $1, $1 + $3 }')"
+echo "    during the drag (left,right): $STEPS"
+[ "$STEPS" = "$((GX + 20)),$RIGHT $((GX + 40)),$RIGHT $((GX + 60)),$RIGHT " ] ||
+  fail "the window didn't follow the pointer immediately with its right edge fixed: $STEPS"
+read -r GX2 GY2 GW2 GH2 < <(shown_geometry)
+echo "    settled at $GX2,$GY2 ${GW2}x${GH2}"
+[ $((GX2 + GW2)) = "$RIGHT" ] || fail "right edge moved from $RIGHT to $((GX2 + GW2)) after the resize"
+[ "$GY2" = "$GY" ] || fail "top edge moved from $GY to $GY2"
+
+step "resizing from the top edge keeps the bottom edge in place"
+read -r GX GY GW GH < <(shown_geometry)
+BOTTOM=$((GY + GH))
+# the top border subsurface is just above foot's title bar
+STEPS="$(resize_drag $((GX + GW / 2)) $((CANVAS_Y + GY - 3)) 0 45 | awk '{ printf "%s,%s ", $2, $2 + $4 }')"
+echo "    during the drag (top,bottom): $STEPS"
+[ "$STEPS" = "$((GY + 15)),$BOTTOM $((GY + 30)),$BOTTOM $((GY + 45)),$BOTTOM " ] ||
+  fail "the window didn't follow the pointer immediately with its bottom edge fixed: $STEPS"
+read -r GX2 GY2 GW2 GH2 < <(shown_geometry)
+echo "    settled at $GX2,$GY2 ${GW2}x${GH2}"
+[ $((GY2 + GH2)) = "$BOTTOM" ] || fail "bottom edge moved from $BOTTOM to $((GY2 + GH2)) after the resize"
+[ $((GX2 + GW2)) = "$RIGHT" ] || fail "right edge moved during the top edge resize"
+
+step "shrinking the viewport moves the window back into view"
+read -r GX GY GW GH < <(shown_geometry)
+$PW resize 160 500 >/dev/null
+wait_for "() => { const o = window.__viewerTest.output(); const g = window.__viewerTest.windows()[0].shownGeometry; return o.width <= 160 && g.x <= o.width - 80 && g.x + g.width >= 80 && g.y >= 0 && g.y <= o.height - 80 }" \
+  "the window to be moved back into view" 10
+wait_for "() => { const w = window.__viewerTest.windows()[0]; return w.x === w.shownX && w.y === w.shownY }" \
+  "the server to store the new position" 10
+read -r GX2 GY2 GW2 GH2 < <(shown_geometry)
+echo "    moved from $GX,$GY to $GX2,$GY2"
+[ "$GX2" -lt "$GX" ] || fail "the window wasn't moved"
+$PW resize 1280 800 >/dev/null
+
+# --- 4. renaming ---
+
+step "renaming the session"
 pw_eval "() => { location.href = '/sessions'; return true }" >/dev/null
 wait_for "() => location.pathname === '/sessions'" "sessions page"
-pw_eval "() => { document.querySelector('.sessions form').submit(); return true }" >/dev/null
+[ "$(pw_eval "() => document.querySelector('.sessions .name').firstChild.textContent")" = '"Session 1"' ] ||
+  fail "default session name isn't \"Session 1\""
+pw_eval "() => { const d = document.querySelector('.sessions details'); d.open = true; d.querySelector('input[name=name]').value = '  <i>Build</i>   & tests '; d.querySelector('form').submit(); return true }" >/dev/null
+wait_for "() => location.pathname === '/sessions' && document.querySelector('.sessions .name').firstChild.textContent === '<i>Build</i> & tests'" "the new name" 10
+[ "$(pw_eval "() => document.querySelectorAll('.sessions i').length")" = 0 ] || fail "HTML in the session name was rendered"
+RENAME_API="$(pw_eval "async () => { const me = await (await fetch('/api/me')).json(); const id = (await (await fetch('/api/sessions')).json())[0].id; const post = (name, csrf) => fetch('/api/sessions/' + id + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify({ name }) }).then((r) => r.status); return [await post('Work', me.csrf), await post('   ', me.csrf), await post('x'.repeat(65), me.csrf), await post('Nope', 'wrong')].join(' ') }")"
+echo "    API: rename $RENAME_API (expected 200 400 400 403)"
+[ "$RENAME_API" = '"200 400 400 403"' ] || fail "rename API: $RENAME_API"
+pw_eval "() => { location.reload(); return true }" >/dev/null
+wait_for "() => document.querySelector('.sessions .name')?.firstChild.textContent === 'Work'" "the API rename to show" 10
+echo "    ok"
+
+step "ending the session"
+pw_eval "() => { document.querySelector('.sessions form[action=\"/sessions/end\"]').submit(); return true }" >/dev/null
 sleep 3
 kill -0 "$FOOT_PID" 2>/dev/null && fail "foot still runs after ending the session"
 [ "$(pw_eval "() => document.querySelectorAll('.sessions li').length")" = 0 ] || fail "ended session still listed"
 
-echo "PASS: login, isolation checks, and session survival"
+echo "PASS: login, isolation checks, session survival, window management and renaming"
