@@ -6,19 +6,25 @@
 #      names, no cookies, nothing reachable without signing in, WebSockets refused without a valid token / with a
 #      foreign Origin, unsafe flag combinations refused; and that a sign-in only lasts while its page's presence
 #      connection is open (expires without one, survives a short blip, revoked a few seconds after it closes);
-#   2. in a browser: signs in (a second tab stays signed out), starts a session, launches foot from the viewer,
-#      types a command; history.back() and the mouse's back button over the desktop don't leave the page (foot gets
+#   2. in a browser: signs in (a second tab stays signed out), starts a session, launches foot from the Apps menu,
+#      renames the session there, pins foot (kept in the config dir), minimizes and restores it from the taskbar,
+#      maximizes and restores it down, shows a notification (notify-send) as a toast and in the history, types a
+#      command; history.back() and the mouse's back button over the desktop don't leave the page (foot gets
 #      BTN_SIDE); reloading asks to confirm first (dismiss keeps the page), then asks to sign in again and the old
 #      token stops working; closes the browser, signs in
 #      again, finds the session listed, opens it by clicking its row and checks the same window comes back with the
-#      earlier output, with foot still running;
+#      earlier output, with foot still running, still pinned, and the notification still in the history;
 #   3. window management in the viewer: a resize follows the pointer immediately (without waiting for the server),
 #      resizing from the left/top edge keeps the right/bottom edge in place, and shrinking the viewport moves a window
 #      back into view;
-#   4. Disconnect goes back to the session list without signing in again; renaming the session by clicking its name
-#      (a name with HTML in it shows as text, Escape cancels); signing out; Log out ends the session.
+#   4. Disconnect (in the Apps menu's session menu) goes back to the session list without signing in again; renaming
+#      the session by clicking its name (a name with HTML in it shows as text, Escape cancels); signing out; Log out
+#      (session menu) ends the session.
 #
-# Requires: foot, playwright-cli (with its Chromium), curl, node, built packages (yarn build in packages/compositor
+# The gateway gets its own D-Bus session bus (for notifications), config dir (pinned apps) and a test app
+# (a .desktop file for foot with WAYLAND_DEBUG) in its own data dir.
+#
+# Requires: foot, dbus-daemon, notify-send, playwright-cli (with its Chromium), curl, node, built packages (yarn build in packages/compositor
 # (incl. build:server), compositor-proxy, viewer, gateway). Run from anywhere:
 #   scripts/test-gateway.sh
 # The port can be changed with GATEWAY_PORT.
@@ -33,12 +39,14 @@ PWS="gateway-test-$$"
 PW="playwright-cli -s=$PWS"
 WORK="$(mktemp -d)"
 GATEWAY_PID=""
+DBUS_PID=""
 
 cleanup() {
   $PW close >/dev/null 2>&1 || true
   # SIGTERM makes the gateway end its sessions and their apps
   [ -n "$GATEWAY_PID" ] && kill "$GATEWAY_PID" 2>/dev/null || true
   sleep 2
+  [ -n "$DBUS_PID" ] && kill "$DBUS_PID" 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -53,7 +61,7 @@ fail() {
 
 step() { echo "==> $*"; }
 
-for tool in foot playwright-cli curl node; do
+for tool in foot dbus-daemon notify-send playwright-cli curl node; do
   command -v "$tool" >/dev/null || fail "$tool is not installed"
 done
 [ -f "$REPO/packages/gateway/dist/main.js" ] || fail "build the gateway first: (cd packages/gateway && yarn build)"
@@ -62,9 +70,21 @@ done
 # playwright-cli writes its logs to the current directory
 cd "$WORK"
 
-cat >"$WORK/apps.json" <<EOF
-{ "/foot": { "name": "Foot", "executable": "foot", "args": [], "env": { "WAYLAND_DEBUG": "1" } } }
+# the app the test launches from the Apps menu: foot logging its Wayland traffic, with an app_id of its own
+mkdir -p "$WORK/data/applications" "$WORK/config"
+cat >"$WORK/data/applications/test-foot.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Test Terminal
+GenericName=Terminal
+Exec=env WAYLAND_DEBUG=1 foot --app-id=test-foot
+Icon=foot
+Categories=System;TerminalEmulator;
 EOF
+# a session bus of our own: notifications go to this test's session, not to whatever owns the user's bus
+read -r DBUS_ADDRESS DBUS_PID < <(dbus-daemon --session --fork --nopidfile --print-address=1 --print-pid=1 | tr '\n' ' '; echo)
+[ -n "$DBUS_PID" ] || fail "couldn't start a D-Bus session bus"
+export DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDRESS"
 cat >"$WORK/playwright.json" <<EOF
 { "browser": { "contextOptions": { "ignoreHTTPSErrors": true, "viewport": null } } }
 EOF
@@ -86,9 +106,9 @@ echo "    ok"
 step "starting the gateway on :$PORT"
 curl -sk -o /dev/null "$BASE/" && fail "port $PORT is already in use"
 # exec, so $! is the gateway itself and cleanup can stop it
-(exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" node "$REPO/packages/gateway/dist/main.js" --dev-auth \
-  --bind-ip 127.0.0.1 --bind-port "$PORT" --state-dir "$WORK/state" --applications="$WORK/apps.json") \
-  >"$WORK/gateway.log" 2>&1 &
+(exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" XDG_DATA_HOME="$WORK/data" XDG_CONFIG_HOME="$WORK/config" \
+  node "$REPO/packages/gateway/dist/main.js" --dev-auth --bind-ip 127.0.0.1 --bind-port "$PORT" \
+  --state-dir "$WORK/state") >"$WORK/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 for _ in $(seq 1 40); do
   curl -sk -o /dev/null "$BASE/" && break
@@ -212,8 +232,8 @@ TOKEN="$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$WORK/good.json")"
 [ "$(probe ws "$WSS/ws?session=not-mine" "$BASE" "$TOKEN")" = 4004 ] || fail "WebSocket to someone else's session"
 [ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Origin: https://evil.example" -X POST "$BASE/api/sessions")" = 403 ] ||
   fail "creating a session from a foreign origin"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Origin: $BASE" -H 'Content-Type: application/json' --data '{"app":"/foot"}' "$BASE/api/sessions/x/launch")" = 401 ] ||
-  fail "launching without the token"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Origin: $BASE" -H 'Content-Type: application/json' --data '{"name":"x"}' "$BASE/api/sessions/x/rename")" = 401 ] ||
+  fail "renaming without the token"
 echo "    ok"
 
 step "a sign-in lasts only while its page is there"
@@ -311,10 +331,46 @@ wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "vie
 SESSION_ID="$(pw_eval "() => window.__viewerTest.session()" | tr -d '"')"
 [ -n "$SESSION_ID" ] || fail "no session"
 
-step "launching foot from the viewer"
-wait_for "() => !!document.querySelector('#apps button')" "app buttons"
-pw_eval "() => { document.querySelector('#apps button').click(); return true }" >/dev/null
+TEST_APP=test-foot.desktop
+step "the Apps menu: you, the session, the installed apps"
+click_element '#apps-button'
+wait_for "() => $(visible apps-menu) && !!document.querySelector('.app-row[data-app=\"$TEST_APP\"]')" "the test app in the Apps menu"
+[ "$(pw_eval "() => document.activeElement.id")" = '"apps-search"' ] || fail "the search field doesn't have the keyboard"
+[ "$(pw_eval "() => document.querySelector('.apps-username').textContent")" = "\"$ME\"" ] || fail "the user isn't shown"
+[ "$(pw_eval "() => document.querySelector('#apps-session-name input').value")" = '"Session 1"' ] ||
+  fail "the session name isn't shown"
+# searching narrows the list
+pw_eval "() => { const i = document.getElementById('apps-search'); i.value = 'test term'; i.dispatchEvent(new Event('input')); return true }" >/dev/null
+[ "$(pw_eval "() => [...document.querySelectorAll('.apps-list [data-app]')].map((e) => e.dataset.app).join(' ')")" = "\"$TEST_APP\"" ] ||
+  fail "searching didn't find just the test app"
+echo "    ok"
+
+step "renaming the session in the Apps menu"
+click_element '#apps-session-name input'
+$PW press Control+a >/dev/null
+$PW type "Shell test" >/dev/null
+$PW press Enter >/dev/null
+wait_for "() => document.querySelector('#apps-session-name input').value === 'Shell test' && document.title === 'Shell test'" "the new name"
+LISTED_NAME="$(pw_eval "async () => (await (await fetch('/api/sessions', { headers: { Authorization: 'Bearer ' + window.__viewerTest.token() } })).json())[0].name")"
+[ "$LISTED_NAME" = '"Shell test"' ] || fail "the rename didn't reach the session list: $LISTED_NAME"
+echo "    ok"
+
+step "pinning the test app"
+click_element ".pin-toggle[data-pin=\"$TEST_APP\"]"
+wait_for "() => !!document.querySelector('#taskbar-items button.pinned[data-group=\"$TEST_APP\"]')" "the pinned app in the taskbar"
+for _ in $(seq 1 10); do
+  grep -q "\"$TEST_APP\"" "$WORK/config/greenfield/pinned.json" 2>/dev/null && break
+  sleep 0.5
+done
+grep -q "\"$TEST_APP\"" "$WORK/config/greenfield/pinned.json" || fail "the pinned app wasn't saved"
+echo "    ok"
+
+step "launching foot from the Apps menu"
+click_element ".app-row[data-app=\"$TEST_APP\"]"
+wait_for "() => !$(visible apps-menu)" "the Apps menu to close"
 wait_for "() => { const w = window.__viewerTest.windows(); return w.length === 1 && w[0].placed && w[0].hasContent }" "foot window" 40
+wait_for "() => document.querySelector('#taskbar-items button[data-group=\"$TEST_APP\"]').matches('.running.active')" \
+  "foot's window in its pinned taskbar button" 10
 sleep 1
 # Our foot is the one started by this test's gateway (other foots, e.g. in the user's own sessions, aren't ours).
 descends_from() {
@@ -336,6 +392,75 @@ read -r WINDOW_ID TX TY TW TH < <(echo "$TERMINAL" | tr -d '[]"' | tr ',' ' ')
 echo "    window $WINDOW_ID at $TX,$TY (${TW}x${TH})"
 REGION="$TX, $TY, $((TW < 600 ? TW : 600)), 26"
 pw_eval "() => window.__viewerTest.readLuma($REGION)" >"$WORK/before-typing.json"
+
+# clicking the taskbar button of the active window minimizes it, clicking again restores it
+TASKBAR_BUTTON="#taskbar-items button[data-group=\"$TEST_APP\"]"
+
+step "minimizing and restoring from the taskbar"
+click_element "$TASKBAR_BUTTON"
+[ "$(pw_eval "() => Object.values(window.__viewerTest.animations()).join()")" = '"minimize"' ] ||
+  fail "no minimize animation"
+wait_for "() => { const w = window.__viewerTest.shellWindows()[0]; return w.minimized && !w.activated && !Object.keys(window.__viewerTest.animations()).length }" \
+  "the window to be minimized" 10
+pw_eval "() => window.__viewerTest.readLuma($REGION)" >"$WORK/minimized.json"
+[ "$(pw_eval "() => document.querySelector('$TASKBAR_BUTTON').matches('.running:not(.active)')")" = true ] ||
+  fail "the taskbar button still shows the window as active"
+click_element "$TASKBAR_BUTTON"
+[ "$(pw_eval "() => Object.values(window.__viewerTest.animations()).join()")" = '"restore"' ] ||
+  fail "no restore animation"
+wait_for "() => { const w = window.__viewerTest.shellWindows()[0]; return !w.minimized && w.activated && !Object.keys(window.__viewerTest.animations()).length }" \
+  "the window to be restored" 10
+sleep 0.5
+pw_eval "() => window.__viewerTest.readLuma($REGION)" >"$WORK/restored.json"
+node -e '
+  const [a, b, c] = process.argv.slice(1).map((f) => JSON.parse(require("fs").readFileSync(f, "utf8")))
+  const diff = (x, y) => x.reduce((sum, v, i) => sum + Math.abs(v - y[i]), 0) / x.length
+  console.log(`    luma difference: minimized ${diff(a, b).toFixed(1)}, restored ${diff(a, c).toFixed(1)}`)
+  process.exit(diff(a, b) > 20 && diff(a, c) < 5 ? 0 : 1)
+' "$WORK/before-typing.json" "$WORK/minimized.json" "$WORK/restored.json" || fail "the window didn't disappear and come back"
+echo "    ok"
+
+step "maximizing and restoring down from the taskbar menu"
+read -r OX OY OW OH < <(pw_eval "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return [g.x, g.y, g.width, g.height].join(' ') }" | tr -d '"'; echo)
+# $1: the menu item (data-action)
+taskbar_menu() {
+  local center
+  center="$(pw_eval "() => { const r = document.querySelector('$TASKBAR_BUTTON').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.y + r.height / 2) }" | tr -d '"')"
+  read -r CX CY <<<"$center"
+  $PW mousemove "$CX" "$CY" >/dev/null
+  $PW mousedown right >/dev/null
+  $PW mouseup right >/dev/null
+  wait_for "() => !!document.querySelector('.context-menu button[data-action=$1]')" "the taskbar menu" 5
+  click_element ".context-menu button[data-action=$1]"
+}
+taskbar_menu maximize
+[ "$(pw_eval "() => Object.values(window.__viewerTest.animations()).join()")" = '"maximize"' ] ||
+  fail "no maximize animation"
+wait_for "() => { const w = window.__viewerTest.windows()[0]; const o = window.__viewerTest.output(); const g = w.shownGeometry; return w.maximized && g.x === 0 && g.y === 0 && g.width === o.width && g.height === o.height && !Object.keys(window.__viewerTest.animations()).length }" \
+  "the window to be maximized" 10
+taskbar_menu unmaximize
+wait_for "() => { const w = window.__viewerTest.windows()[0]; const g = w.shownGeometry; return !w.maximized && [g.x, g.y, g.width, g.height].join(' ') === '$OX $OY $OW $OH' && !Object.keys(window.__viewerTest.animations()).length }" \
+  "the window to be restored down" 10
+echo "    ok"
+
+step "notifications: a toast and the history"
+notify-send -a "Test suite" "Hello from test $$" "First line
+<b>second</b> line &amp; more"
+wait_for "() => [...document.querySelectorAll('#toasts .toast')].some((t) => t.textContent.includes('Hello from test $$'))" "the toast" 10
+[ "$(pw_eval "() => document.querySelector('#toasts .toast .notification-body').textContent")" = '"First line\nsecond line & more"' ] ||
+  fail "the notification body isn't shown as plain text"
+[ "$(pw_eval "() => document.querySelector('#notifications-button').classList.contains('unseen')")" = true ] ||
+  fail "the bell doesn't show a new notification"
+click_element '#notifications-button'
+wait_for "() => $(visible notifications-panel) && document.querySelectorAll('#notifications-panel .notification').length === 1" "the notification in the history" 5
+# dismissing removes it in the session too
+click_element '#notifications-panel .notification-close'
+wait_for "() => document.querySelectorAll('#notifications-panel .notification').length === 0" "the dismissed notification to go" 5
+click_element '#notifications-button'
+# one to find again after reconnecting
+notify-send -a "Test suite" "Kept for later $$"
+wait_for "() => document.querySelectorAll('#toasts .toast').length === 1" "the second toast" 10
+echo "    ok"
 
 step "typing a command"
 $PW mousemove $((TX + TW / 2)) $((TY + TH / 2)) >/dev/null
@@ -403,6 +528,11 @@ AFTER="$(pw_eval "() => { const w = window.__viewerTest.windows()[0]; const s = 
 read -r WINDOW_ID2 TX2 TY2 < <(echo "$AFTER" | tr -d '[]"' | tr ',' ' ')
 [ "$WINDOW_ID2" = "$WINDOW_ID" ] || fail "a different window came back ($WINDOW_ID2 instead of $WINDOW_ID)"
 [ "$TX2,$TY2" = "$TX,$TY" ] || fail "window moved from $TX,$TY to $TX2,$TY2"
+wait_for "() => !!document.querySelector('#taskbar-items button.pinned.running[data-group=\"$TEST_APP\"]')" "the pinned, running app after reattaching" 10
+click_element '#notifications-button'
+wait_for "() => [...document.querySelectorAll('#notifications-panel .notification')].some((n) => n.textContent.includes('Kept for later $$'))" \
+  "the notification in the history after reattaching" 10
+click_element '#notifications-button'
 pw_eval "() => window.__viewerTest.readLuma($REGION)" >"$WORK/after-reattach.json"
 
 step "comparing pixels"
@@ -499,8 +629,17 @@ $PW resize 1280 800 >/dev/null
 
 # --- 4. session list: disconnect, renaming, signing out, logging out ---
 
+# the session menu in the Apps menu. $1: disconnect or logout
+session_menu() {
+  click_element '#apps-button'
+  wait_for "() => $(visible apps-menu)" "the Apps menu" 5
+  click_element '#session-menu-button'
+  wait_for "() => !!document.querySelector('#session-menu button[data-action=$1]')" "the session menu" 5
+  click_element "#session-menu button[data-action=$1]"
+}
+
 step "Disconnect goes back to the session list, still signed in"
-pw_eval "() => { document.querySelector('#disconnect').click(); return true }" >/dev/null
+session_menu disconnect
 wait_for "() => $(visible sessions-view) && document.querySelectorAll('.sessions li').length === 1" "the session list"
 [ "$(pw_eval "() => window.__viewerTest.connected()")" = false ] || fail "still connected to the session"
 kill -0 "$FOOT_PID" 2>/dev/null || fail "foot didn't survive disconnecting"
@@ -508,8 +647,8 @@ echo "    ok"
 
 NAME_FIELD='.sessions .session-name input'
 step "renaming the session by clicking its name"
-[ "$(pw_eval "() => document.querySelector('$NAME_FIELD').value")" = '"Session 1"' ] ||
-  fail "default session name isn't \"Session 1\""
+[ "$(pw_eval "() => document.querySelector('$NAME_FIELD').value")" = '"Shell test"' ] ||
+  fail "the name given in the Apps menu isn't listed"
 [ "$(pw_eval "() => document.querySelector('$NAME_FIELD').getAttribute('aria-label')")" = '"Rename session"' ] ||
   fail "the name field has no accessible label"
 click_element "$NAME_FIELD"
@@ -540,7 +679,7 @@ echo "    ok"
 step "Log out ends the session"
 pw_eval "() => { document.querySelector('.sessions button[data-action=open]').click(); return true }" >/dev/null
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection"
-pw_eval "() => { document.querySelector('#logout').click(); return true }" >/dev/null
+session_menu logout
 wait_for "() => $(visible login-view)" "the sign-in form"
 sleep 3
 kill -0 "$FOOT_PID" 2>/dev/null && fail "foot still runs after logging out"
@@ -548,4 +687,4 @@ browser_login
 [ "$(pw_eval "() => document.querySelectorAll('.sessions li').length")" = 0 ] || fail "ended session still listed"
 echo "    ok"
 
-echo "PASS: login, isolation checks, per-page sign-in, session survival, window management, renaming and logging out"
+echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming and logging out"
