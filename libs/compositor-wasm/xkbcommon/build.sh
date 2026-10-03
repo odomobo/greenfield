@@ -15,7 +15,8 @@ ensure_repo() {
 }
 
 ensure_repo_xkeyboard-config() {
-      git clone --depth 1 --branch "master" "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config.git" repo-xkeyboard-config
+      # 2.44 is the last release with the xkb-base option and the share/X11/xkb install layout
+      git clone --depth 1 --branch "xkeyboard-config-2.44" "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config.git" repo-xkeyboard-config
 }
 
 ensure_repo_xml2() {
