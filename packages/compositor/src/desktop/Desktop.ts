@@ -40,6 +40,14 @@ export interface RemoteWindowManager {
   requestMove(desktopSurface: DesktopSurface): void
 
   requestResize(desktopSurface: DesktopSurface, edges: number): void
+
+  /** The client asked to be minimized. The window manager hides it (the surface stays mapped). */
+  requestMinimize(desktopSurface: DesktopSurface): void
+
+  /** The client asked to be (un)maximized. Sent before the configure, so the change can be animated right away. */
+  maximizeRequested(desktopSurface: DesktopSurface, maximized: boolean): void
+
+  isMinimized(surface: Surface): boolean
 }
 
 export interface DesktopSurface {

@@ -33,6 +33,8 @@ export type SceneWindow = {
   activated: boolean
   maximized: boolean
   fullscreen: boolean
+  /** hidden by the user or the client, shown again by window.activate */
+  minimized: boolean
   /** false until the viewer decided where the window goes */
   placed: boolean
   /** position of the main surface's origin in output coordinates */
@@ -61,7 +63,7 @@ export function surfaceKey(surface: Surface): string {
   return `${surface.resource.client.id}/${surface.resource.id}`
 }
 
-type WindowMetadata = { title: string; appId: string; activated: boolean; placed: boolean }
+type WindowMetadata = { title: string; appId: string; activated: boolean; placed: boolean; minimized: boolean }
 
 // AxisEvent wants the DOM WheelEvent delta mode constants
 const DOM_DELTA_PIXEL = 0
@@ -129,7 +131,7 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
     const key = `${surface.client.id}/${surface.id}`
     let metadata = this.metadata.get(key)
     if (metadata === undefined) {
-      metadata = { title: '', appId: '', activated: false, placed: false }
+      metadata = { title: '', appId: '', activated: false, placed: false, minimized: false }
       this.metadata.set(key, metadata)
     }
     return metadata
@@ -191,6 +193,7 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
         activated: metadata.activated,
         maximized: desktopSurface.role.queryMaximized(),
         fullscreen: desktopSurface.role.queryFullscreen(),
+        minimized: metadata.minimized,
         placed: metadata.placed,
         x: Math.round(origin.x),
         y: Math.round(origin.y),
@@ -247,6 +250,45 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
     this.send?.({ type: 'interactive', mode: 'resize', window: surfaceKey(desktopSurface.surface), edges })
   }
 
+  requestMinimize(desktopSurface: DesktopSurface): void {
+    this.setMinimized(desktopSurface.surface, true)
+  }
+
+  isMinimized(surface: Surface): boolean {
+    return this.metadata.get(surfaceKey(surface))?.minimized ?? false
+  }
+
+  maximizeRequested(desktopSurface: DesktopSurface, maximized: boolean): void {
+    if (desktopSurface.role.queryMaximized() !== maximized) {
+      this.send?.({ type: 'maximize-requested', window: surfaceKey(desktopSurface.surface), maximized })
+    }
+  }
+
+  /**
+   * Minimized windows stay mapped (their content stays current for previews and a quick restore); the viewer doesn't
+   * show them. Minimizing drops the keyboard focus, activating a window restores it.
+   */
+  private setMinimized(surface: Surface, minimized: boolean) {
+    const metadata = this.metadataFor({ id: surface.resource.id, client: surface.resource.client })
+    if (metadata.minimized === minimized) {
+      return
+    }
+    metadata.minimized = minimized
+    if (minimized) {
+      const seat = this.session.globals.seat
+      // the active window, also while the viewer page doesn't have the keyboard (then keyboard.focus is unset)
+      if (seat.focusedSurface?.surface === surface) {
+        seat.keyboard.setFocus(undefined)
+        seat.dropFocus()
+      }
+      if (seat.savedKbdFocus === surface) {
+        seat.savedKbdFocus = undefined
+      }
+    }
+    this.session.flush()
+    this.session.renderer.render()
+  }
+
   // ---------------------------------------------------------------------------------------------------------------
   // viewer -> server
 
@@ -279,11 +321,23 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
       case 'window.move':
         this.moveWindow(message)
         break
-      case 'window.activate':
+      case 'window.activate': {
+        const surface = this.findSurface(message.window)
+        if (surface) {
+          this.setMinimized(surface, false)
+        }
         this.findDesktopSurface(message.window)?.activate()
         this.session.flush()
         this.session.renderer.render()
         break
+      }
+      case 'window.minimize': {
+        const surface = this.findSurface(message.window)
+        if (surface?.role?.desktopSurface) {
+          this.setMinimized(surface, Boolean(message.minimized))
+        }
+        break
+      }
       case 'window.resize':
         this.resizeWindow(message)
         break

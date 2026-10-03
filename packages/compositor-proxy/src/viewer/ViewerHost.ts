@@ -22,11 +22,24 @@ export interface WindowSceneEndpoint {
 }
 
 /**
+ * The desktop shell's server side (app list, launching, pinned apps, notifications), provided by the session process.
+ * Gets the viewer's `shell.*` messages.
+ */
+export interface ShellEndpoint {
+  attach(send: (message: ControlMessage) => void): void
+
+  detach(): void
+
+  handleMessage(message: ControlMessage): void
+}
+
+/**
  * Owns the (at most one) viewer connection of this session. A new viewer takes over from the previous one. The
  * session, its compositor and apps live on without a viewer.
  */
 export class ViewerHost {
   private transport?: ViewerTransport
+  private shellEndpoint?: ShellEndpoint
 
   constructor(private readonly scene: WindowSceneEndpoint) {
     const isAttached = () => this.transport !== undefined
@@ -36,6 +49,14 @@ export class ViewerHost {
       },
       sendFrame: (surfaceKey, frame) => this.transport?.send({ priority: 'frame', surface: surfaceKey, frame }),
     })
+  }
+
+  set shell(shell: ShellEndpoint) {
+    this.shellEndpoint = shell
+    const transport = this.transport
+    if (transport) {
+      shell.attach((message) => transport.send({ priority: 'control', message }))
+    }
   }
 
   attach(ws: WebSocket): void {
@@ -48,6 +69,7 @@ export class ViewerHost {
       }
       previous.close(CLOSE_TAKEN_OVER, 'Session taken over by another viewer.')
       this.scene.detach()
+      this.shellEndpoint?.detach()
     }
 
     const transport = new WebSocketViewerTransport(ws)
@@ -62,12 +84,14 @@ export class ViewerHost {
       this.transport = undefined
       setViewerAttached(false)
       this.scene.detach()
+      this.shellEndpoint?.detach()
     }
 
     logger.info('Viewer attached.')
     setViewerAttached(true)
     transport.send({ priority: 'control', message: { type: 'welcome', protocolVersion: PROTOCOL_VERSION } })
     this.scene.attach((message) => transport.send({ priority: 'control', message }))
+    this.shellEndpoint?.attach((message) => transport.send({ priority: 'control', message }))
     // the viewer has nothing yet, every surface starts with a key frame of its current content
     requestKeyFramesForAllSurfaces()
   }
@@ -85,7 +109,11 @@ export class ViewerHost {
         break
       default:
         try {
-          this.scene.handleMessage(message)
+          if (message.type.startsWith('shell.')) {
+            this.shellEndpoint?.handleMessage(message)
+          } else {
+            this.scene.handleMessage(message)
+          }
         } catch (e: any) {
           logger.error(`Failed to handle viewer message ${message.type}: ${e.message}\n${e.stack}`)
         }

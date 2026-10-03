@@ -239,12 +239,14 @@ export default class XdgToplevel implements XdgToplevelRequests, DesktopSurfaceR
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   setMaximized(resource: XdgToplevelResource): void {
     this.ensureAdded()
+    this.session.windowManager?.maximizeRequested(this.desktopSurface, true)
     this.desktopSurface.setMaximized(true)
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   unsetMaximized(resource: XdgToplevelResource): void {
     this.ensureAdded()
+    this.session.windowManager?.maximizeRequested(this.desktopSurface, false)
     this.desktopSurface.setMaximized(false)
   }
 

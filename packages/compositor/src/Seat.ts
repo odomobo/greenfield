@@ -783,9 +783,16 @@ export class Seat implements WlSeatRequests, WlDataDeviceRequests {
   }
 
   private activateNextFocus() {
-    const nextFocusView = this.session.renderer.topLevelViews
+    // copy, reverse() sorts in place
+    const nextFocusView = [...this.session.renderer.topLevelViews]
       .reverse()
-      .find((toplevelView) => toplevelView.surface !== this.focusedSurface?.surface)
+      .find(
+        (toplevelView) =>
+          toplevelView.surface !== this.focusedSurface?.surface &&
+          toplevelView.mapped &&
+          !toplevelView.destroyed &&
+          !this.session.windowManager?.isMinimized(toplevelView.surface),
+      )
     this.focusedSurface = undefined
     nextFocusView?.surface?.role?.desktopSurface?.activate()
   }

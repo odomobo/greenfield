@@ -432,6 +432,11 @@ export class FloatingDesktopSurface implements DesktopSurface {
   }
 
   minimize(): void {
+    const windowManager = this.surface.session.windowManager
+    if (windowManager) {
+      windowManager.requestMinimize(this)
+      return
+    }
     this.role.view.mapped = false
     const seat = this.surface.session.globals.seat
     if (this.surface === seat.keyboard.focus?.getMainSurface()) {
