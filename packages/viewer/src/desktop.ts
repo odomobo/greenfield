@@ -514,7 +514,20 @@ export class Desktop {
       event.preventDefault()
     })
 
+    // The mouse's back/forward buttons (3/4) belong to the remote app, not the browser's history. Browsers navigate on
+    // their release, so cancel every event of the press. (They're forwarded with the other buttons above and below.)
+    for (const type of ['mousedown', 'mouseup', 'auxclick'] as const) {
+      canvas.addEventListener(type, (event) => {
+        if (event.button === 3 || event.button === 4) {
+          event.preventDefault()
+        }
+      })
+    }
+
     canvas.addEventListener('pointerup', (event) => {
+      if (event.button === 3 || event.button === 4) {
+        event.preventDefault()
+      }
       this.pointer = point(event)
       if (this.interaction) {
         this.endInteraction()

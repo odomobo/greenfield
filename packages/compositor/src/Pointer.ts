@@ -359,10 +359,10 @@ const linuxInput = {
   1: 0x112,
   // right
   2: 0x111,
-  // browser back
-  3: 0x116,
-  // browser forward
-  4: 0x115,
+  // browser back: the side button (BTN_SIDE, what libinput reports for a mouse's back button)
+  3: 0x113,
+  // browser forward: the extra button (BTN_EXTRA)
+  4: 0x114,
 } as const
 
 const lineScrollAmount = 12 as const

@@ -7,7 +7,9 @@
 #      foreign Origin, unsafe flag combinations refused; and that a sign-in only lasts while its page's presence
 #      connection is open (expires without one, survives a short blip, revoked a few seconds after it closes);
 #   2. in a browser: signs in (a second tab stays signed out), starts a session, launches foot from the viewer,
-#      types a command, reloads (asks to sign in again, the old token stops working), closes the browser, signs in
+#      types a command; history.back() and the mouse's back button over the desktop don't leave the page (foot gets
+#      BTN_SIDE); reloading asks to confirm first (dismiss keeps the page), then asks to sign in again and the old
+#      token stops working; closes the browser, signs in
 #      again, finds the session listed, opens it by clicking its row and checks the same window comes back with the
 #      earlier output, with foot still running;
 #   3. window management in the viewer: a resize follows the pointer immediately (without waiting for the server),
@@ -44,7 +46,8 @@ trap cleanup EXIT
 fail() {
   echo "FAIL: $*" >&2
   echo "--- gateway log (tail) ---" >&2
-  tail -n 40 "$WORK/gateway.log" >&2 || true
+  # (without foot's WAYLAND_DEBUG protocol log)
+  grep -av -E '^\[ *[0-9]+\.[0-9]+\]|msg:"\[ *[0-9]+\.[0-9]+\]' "$WORK/gateway.log" | tail -n 40 >&2 || true
   exit 1
 }
 
@@ -60,7 +63,7 @@ done
 cd "$WORK"
 
 cat >"$WORK/apps.json" <<EOF
-{ "/foot": { "name": "Foot", "executable": "foot", "args": [], "env": {} } }
+{ "/foot": { "name": "Foot", "executable": "foot", "args": [], "env": { "WAYLAND_DEBUG": "1" } } }
 EOF
 cat >"$WORK/playwright.json" <<EOF
 { "browser": { "contextOptions": { "ignoreHTTPSErrors": true, "viewport": null } } }
@@ -255,11 +258,6 @@ wait_for() {
 
 visible() { echo "!document.getElementById('$1').hidden"; }
 
-browser_login() {
-  wait_for "() => $(visible login-view) && !!document.querySelector('#password')" "the sign-in form"
-  pw_eval "() => { document.querySelector('#username').value = '$ME'; document.querySelector('#password').value = '$PASSWORD'; document.querySelector('#login-form').requestSubmit(); return true }" >/dev/null
-  wait_for "() => $(visible sessions-view)" "the session list"
-}
 
 # Click in the middle of an element (real pointer events). $1: a CSS selector.
 click_element() {
@@ -269,6 +267,27 @@ click_element() {
   $PW mousemove "$CX" "$CY" >/dev/null
   $PW mousedown >/dev/null
   $PW mouseup >/dev/null
+}
+
+# Signing in with a real click: the page needs user activation for its history guard and leave confirmation.
+browser_login() {
+  wait_for "() => $(visible login-view) && !!document.querySelector('#password')" "the sign-in form"
+  pw_eval "() => { document.querySelector('#username').value = '$ME'; document.querySelector('#password').value = '$PASSWORD'; return true }" >/dev/null
+  click_element '#login-submit'
+  wait_for "() => $(visible sessions-view)" "the session list"
+}
+
+# Reload without waiting for the load (a "Leave site?" dialog may block it). $1: dialog-accept or dialog-dismiss
+reload_with_dialog() {
+  pw_eval "() => { setTimeout(() => location.reload(), 100); return true }" >/dev/null
+  sleep 1
+  $PW snapshot 2>/dev/null | grep -q '"beforeunload" dialog' || fail "no confirmation before leaving the signed-in page"
+  $PW "$1" >/dev/null
+}
+
+# Press and release a mouse button the Playwright API doesn't have (back/forward) at page coordinates.
+cdp_click() {
+  $PW run-code "async (page) => { const cdp = await page.context().newCDPSession(page); for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x: $2, y: $3, button: '$1', buttons: type === 'mousePressed' ? ('$1' === 'back' ? 8 : 16) : 0, clickCount: 1 }) }" >/dev/null
 }
 
 step "signing in in the browser"
@@ -327,10 +346,36 @@ $PW press Enter >/dev/null
 sleep 2
 pw_eval "() => window.__viewerTest.readLuma($REGION)" >"$WORK/after-typing.json"
 
-step "reloading asks to sign in again"
+step "going back doesn't leave the desktop"
+pw_eval "() => { window.__notReloaded = true; return true }" >/dev/null
+[ "$(pw_eval "() => history.state && history.state['session-guard'] === true")" = true ] || fail "no history guard entry"
+pw_eval "() => { history.back(); return true }" >/dev/null
+sleep 1
+[ "$(pw_eval "() => window.__notReloaded === true && $(visible desktop-view) && window.__viewerTest.connected() && history.state === null")" = true ] ||
+  fail "history.back() left the desktop"
+# the next input re-arms the guard
+$PW mousemove $((TX + TW / 2)) $((TY + TH / 2)) >/dev/null
+$PW mousedown >/dev/null
+$PW mouseup >/dev/null
+[ "$(pw_eval "() => history.state && history.state['session-guard'] === true")" = true ] || fail "the guard wasn't re-armed"
+SIDE_BEFORE="$(grep -ac 'wl_pointer@[0-9]*\.button([0-9]*, [0-9]*, 275, [01])' "$WORK/gateway.log" || true)"
+cdp_click back $((TX + TW / 2)) $((TY + TH / 2))
+sleep 1
+[ "$(pw_eval "() => window.__notReloaded === true && window.__viewerTest.connected() && history.state['session-guard'] === true")" = true ] ||
+  fail "the mouse's back button over the desktop navigated"
+SIDE_AFTER="$(grep -ac 'wl_pointer@[0-9]*\.button([0-9]*, [0-9]*, 275, [01])' "$WORK/gateway.log" || true)"
+echo "    BTN_SIDE events received by foot: $((SIDE_AFTER - SIDE_BEFORE)) (expected 2)"
+[ $((SIDE_AFTER - SIDE_BEFORE)) = 2 ] || fail "foot didn't get the back button as BTN_SIDE press and release"
+echo "    ok"
+
+step "reloading asks first, then asks to sign in again"
 BROWSER_TOKEN="$(pw_eval "() => window.__viewerTest.token()" | tr -d '"')"
 [ -n "$BROWSER_TOKEN" ] || fail "no token in the page"
-$PW reload >/dev/null
+reload_with_dialog dialog-dismiss
+sleep 1
+[ "$(pw_eval "() => window.__notReloaded === true && window.__viewerTest.connected()")" = true ] ||
+  fail "dismissing the confirmation didn't keep the page"
+reload_with_dialog dialog-accept
 wait_for "() => document.readyState === 'complete' && $(visible login-view)" "the sign-in form after reloading" 10
 sleep 7
 [ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $BROWSER_TOKEN" "$BASE/api/sessions")" = 401 ] ||

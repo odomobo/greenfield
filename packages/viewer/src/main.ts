@@ -85,6 +85,8 @@ loginForm.addEventListener('submit', async (event) => {
     }
     username = result.username
     passwordInput.value = ''
+    // still within the activation of the submit
+    armHistoryGuard()
     await showSessions()
   } catch {
     showLogin('The server could not be reached.')
@@ -92,6 +94,41 @@ loginForm.addEventListener('submit', async (event) => {
 })
 
 setSignedOutHandler(() => showLogin())
+
+// --- staying on the page ---
+//
+// Leaving the page signs out, so going back by accident (a mouse's back button, Alt+Left) would be costly. Three
+// layers: the desktop gives those to the remote app (desktop.ts), a guard history entry absorbs a back navigation,
+// and while signed in the browser asks before leaving.
+
+const GUARD = 'session-guard'
+
+function onGuardEntry(): boolean {
+  return history.state?.[GUARD] === true
+}
+
+/**
+ * Push the guard entry if we're not on it. Only during user activation: browsers skip entries added without it when
+ * going back.
+ */
+function armHistoryGuard() {
+  if (currentToken() !== undefined && !onGuardEntry()) {
+    // same URL; pushing truncates any forward entries, so guard entries don't pile up
+    history.pushState({ [GUARD]: true }, '')
+  }
+}
+
+// back from the guard entry lands on the base entry of this same document: nothing to do but re-arm on the next input
+window.addEventListener('pointerdown', armHistoryGuard, { capture: true })
+window.addEventListener('keydown', armHistoryGuard, { capture: true })
+
+window.addEventListener('beforeunload', (event) => {
+  if (currentToken() !== undefined) {
+    event.preventDefault()
+    // older browsers need returnValue set
+    event.returnValue = ''
+  }
+})
 
 // Leaving the page locks it, also when the browser keeps it in its back/forward cache.
 window.addEventListener('pagehide', () => {

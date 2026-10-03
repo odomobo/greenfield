@@ -21,6 +21,11 @@ Query parameters:
 In the desktop, Disconnect goes back to the session list (the session keeps running); Log out ends the session and
 signs out.
 
+Since leaving the page signs out, accidental back navigation is guarded three ways: over the desktop, the mouse's
+back/forward buttons and Alt+Left/Right go to the remote app (as BTN_SIDE/BTN_EXTRA and normal keys); after signing
+in, a guard history entry absorbs a back navigation (re-armed on the next click or key press); and while signed in,
+the browser asks before leaving the page.
+
 Opening a second viewer on the same session takes it over; the first one shows a "taken over" message.
 
 ## Protocol
