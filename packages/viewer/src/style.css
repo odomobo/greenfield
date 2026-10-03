@@ -1,24 +1,18 @@
-:root {
-  color-scheme: dark;
+/* The desktop. The sign-in form and session list use the gateway's theme (/static/theme.css). */
+#desktop-view {
   --bar-bg: #1e293b;
   --bar-fg: #e2e8f0;
   --desktop-bg: #0f172a;
   --accent: #38bdf8;
-}
-
-html,
-body {
-  margin: 0;
-  height: 100%;
+  color-scheme: dark;
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--desktop-bg);
   color: var(--bar-fg);
   font: 13px system-ui, sans-serif;
-  overflow: hidden;
-}
-
-body {
-  display: flex;
-  flex-direction: column;
 }
 
 #bar {
@@ -39,7 +33,10 @@ body {
 }
 
 #apps button,
+#session-info button,
 #overlay button {
+  height: auto;
+  font: inherit;
   background: #334155;
   color: var(--bar-fg);
   border: 1px solid #475569;
@@ -49,7 +46,9 @@ body {
 }
 
 #apps button:hover,
+#session-info button:hover,
 #overlay button:hover {
+  background: #334155;
   border-color: var(--accent);
 }
 
@@ -62,17 +61,6 @@ body {
 
 #status {
   opacity: 0.7;
-}
-
-#session-info a,
-#overlay a {
-  color: var(--accent);
-  text-decoration: none;
-}
-
-#session-info a:hover,
-#overlay a:hover {
-  text-decoration: underline;
 }
 
 #output-container {

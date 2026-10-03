@@ -5,10 +5,20 @@ export type ConnectionState =
   | { kind: 'connected' }
   | { kind: 'reconnecting'; inSeconds: number }
   | { kind: 'taken-over' }
+  /** the gateway no longer accepts our sign-in */
+  | { kind: 'signed-out' }
+  /** the session doesn't exist (anymore) */
+  | { kind: 'ended' }
+
+/** close codes of the gateway */
+const CLOSE_UNAUTHORIZED = 4001
+const CLOSE_NOT_FOUND = 4004
 
 /**
  * The viewer's single WebSocket to a session. Reconnects with backoff, except when another viewer took the session
- * over (then the user decides).
+ * over (then the user decides), the session ended or we're signed out.
+ *
+ * The first message on the socket is the sign-in token (not the URL, so it doesn't end up in logs).
  */
 export class Connection {
   onEnvelope: (envelope: DecodedEnvelope) => void = () => {
@@ -25,16 +35,30 @@ export class Connection {
   private ws?: WebSocket
   private retryDelay = 500
   private retryTimer?: number
+  private target?: { url: string; token: string }
 
-  constructor(private readonly url: string) {}
+  /** connect to a session (and stay connected) */
+  attach(session: string, token: string): void {
+    this.stop()
+    const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?session=${encodeURIComponent(session)}`
+    this.target = { url, token }
+    this.retryDelay = 500
+    this.connect()
+  }
 
+  /** connect again to the last attached session */
   connect(): void {
     clearTimeout(this.retryTimer)
+    if (this.target === undefined) {
+      return
+    }
+    const { url, token } = this.target
     this.onStateChange({ kind: 'connecting' })
-    const ws = new WebSocket(this.url)
+    const ws = new WebSocket(url)
     ws.binaryType = 'arraybuffer'
     this.ws = ws
     ws.onopen = () => {
+      ws.send(token)
       this.retryDelay = 500
       this.onStateChange({ kind: 'connected' })
       this.onOpen()
@@ -61,6 +85,15 @@ export class Connection {
         this.onStateChange({ kind: 'taken-over' })
         return
       }
+      if (event.code === CLOSE_UNAUTHORIZED) {
+        this.target = undefined
+        this.onStateChange({ kind: 'signed-out' })
+        return
+      }
+      if (event.code === CLOSE_NOT_FOUND) {
+        this.onStateChange({ kind: 'ended' })
+        return
+      }
       const delay = this.retryDelay
       this.retryDelay = Math.min(this.retryDelay * 2, 10000)
       this.onStateChange({ kind: 'reconnecting', inSeconds: Math.ceil(delay / 1000) })
@@ -68,7 +101,7 @@ export class Connection {
     }
   }
 
-  /** stop reconnecting (e.g. the session ended) */
+  /** disconnect and stop reconnecting */
   stop(): void {
     clearTimeout(this.retryTimer)
     const ws = this.ws

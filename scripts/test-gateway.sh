@@ -3,15 +3,18 @@
 #
 # Starts the gateway in dev-auth mode (sessions run as the current user) with TLS on a test port, then:
 #   1. checks the login page leaks nothing: same response for an unknown user and a wrong password, no product
-#      names, nothing reachable without logging in, WebSockets refused without a valid cookie / with a foreign Origin,
-#      CSRF enforced, and unsafe flag combinations refused;
-#   2. in a browser: logs in, starts a session, launches foot from the viewer, types a command, closes the browser,
-#      logs in again, finds the session listed, opens it and checks the same window comes back with the earlier
-#      output, with foot still running;
+#      names, no cookies, nothing reachable without signing in, WebSockets refused without a valid token / with a
+#      foreign Origin, unsafe flag combinations refused; and that a sign-in only lasts while its page's presence
+#      connection is open (expires without one, survives a short blip, revoked a few seconds after it closes);
+#   2. in a browser: signs in (a second tab stays signed out), starts a session, launches foot from the viewer,
+#      types a command, reloads (asks to sign in again, the old token stops working), closes the browser, signs in
+#      again, finds the session listed, opens it by clicking its row and checks the same window comes back with the
+#      earlier output, with foot still running;
 #   3. window management in the viewer: a resize follows the pointer immediately (without waiting for the server),
 #      resizing from the left/top edge keeps the right/bottom edge in place, and shrinking the viewport moves a window
 #      back into view;
-#   4. renaming the session from the session list (a name with HTML in it shows as text).
+#   4. Disconnect goes back to the session list without signing in again; renaming the session by clicking its name
+#      (a name with HTML in it shows as text, Escape cancels); signing out; Log out ends the session.
 #
 # Requires: foot, playwright-cli (with its Chromium), curl, node, built packages (yarn build in packages/compositor
 # (incl. build:server), compositor-proxy, viewer, gateway). Run from anywhere:
@@ -78,44 +81,88 @@ gateway --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 && fail "PAM mod
 echo "    ok"
 
 step "starting the gateway on :$PORT"
-curl -sk -o /dev/null "$BASE/login" && fail "port $PORT is already in use"
+curl -sk -o /dev/null "$BASE/" && fail "port $PORT is already in use"
 # exec, so $! is the gateway itself and cleanup can stop it
 (exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" node "$REPO/packages/gateway/dist/main.js" --dev-auth \
   --bind-ip 127.0.0.1 --bind-port "$PORT" --state-dir "$WORK/state" --applications="$WORK/apps.json") \
   >"$WORK/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 for _ in $(seq 1 40); do
-  curl -sk -o /dev/null "$BASE/login" && break
+  curl -sk -o /dev/null "$BASE/" && break
   sleep 0.5
 done
-curl -sk -o /dev/null "$BASE/login" || fail "gateway didn't start"
+curl -sk -o /dev/null "$BASE/" || fail "gateway didn't start"
 
 # --- 1. leak and access checks ---
 
-# Fetch the login form; sets $JAR and $CSRF
-login_form() {
-  JAR="$WORK/jar-$1"
-  rm -f "$JAR"
-  CSRF="$(curl -sk -c "$JAR" "$BASE/login" | sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p')"
-  [ -n "$CSRF" ] || fail "no csrf token in login form"
+cat >"$WORK/probe.js" <<'EOF'
+// WebSocket and sign-in probes. Usage:
+//   probe.js ws <url> <origin> <first message>   prints the close code (or "open" if the socket stays up)
+//   probe.js presence <base> <user> <password>   prints /api/me statuses: past the attach deadline with a presence,
+//                                                after a reconnect blip, after the presence closed for good
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+const WebSocket = require(process.env.WS_MODULE)
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const [mode, a, b, c] = process.argv.slice(2)
+
+function open(url, origin, first) {
+  const ws = new WebSocket(url, { origin, rejectUnauthorized: false })
+  ws.on('open', () => ws.send(first))
+  ws.on('error', () => {})
+  return ws
 }
 
-# POST a login; prints "<status> <seconds>" and stores the body in $WORK/$1.html
+async function main() {
+  if (mode === 'ws') {
+    const ws = open(a, b, c)
+    console.log(await Promise.race([new Promise((resolve) => ws.on('close', resolve)), sleep(5000).then(() => 'open')]))
+    process.exit(0)
+  }
+  const login = await fetch(`${a}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: a },
+    body: JSON.stringify({ username: b, password: c }),
+  })
+  const { token } = await login.json()
+  const me = async () => (await fetch(`${a}/api/me`, { headers: { Authorization: `Bearer ${token}` } })).status
+  const control = a.replace(/^http/, 'ws') + '/control'
+  let presence = open(control, a, token)
+  await new Promise((resolve) => presence.once('message', resolve))
+  await sleep(11000)
+  const withPresence = await me()
+  presence.terminate()
+  await sleep(1000)
+  presence = open(control, a, token)
+  await new Promise((resolve) => presence.once('message', resolve))
+  const afterBlip = await me()
+  presence.close()
+  await sleep(7000)
+  console.log(withPresence, afterBlip, await me())
+  process.exit(0)
+}
+main()
+EOF
+probe() { NODE_NO_WARNINGS=1 WS_MODULE="$REPO/packages/gateway/node_modules/ws" node "$WORK/probe.js" "$@"; }
+WSS="wss://127.0.0.1:$PORT"
+
+# POST a login; prints "<status> <seconds>" and stores the body in $WORK/$1.json
 login_attempt() {
   local name="$1" user="$2" pass="$3"
-  login_form "$name"
-  curl -sk -b "$JAR" -c "$JAR" -o "$WORK/$name.html" -w '%{http_code} %{time_total}' \
-    -H "Origin: $BASE" --data-urlencode "csrf=$CSRF" --data-urlencode "username=$user" \
-    --data-urlencode "password=$pass" "$BASE/login"
+  curl -sk -o "$WORK/$name.json" -w '%{http_code} %{time_total}' -H "Origin: $BASE" -H 'Content-Type: application/json' \
+    --data "$(node -e 'console.log(JSON.stringify({ username: process.argv[1], password: process.argv[2] }))' "$user" "$pass")" \
+    "$BASE/api/login"
   echo
 }
 
 step "login page reveals nothing"
-HEADERS="$(curl -sk -D - -o "$WORK/login.html" "$BASE/login")"
+HEADERS="$(curl -sk -D - -o "$WORK/login.html" "$BASE/")"
 echo "$HEADERS" | grep -qi '^server:' && fail "Server header present"
+echo "$HEADERS" | grep -qi '^set-cookie:' && fail "a cookie is set"
 grep -qi -E 'greenfield|gateway|compositor|wayland|node' "$WORK/login.html" && fail "product name on the login page"
 echo "$HEADERS" | grep -qi -E 'greenfield|express|node' && fail "product name in headers"
+echo "$HEADERS" | grep -qi '^cache-control: no-store' || fail "the page may be cached"
 grep -q "$(hostname)" "$WORK/login.html" || fail "hostname not shown"
+[ "$(curl -sk -o /dev/null -w '%{redirect_url}' "$BASE/login")" = "$BASE/" ] || fail "/login doesn't lead to the page"
 echo "    ok"
 
 step "unknown user and wrong password look the same"
@@ -123,9 +170,7 @@ read -r STATUS_UNKNOWN TIME_UNKNOWN < <(login_attempt unknown "nosuchuser-$$" "w
 read -r STATUS_WRONG TIME_WRONG < <(login_attempt wrong "$ME" "not-the-password")
 echo "    unknown user: $STATUS_UNKNOWN in ${TIME_UNKNOWN}s, wrong password: $STATUS_WRONG in ${TIME_WRONG}s"
 [ "$STATUS_UNKNOWN" = "$STATUS_WRONG" ] || fail "different status codes"
-normalize() { sed -e 's/name="csrf" value="[^"]*"/CSRF/' -e "s/value=\"$2\"/USER/" "$1"; }
-diff <(normalize "$WORK/unknown.html" "nosuchuser-$$") <(normalize "$WORK/wrong.html" "$ME") >/dev/null ||
-  fail "different response bodies for unknown user and wrong password"
+cmp -s "$WORK/unknown.json" "$WORK/wrong.json" || fail "different response bodies for unknown user and wrong password"
 node -e "const [a,b]=process.argv.slice(1).map(Number); if (a<2.9||b<2.9||Math.abs(a-b)>0.5) process.exit(1)" \
   "$TIME_UNKNOWN" "$TIME_WRONG" || fail "failure timing differs or is too fast"
 echo "    ok"
@@ -136,50 +181,59 @@ for i in 1 2 3 4 5; do
   login_attempt "throttle$i" "$THROTTLED_USER" "wrong-$i" >/dev/null
 done
 login_attempt throttled "$THROTTLED_USER" "wrong-6" >/dev/null
-grep -q "Too many failed attempts" "$WORK/throttled.html" || fail "6th failed login was not throttled"
+grep -q "Too many failed attempts" "$WORK/throttled.json" || fail "6th failed login was not throttled"
 echo "    ok"
 
-step "nothing is reachable without logging in"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/me")" = 401 ] || fail "/api/me without login"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/sessions")" = 401 ] || fail "/api/sessions without login"
-[ "$(curl -sk -o /dev/null -w '%{redirect_url}' "$BASE/desktop/")" = "$BASE/login" ] || fail "/desktop/ without login"
-[ "$(curl -sk -o /dev/null -w '%{redirect_url}' "$BASE/sessions")" = "$BASE/login" ] || fail "/sessions without login"
+step "nothing is reachable without signing in"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/me")" = 401 ] || fail "/api/me without a token"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/sessions")" = 401 ] || fail "/api/sessions without a token"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer forged' "$BASE/api/sessions")" = 401 ] ||
+  fail "/api/sessions with a forged token"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Origin: $BASE" -X POST "$BASE/api/sessions")" = 401 ] ||
+  fail "creating a session without a token"
+[ "$(probe ws "$WSS/ws?session=x" "$BASE" forged)" = 4001 ] || fail "viewer WebSocket with a forged token"
+[ "$(probe ws "$WSS/control" "$BASE" forged)" = 4001 ] || fail "presence WebSocket with a forged token"
 WS_HEADERS=(-H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==")
 ws_status() { curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "${WS_HEADERS[@]}" "$@" || true; }
-[ "$(ws_status -H "Origin: $BASE" "$BASE/ws?session=x")" = 401 ] || fail "WebSocket without cookie"
-[ "$(ws_status -H "Origin: $BASE" -b "__Host-gf_session=forged" "$BASE/ws?session=x")" = 401 ] || fail "WebSocket with forged cookie"
+[ "$(ws_status -H "Origin: https://evil.example" "$BASE/ws?session=x")" = 403 ] || fail "WebSocket from a foreign origin"
+[ "$(ws_status -H "Origin: https://evil.example" "$BASE/control")" = 403 ] || fail "presence from a foreign origin"
 echo "    ok"
 
-step "logging in with curl"
+step "signing in with curl"
 read -r STATUS _ < <(login_attempt good "$ME" "$PASSWORD")
-[ "$STATUS" = 303 ] || fail "login failed ($STATUS)"
-AUTH_JAR="$WORK/jar-good"
-ME_JSON="$(curl -sk -b "$AUTH_JAR" "$BASE/api/me")"
-SESSION_CSRF="$(echo "$ME_JSON" | sed -n 's/.*"csrf":"\([^"]*\)".*/\1/p')"
-[ -n "$SESSION_CSRF" ] || fail "/api/me: $ME_JSON"
-[ "$(ws_status -H "Origin: https://evil.example" -b "$AUTH_JAR" "$BASE/ws?session=x")" = 403 ] || fail "WebSocket from a foreign origin"
-[ "$(ws_status -H "Origin: $BASE" -b "$AUTH_JAR" "$BASE/ws?session=not-mine")" = 404 ] || fail "WebSocket to someone else's session"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' -b "$AUTH_JAR" -H "Origin: $BASE" --data "csrf=wrong" "$BASE/sessions/new")" = 403 ] ||
-  fail "creating a session without the CSRF token"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' -b "$AUTH_JAR" -H "Origin: https://evil.example" --data "csrf=$SESSION_CSRF" "$BASE/sessions/new")" = 403 ] ||
+[ "$STATUS" = 200 ] || fail "login failed ($STATUS)"
+TOKEN="$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$WORK/good.json")"
+[ -n "$TOKEN" ] || fail "no token: $(cat "$WORK/good.json")"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/me")" = 200 ] ||
+  fail "/api/me with the token"
+[ "$(probe ws "$WSS/ws?session=not-mine" "$BASE" "$TOKEN")" = 4004 ] || fail "WebSocket to someone else's session"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Origin: https://evil.example" -X POST "$BASE/api/sessions")" = 403 ] ||
   fail "creating a session from a foreign origin"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' -b "$AUTH_JAR" -H "Origin: $BASE" -H 'Content-Type: application/json' --data '{"app":"/foot"}' "$BASE/api/sessions/x/launch")" = 403 ] ||
-  fail "launching without the CSRF header"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Origin: $BASE" -H 'Content-Type: application/json' --data '{"app":"/foot"}' "$BASE/api/sessions/x/launch")" = 401 ] ||
+  fail "launching without the token"
 echo "    ok"
 
-step "plaintext mode works on loopback, without Secure cookies"
+step "a sign-in lasts only while its page is there"
+sleep 10
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/me")" = 401 ] ||
+  fail "a token without a presence connection still works"
+PRESENCE="$(probe presence "$BASE" "$ME" "$PASSWORD")"
+echo "    with presence, after a blip, after it closed: $PRESENCE"
+[ "$PRESENCE" = "200 200 401" ] || fail "presence: $PRESENCE (expected 200 200 401)"
+echo "    ok"
+
+step "plaintext mode works on loopback, without HSTS"
 PLAIN_PORT=$((PORT + 1))
 (exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" node "$REPO/packages/gateway/dist/main.js" --dev-auth \
   --insecure-plaintext --bind-ip 127.0.0.1 --bind-port "$PLAIN_PORT" --state-dir "$WORK/state") >"$WORK/plain.log" 2>&1 &
 PLAIN_PID=$!
 for _ in $(seq 1 40); do
-  curl -s -o /dev/null "http://127.0.0.1:$PLAIN_PORT/login" && break
+  curl -s -o /dev/null "http://127.0.0.1:$PLAIN_PORT/" && break
   sleep 0.5
 done
-PLAIN_HEADERS="$(curl -s -D - -o /dev/null "http://127.0.0.1:$PLAIN_PORT/login")"
+PLAIN_HEADERS="$(curl -s -D - -o /dev/null "http://127.0.0.1:$PLAIN_PORT/")"
 kill "$PLAIN_PID" 2>/dev/null || true
-echo "$PLAIN_HEADERS" | grep -qi '^set-cookie: gf_login=' || fail "no login cookie in plaintext mode"
-echo "$PLAIN_HEADERS" | grep -i '^set-cookie:' | grep -qi 'secure' && fail "Secure cookie in plaintext mode"
+echo "$PLAIN_HEADERS" | grep -q '^HTTP/1.1 200' || fail "no page in plaintext mode"
 echo "$PLAIN_HEADERS" | grep -qi 'strict-transport-security' && fail "HSTS in plaintext mode"
 grep -q "PLAINTEXT MODE" "$WORK/plain.log" || fail "no plaintext warning"
 echo "    ok"
@@ -199,23 +253,44 @@ wait_for() {
   fail "timed out waiting for $what"
 }
 
+visible() { echo "!document.getElementById('$1').hidden"; }
+
 browser_login() {
-  wait_for "() => !!document.querySelector('#password')" "login page"
-  pw_eval "() => { document.querySelector('#username').value = '$ME'; document.querySelector('#password').value = '$PASSWORD'; document.querySelector('form').submit(); return true }" >/dev/null
-  wait_for "() => location.pathname === '/sessions'" "sessions page"
+  wait_for "() => $(visible login-view) && !!document.querySelector('#password')" "the sign-in form"
+  pw_eval "() => { document.querySelector('#username').value = '$ME'; document.querySelector('#password').value = '$PASSWORD'; document.querySelector('#login-form').requestSubmit(); return true }" >/dev/null
+  wait_for "() => $(visible sessions-view)" "the session list"
 }
 
-step "logging in in the browser"
-$PW open "$BASE/" --config="$WORK/playwright.json" >/dev/null
+# Click in the middle of an element (real pointer events). $1: a CSS selector.
+click_element() {
+  local center
+  center="$(pw_eval "() => { const r = document.querySelector('$1').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.y + r.height / 2) }" | tr -d '"')"
+  read -r CX CY <<<"$center"
+  $PW mousemove "$CX" "$CY" >/dev/null
+  $PW mousedown >/dev/null
+  $PW mouseup >/dev/null
+}
+
+step "signing in in the browser"
+$PW open "$BASE/?test=1" --config="$WORK/playwright.json" >/dev/null
 browser_login
 [ "$(pw_eval "() => document.querySelectorAll('.sessions li').length")" = 0 ] || fail "unexpected sessions listed"
 
+step "another tab is not signed in"
+$PW tab-new >/dev/null
+$PW goto "$BASE/" >/dev/null
+wait_for "() => document.readyState === 'complete' && !!document.querySelector('#login-view')" "the second tab" 10
+[ "$(pw_eval "() => $(visible login-view) && !$(visible sessions-view)")" = true ] || fail "the second tab is signed in"
+$PW tab-close >/dev/null
+$PW tab-select 0 >/dev/null
+[ "$(pw_eval "() => $(visible sessions-view)")" = true ] || fail "the first tab was signed out"
+echo "    ok"
+
 step "starting a session"
-pw_eval "() => { document.querySelector('form[action=\"/sessions/new\"]').submit(); return true }" >/dev/null
-wait_for "() => location.pathname === '/desktop/'" "desktop page" 40
-SESSION_URL="$(pw_eval "() => location.href" | tr -d '"')"
-$PW goto "$SESSION_URL&test=1" >/dev/null
-wait_for "() => !!window.__viewerTest && window.__viewerTest.connected()" "viewer connection"
+pw_eval "() => { document.querySelector('#new-session').click(); return true }" >/dev/null
+wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection" 40
+SESSION_ID="$(pw_eval "() => window.__viewerTest.session()" | tr -d '"')"
+[ -n "$SESSION_ID" ] || fail "no session"
 
 step "launching foot from the viewer"
 wait_for "() => !!document.querySelector('#apps button')" "app buttons"
@@ -252,19 +327,30 @@ $PW press Enter >/dev/null
 sleep 2
 pw_eval "() => window.__viewerTest.readLuma($REGION)" >"$WORK/after-typing.json"
 
+step "reloading asks to sign in again"
+BROWSER_TOKEN="$(pw_eval "() => window.__viewerTest.token()" | tr -d '"')"
+[ -n "$BROWSER_TOKEN" ] || fail "no token in the page"
+$PW reload >/dev/null
+wait_for "() => document.readyState === 'complete' && $(visible login-view)" "the sign-in form after reloading" 10
+sleep 7
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $BROWSER_TOKEN" "$BASE/api/sessions")" = 401 ] ||
+  fail "the token of the reloaded page still works"
+echo "    ok"
+
 step "closing the browser"
 $PW close >/dev/null
 sleep 3
 kill -0 "$FOOT_PID" 2>/dev/null || fail "foot didn't survive the browser going away"
 
-step "logging in again and reopening the session"
-$PW open "$BASE/" --config="$WORK/playwright.json" >/dev/null
+step "signing in again and reopening the session"
+$PW open "$BASE/?test=1" --config="$WORK/playwright.json" >/dev/null
 browser_login
 [ "$(pw_eval "() => document.querySelectorAll('.sessions li').length")" = 1 ] || fail "the session is not listed"
-OPEN_URL="$(pw_eval "() => document.querySelector('.sessions a').href" | tr -d '"')"
-[ "$OPEN_URL" = "$SESSION_URL" ] || fail "listed session $OPEN_URL is not $SESSION_URL"
-$PW goto "$OPEN_URL&test=1" >/dev/null
-wait_for "() => !!window.__viewerTest && window.__viewerTest.connected()" "viewer reconnection"
+LISTED="$(pw_eval "() => document.querySelector('.sessions li').dataset.session" | tr -d '"')"
+[ "$LISTED" = "$SESSION_ID" ] || fail "listed session $LISTED is not $SESSION_ID"
+# clicking the row (not just the Open button) opens it
+click_element '.sessions .when'
+wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer reconnection"
 wait_for "() => { const w = window.__viewerTest.windows(); return w.length === 1 && w[0].hasContent }" "foot window after reattach"
 sleep 1
 
@@ -366,27 +452,55 @@ echo "    moved from $GX,$GY to $GX2,$GY2"
 [ "$GX2" -lt "$GX" ] || fail "the window wasn't moved"
 $PW resize 1280 800 >/dev/null
 
-# --- 4. renaming ---
+# --- 4. session list: disconnect, renaming, signing out, logging out ---
 
-step "renaming the session"
-pw_eval "() => { location.href = '/sessions'; return true }" >/dev/null
-wait_for "() => location.pathname === '/sessions'" "sessions page"
-[ "$(pw_eval "() => document.querySelector('.sessions .name').firstChild.textContent")" = '"Session 1"' ] ||
-  fail "default session name isn't \"Session 1\""
-pw_eval "() => { const d = document.querySelector('.sessions details'); d.open = true; d.querySelector('input[name=name]').value = '  <i>Build</i>   & tests '; d.querySelector('form').submit(); return true }" >/dev/null
-wait_for "() => location.pathname === '/sessions' && document.querySelector('.sessions .name').firstChild.textContent === '<i>Build</i> & tests'" "the new name" 10
-[ "$(pw_eval "() => document.querySelectorAll('.sessions i').length")" = 0 ] || fail "HTML in the session name was rendered"
-RENAME_API="$(pw_eval "async () => { const me = await (await fetch('/api/me')).json(); const id = (await (await fetch('/api/sessions')).json())[0].id; const post = (name, csrf) => fetch('/api/sessions/' + id + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify({ name }) }).then((r) => r.status); return [await post('Work', me.csrf), await post('   ', me.csrf), await post('x'.repeat(65), me.csrf), await post('Nope', 'wrong')].join(' ') }")"
-echo "    API: rename $RENAME_API (expected 200 400 400 403)"
-[ "$RENAME_API" = '"200 400 400 403"' ] || fail "rename API: $RENAME_API"
-pw_eval "() => { location.reload(); return true }" >/dev/null
-wait_for "() => document.querySelector('.sessions .name')?.firstChild.textContent === 'Work'" "the API rename to show" 10
+step "Disconnect goes back to the session list, still signed in"
+pw_eval "() => { document.querySelector('#disconnect').click(); return true }" >/dev/null
+wait_for "() => $(visible sessions-view) && document.querySelectorAll('.sessions li').length === 1" "the session list"
+[ "$(pw_eval "() => window.__viewerTest.connected()")" = false ] || fail "still connected to the session"
+kill -0 "$FOOT_PID" 2>/dev/null || fail "foot didn't survive disconnecting"
 echo "    ok"
 
-step "ending the session"
-pw_eval "() => { document.querySelector('.sessions form[action=\"/sessions/end\"]').submit(); return true }" >/dev/null
-sleep 3
-kill -0 "$FOOT_PID" 2>/dev/null && fail "foot still runs after ending the session"
-[ "$(pw_eval "() => document.querySelectorAll('.sessions li').length")" = 0 ] || fail "ended session still listed"
+NAME_FIELD='.sessions .session-name input'
+step "renaming the session by clicking its name"
+[ "$(pw_eval "() => document.querySelector('$NAME_FIELD').value")" = '"Session 1"' ] ||
+  fail "default session name isn't \"Session 1\""
+[ "$(pw_eval "() => document.querySelector('$NAME_FIELD').getAttribute('aria-label')")" = '"Rename session"' ] ||
+  fail "the name field has no accessible label"
+click_element "$NAME_FIELD"
+[ "$(pw_eval "() => document.activeElement === document.querySelector('$NAME_FIELD') && $(visible sessions-view)")" = true ] ||
+  fail "clicking the name didn't start editing it (or opened the session)"
+$PW press Control+a >/dev/null
+$PW type "  <i>Build</i>   & tests " >/dev/null
+$PW press Enter >/dev/null
+wait_for "() => document.querySelector('$NAME_FIELD').value === '<i>Build</i> & tests'" "the new name" 10
+[ "$(pw_eval "() => document.querySelectorAll('.sessions i').length")" = 0 ] || fail "HTML in the session name was rendered"
+click_element "$NAME_FIELD"
+$PW type "xyz" >/dev/null
+$PW press Escape >/dev/null
+[ "$(pw_eval "() => document.querySelector('$NAME_FIELD').value")" = '"<i>Build</i> & tests"' ] ||
+  fail "Escape didn't cancel the edit"
+RENAME_API="$(pw_eval "async () => { const token = window.__viewerTest.token(); const id = window.__viewerTest.session() || document.querySelector('.sessions li').dataset.session; const post = (name, auth) => fetch('/api/sessions/' + id + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + auth }, body: JSON.stringify({ name }) }).then((r) => r.status); const listed = (await (await fetch('/api/sessions', { headers: { Authorization: 'Bearer ' + token } })).json())[0].name; return [listed, await post('Work', token), await post('   ', token), await post('x'.repeat(65), token), await post('Nope', 'wrong')].join(' ') }")"
+echo "    API: $RENAME_API (expected the new name, then 200 400 400 401)"
+[ "$RENAME_API" = '"<i>Build</i> & tests 200 400 400 401"' ] || fail "rename API: $RENAME_API"
+echo "    ok"
 
-echo "PASS: login, isolation checks, session survival, window management and renaming"
+step "signing out"
+pw_eval "() => { document.querySelector('#sign-out').click(); return true }" >/dev/null
+wait_for "() => $(visible login-view)" "the sign-in form"
+browser_login
+[ "$(pw_eval "() => document.querySelector('$NAME_FIELD').value")" = '"Work"' ] || fail "the API rename didn't stick"
+echo "    ok"
+
+step "Log out ends the session"
+pw_eval "() => { document.querySelector('.sessions button[data-action=open]').click(); return true }" >/dev/null
+wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection"
+pw_eval "() => { document.querySelector('#logout').click(); return true }" >/dev/null
+wait_for "() => $(visible login-view)" "the sign-in form"
+sleep 3
+kill -0 "$FOOT_PID" 2>/dev/null && fail "foot still runs after logging out"
+browser_login
+[ "$(pw_eval "() => document.querySelectorAll('.sessions li').length")" = 0 ] || fail "ended session still listed"
+echo "    ok"
+
+echo "PASS: login, isolation checks, per-page sign-in, session survival, window management, renaming and logging out"

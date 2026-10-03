@@ -1,13 +1,13 @@
 # Gateway
 
-The front door: a login page, a per-user session picker, and the per-user desktop sessions behind it.
+The front door: a login page, a per-user session list, and the per-user desktop sessions behind it.
 
 ## Processes
 
 ```
 gateway (monitor)          root in PAM mode. Not network-facing. Authenticates users through native/pam-helper,
 │                          issues login tickets, keeps the session registry, spawns sessions.
-├── gateway-web            unprivileged (--web-user, default "greenfield"). TLS, pages, cookies, CSRF/Origin
+├── gateway-web            unprivileged (--web-user, default "greenfield"). TLS, the page, sign-in tokens, Origin
 │                          checks, login throttling, viewer files; relays authenticated viewer WebSockets and app
 │                          launches to the user's session socket. Gets the listening socket and TLS key from the
 │                          monitor; asks the monitor (IPC) for everything user-related, by ticket.
@@ -17,7 +17,7 @@ gateway (monitor)          root in PAM mode. Not network-facing. Authenticates u
 ```
 
 TLS ends in the web process, so users' sessions never have access to the key. A session dies when it's ended from
-the picker or when the gateway stops; closing the browser doesn't affect it.
+the session list or when the gateway stops; closing the browser doesn't affect it.
 
 ## Development (no root)
 
@@ -64,8 +64,14 @@ trusted home LAN), `--encoder`, `--render-device`. `--help` lists everything.
   same page, and every failure takes at least 3 s. No sessions, users or product/version names before login.
 - Failed logins are throttled per username (5 free) and per IP (20 free), with doubling lockouts up to 15 min; the
   same rules apply to any username string.
-- Session cookie: random, server-side, `HttpOnly`, `SameSite=Strict`, `Secure` + `__Host-` prefix with TLS; 12 h idle /
-  7 day maximum. Every POST and WebSocket must carry a matching `Origin`; forms carry a CSRF token, API calls an
-  `X-CSRF-Token` header. Strict CSP, no inline scripts, `frame-ancestors 'none'`, HSTS with TLS.
+- Signing in works like unlocking a screen: it lasts as long as that one page. The sign-in form, session list and
+  desktop are a single page; signing in returns a random token that the page keeps only in memory (no cookies, no
+  local/session storage). API calls carry it as `Authorization: Bearer`, WebSockets as their first message (never in
+  a URL). The page holds a presence WebSocket (`/control`); when it closes, the token is revoked after a 5 s grace
+  for network blips (and a token that never gets a presence expires after 10 s). So another tab, a reload, or
+  closing and reopening the browser all ask for the password again, and revoking also cuts the page's desktop
+  connection. The desktop sessions themselves keep running. Tokens also end after 7 days.
+- Every POST and WebSocket must carry a matching `Origin`. Strict CSP, no inline scripts, `frame-ancestors 'none'`,
+  `form-action 'none'`, `Cache-Control: no-store` on the page and API, HSTS with TLS.
 - A ticket only reaches its own user's sessions; session ids are random.
 - No root sessions.

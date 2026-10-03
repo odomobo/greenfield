@@ -89,6 +89,19 @@ export class Desktop {
    * A new connection: everything we had is stale, the server sends a full snapshot and key frames.
    */
   reset(): void {
+    this.clear()
+    const output = this.renderer.resize()
+    this.output = output
+    this.connection.send({ type: 'hello', output })
+    if (document.hasFocus() && document.activeElement === this.canvas) {
+      this.connection.send({ type: 'focus', focused: true })
+    }
+  }
+
+  /**
+   * Forget the session's windows and content (disconnected, or about to connect to another session).
+   */
+  clear(): void {
     for (const decoder of this.decoders.values()) {
       decoder.close()
     }
@@ -106,12 +119,6 @@ export class Desktop {
     this.grab = undefined
     this.interaction = undefined
     this.buttons = 0
-    const output = this.renderer.resize()
-    this.output = output
-    this.connection.send({ type: 'hello', output })
-    if (document.hasFocus() && document.activeElement === this.canvas) {
-      this.connection.send({ type: 'focus', focused: true })
-    }
     this.scheduleRender()
   }
 
