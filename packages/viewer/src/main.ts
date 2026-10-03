@@ -26,8 +26,19 @@ const overlay = element<HTMLDivElement>('overlay')
 const overlayMessage = element<HTMLDivElement>('overlay-message')
 const reconnectButton = element<HTMLButtonElement>('overlay-reconnect')
 
+const testMode = params.get('test') === '1'
 const connection = new Connection(viewerURL)
-const desktop = new Desktop(canvas, new Renderer(canvas), connection)
+const renderer = new Renderer(canvas, { preserveDrawingBuffer: testMode })
+const desktop = new Desktop(canvas, renderer, connection)
+
+if (testMode) {
+  // hooks for automated tests (see scripts/test-reattach.sh)
+  ;(window as any).__viewerTest = {
+    connected: () => connection.open,
+    windows: () => desktop.debugWindows(),
+    readLuma: (x: number, y: number, width: number, height: number) => renderer.readLuma(x, y, width, height),
+  }
+}
 
 connection.onOpen = () => desktop.reset()
 connection.onEnvelope = (envelope) => {

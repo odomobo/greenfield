@@ -118,13 +118,17 @@ export class Renderer {
   private width = 1
   private height = 1
 
-  constructor(readonly canvas: HTMLCanvasElement) {
+  constructor(
+    readonly canvas: HTMLCanvasElement,
+    options: { preserveDrawingBuffer?: boolean } = {},
+  ) {
     const gl = canvas.getContext('webgl', {
       antialias: false,
       depth: false,
       alpha: false,
       premultipliedAlpha: false,
-      preserveDrawingBuffer: false,
+      // only for tests that read pixels back
+      preserveDrawingBuffer: options.preserveDrawingBuffer ?? false,
       // low latency mode leaves the canvas blank in Chrome on Windows with GPU acceleration
       desynchronized: false,
     })
@@ -138,6 +142,24 @@ export class Renderer {
     this.quad = gl.createBuffer()!
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad)
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW)
+  }
+
+  /**
+   * Luminance (0-255) of an output region, top to bottom. For tests.
+   */
+  readLuma(x: number, y: number, width: number, height: number): number[] {
+    const gl = this.gl
+    const pixels = new Uint8Array(width * height * 4)
+    // GL rows start at the bottom
+    gl.readPixels(x, this.height - y - height, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+    const luma: number[] = []
+    for (let row = height - 1; row >= 0; row--) {
+      for (let column = 0; column < width; column++) {
+        const i = (row * width + column) * 4
+        luma.push(Math.round(0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]))
+      }
+    }
+    return luma
   }
 
   hasContent(surface: string): boolean {

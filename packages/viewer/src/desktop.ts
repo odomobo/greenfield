@@ -90,6 +90,21 @@ export class Desktop {
     this.scheduleRender()
   }
 
+  /**
+   * Current windows as shown (with local position overrides). For tests.
+   */
+  debugWindows(): (SceneWindow & { shownX: number; shownY: number; hasContent: boolean })[] {
+    return this.windows.map((window) => {
+      const position = this.windowPosition(window)
+      return {
+        ...window,
+        shownX: position.x,
+        shownY: position.y,
+        hasContent: window.surfaces.every((surface) => this.renderer.hasContent(surface.id)),
+      }
+    })
+  }
+
   // -------------------------------------------------------------------------------------------------------------------
   // server -> viewer
 
