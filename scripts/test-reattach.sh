@@ -61,6 +61,9 @@ wait_for() {
   fail "timed out waiting for $what"
 }
 
+# playwright-cli writes its logs to the current directory
+cd "$WORK"
+
 cat >"$WORK/apps.json" <<EOF
 { "/foot": { "name": "Foot", "executable": "foot", "args": [], "env": {} } }
 EOF
