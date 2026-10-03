@@ -25,7 +25,7 @@ This document records the design decisions made so far and the order of the rema
   Node on top of the libwayland fork, plus the GStreamer encoder. Apps connect to it like any Wayland compositor.
 - **Viewer** (`packages/viewer`): the browser side. Receives a window-scene protocol (windows, positions, sizes,
   frames) over one WebSocket, decodes frames (WebCodecs), composites with WebGL, does all window management and draws
-  the shell.
+  the shell. (Compositing moves to one DOM element per window, see Core item 3.)
 - **Gateway** (`packages/gateway`): privilege-separated.
   - Root monitor + a small C PAM helper for authentication and starting sessions (with `pam_systemd`/logind).
   - Unprivileged web process (system user `greenfield`) serving the page and relaying connections to session processes
@@ -194,38 +194,63 @@ Other rules:
      only; it doesn't depend on pixels or alpha.
    - HiDPI rendering.
 2. **Two-factor sign-in via PAM prompts.**
+3. **Viewer: one DOM element per window instead of one WebGL canvas.** Each window becomes a positioned element with
+   its own canvas, stacked in DOM order, so the browser does stacking, clipping, hit-testing, occlusion and window
+   moves/animations (CSS transforms), and window decorations and shadows can be HTML/CSS that stacks with its window.
+   - Patches: `drawImage` of the decoded PNG into the window's 2D canvas. Opaque video: `drawImage(VideoFrame)`, which
+     stays on the GPU (no copy through JavaScript memory).
+   - Video with alpha: one shared offscreen WebGL context combines the color and alpha streams and hands each frame to
+     the window's canvas (`transferToImageBitmap`), which avoids the per-page WebGL context limit.
+   - Live resize stretching becomes a CSS scale of the window's canvas.
+   - The end-to-end test's pixel checks need a new way to read window content.
+   - Do this before browser-drawn decorations and shadows, which depend on it.
 
 ### First extra feature
 
-3. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle.
+4. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle.
 
 ### Lower priority
 
-4. Browser-drawn window decorations via `xdg-decoration` (GTK apps will still draw their own).
-5. Hidden/minimized windows: the viewer tells the server to stop sending updates (and the app gets no frame callbacks /
-   is marked suspended). On re-show, briefly show the last image scaled to the window until fresh frames arrive.
-6. Hardware video decoding in the browser.
-7. Downloadable/user-written CSS themes.
-8. WebTransport, only if the single WebSocket ever becomes a bottleneck.
-9. **Browser-drawn window shadows** (very low priority, nice-to-have). Follow the Windows 11 approach: only draw a
-    shadow when the compositor knows the window's shape.
-    - Opaque windows (the `wl_surface.set_opaque_region` covers the `xdg_surface.set_window_geometry` rectangle,
-      allowing for corners): crop the app's own shadow off at the encoder (saves bandwidth), round the corners in the
-      viewer's shader, and draw a themeable shadow around that same rounded rectangle. Add an invisible resize border
-      to replace the app's resize strip, which lived in the cropped margin.
-    - Everything else (odd shapes, translucency, no opaque region): no cropping and no shadow from us; show the app's
-      pixels, including its own shadow, as sent.
+5. Browser-drawn window decorations via `xdg-decoration` (GTK apps will still draw their own).
+6. **Don't send what can't be seen: minimized, fully covered and partially covered windows**, all with one algorithm,
+   computed on the server. It already has every window's position, stacking order, minimized state and opaque region
+   (`wl_surface.set_opaque_region`; a translucent window on top doesn't hide what's below it).
+   - Each surface's visible region is its rectangle minus the opaque windows above it (minimized: nothing visible).
+   - Damage in the visible region is sent as usual. Damage in the hidden region accumulates instead, merged as it comes
+     in (like queued patches), so 100 updates to the same area stay one region, not 100.
+   - When part of a surface becomes visible again, the accumulated damage inside it is sent.
+   - Video mode encodes whole surfaces, so there partial cover saves nothing; a fully hidden surface stops its video
+     and resumes with a key frame.
+   - Fully hidden surfaces get throttled frame callbacks, so the app idles.
+   - Taskbar hover previews may show a slightly stale image of a hidden window (accepted).
+   - The viewer's own state can briefly run ahead of the server's (a drag, an animation); at worst a region updates a
+     few milliseconds late.
+7. Hardware video decoding in the browser.
+8. Downloadable/user-written CSS themes.
+9. WebTransport, only if the single WebSocket ever becomes a bottleneck.
+10. **Browser-drawn window shadows** (very low priority, nice-to-have). Only draw a shadow when we know the window is a
+    plain opaque rectangle: its `wl_surface.set_opaque_region` covers the whole surface. Such an app draws no shadow
+    margin and no transparent corners of its own, so there is nothing to crop or replace.
+    - Qualifying windows get a themeable shadow from us: a CSS `box-shadow` on the window's element (see Core item 3).
+      This doesn't depend on who draws the chrome: with our chrome (`xdg-decoration`), the shadow goes around chrome
+      and content together.
+    - Qualifying windows that draw their own chrome get their corners slightly rounded with CSS, clipping a few corner
+      pixels of the app's content. With our chrome, the rounding is part of our chrome's styling.
+    - Everything else (an opaque region smaller than the surface, translucency, no opaque region): no shadow and no
+      clipping from us; show the app's pixels as sent, including its own shadow and corners. GTK/libadwaita apps with
+      client-side decorations fall here and keep their toolkit's shadow (extra bandwidth for the shadow margin,
+      accepted).
     - Maximized windows: no shadow or rounding. Popups: a smaller shadow.
-    - Verify which toolkits (GTK, Qt, Chromium) declare their opaque region reliably; ones that don't simply keep their
-      own shadow.
+    - Verify which toolkits (GTK, Qt, Chromium) declare their opaque region reliably; ones that don't simply never
+      get our shadow.
 
-10. **Viewer improvements.** Details to come from the user when this item is reached; ask before starting.
+11. **Viewer improvements.** Details to come from the user when this item is reached; ask before starting.
 
 ### Last
 
-11. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
+12. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
     is manual (see `packages/gateway` docs).
-12. **Replace `@gfld/compositor-wasm` with native bindings.** pixman (region math) and libxkbcommon (keymaps) are
+13. **Replace `@gfld/compositor-wasm` with native bindings.** pixman (region math) and libxkbcommon (keymaps) are
     compiled to WASM only because upstream's compositor ran in the browser. It now runs in Node, so native bindings
     would remove the emsdk download and cross-compile from the build. Not needed for anything; it just speeds up builds.
 
