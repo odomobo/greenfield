@@ -209,6 +209,9 @@ Other rules:
    - wlroots is a git submodule pinned to the latest 0.20.x release tag, built with meson as a static library with
      only what we use (headless backend, pixman and GLES2 renderers, XWayland), and linked into the native addon. Its
      API changes between 0.x releases, so upgrades are deliberate, like today's libwayland fork.
+   - Its dependencies are newer than Ubuntu 24.04's (it needs libwayland >= 1.24, wayland-protocols >= 1.47, libdrm
+     >= 2.4.129, libxkbcommon >= 1.8, pixman >= 0.43). wlroots' own meson fallbacks fetch them at `HEAD`, which isn't
+     reproducible, so we pin each to a release tag (submodules or our own wrap files) and build them the same way.
    - A narrow C core (wlroots wiring) exposes high-level events and calls to TypeScript: window created, updated or
      gone; buffer committed with damage; inject input; configure and resize. The buffer-to-encoder path stays native.
    - Keeps: the viewer, the scene protocol, the gateway, the transport, the encoding policy (`SurfaceEncoder`, patches,
