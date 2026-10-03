@@ -137,3 +137,18 @@ test('patches are never coalesced, deltas beyond the limit resync', () => {
   )
   assert.ok(!sent.some((entry) => entry.startsWith('d')))
 })
+
+test('frames held back by a full socket go out once queued control messages are written', () => {
+  const { ws, transport } = setup()
+  // a burst of control messages (as on attach) fills the socket, with no frame in flight
+  ws.bufferedAmount = 1024 * 1024
+  transport.send({ priority: 'control', message: { type: 'scene' } })
+  transport.send({ priority: 'patch', surface: 's', patch: patch(1) })
+  assert.equal(ws.sent.length, 1, 'only the control message is sent while the socket is full')
+  // the socket drains; nothing else is sent, the control message's completion must restart the frames
+  ws.bufferedAmount = 0
+  ws.flush()
+  assert.equal(ws.sent.length, 1)
+  const envelope = decodeEnvelope(new Uint8Array(ws.sent[0].data).slice().buffer)
+  assert.equal(envelope.kind, 'patch')
+})

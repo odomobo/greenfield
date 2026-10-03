@@ -240,9 +240,10 @@ export class WebSocketViewerTransport implements ViewerTransport {
       return
     }
 
-    // control messages always go first, they are small
+    // Control messages always go first, they are small. A burst of them (e.g. on attach) can fill the socket past
+    // FRAME_SEND_BUFFERED_LIMIT with no frame in flight, so once one is written, check again for frames to send.
     while (this.controlQueue.length) {
-      this.ws.send(this.controlQueue.shift()!, { binary: true })
+      this.ws.send(this.controlQueue.shift()!, { binary: true }, () => this.pump())
     }
 
     // roughly one frame in flight
