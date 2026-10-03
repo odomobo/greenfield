@@ -9,7 +9,13 @@
     "build": "yarn tsc --noEmit && yarn vite build",
     "preview": "yarn vite preview"
   },
+  "dependencies": {
+    "@gfld/scene-protocol": "workspace:^",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
   "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
     "typescript": "^5.5.2",
     "vite": "^5.3.1"
   },

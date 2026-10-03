@@ -110,7 +110,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
       return
     }
     if (message.priority === 'control') {
-      this.controlQueue.push(encodeControl(message.message))
+      this.controlQueue.push(Buffer.from(encodeControl(message.message)))
     } else {
       this.queueFrame(message.surface, message.frame)
     }

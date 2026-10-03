@@ -26,6 +26,7 @@
     "watch": "yarn run build && yarn run tsc -w"
   },
   "dependencies": {
+    "@gfld/scene-protocol": "workspace:^",
     "ws": "^8.17.1"
   },
   "devDependencies": {
