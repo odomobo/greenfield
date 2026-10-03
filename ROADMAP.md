@@ -119,17 +119,41 @@ Drawn by the browser in HTML/CSS.
 
 ## Encoding policy
 
-- Per window, by changed pixels per second (damage area × rate), with hysteresis:
-  - Below the threshold: lossless PNG patches of the damaged areas only.
-  - Above it: H.264 video of the whole window.
-  - The threshold is absolute, so small windows need no special rule.
-- New windows and reattach get a full lossless frame. When video goes quiet (~0.5–1 s), a full lossless "settle" frame
-  follows at low priority (cancelled if the window gets busy again).
-- Patches are capped (~64k pixels each, to tune); larger lossless updates are split into several. Patches are applied
-  immediately (fast information beats atomic frames); an older partial update is dropped once a newer one completes.
+Each window is in one of two modes, chosen dynamically:
+
+- **Fast mode (video)**: the whole window is encoded as H.264. Damage only decides whether a frame is sent at all
+  (commits without damage are skipped); it can't select regions.
+- **Slow mode (PNG patches)**: only the damaged areas are sent, as lossless PNG patches of at most ~64k pixels each
+  (to tune); larger areas are split. The viewer applies patches as soon as they arrive.
+
+Choosing the mode:
+
+- Per window, a changed-pixels-per-second measure (damage area × rate) over a sliding period of at least 1–2 s, with
+  hysteresis between the modes. The threshold is absolute, so small windows need no special rule.
+- **The single largest damage within the period is ignored.** This keeps one-off full-window repaints (launch, an app
+  switching to a different view) from pushing a window into video, and lets every quiet window make an occasional
+  large update.
+- **New windows start in fast mode.** Briefly fuzzy video for a quiet window beats briefly choppy patches for a busy
+  one; the measure moves the window to slow mode from there.
+- Interactive resizing is not special-cased (for now).
+
+Switching modes:
+
+- **Fast → slow**: queue a full-window PNG render (as patches) so a crisp image replaces the video.
+- **Slow → fast while patches are still queued**: drop the unsent patches and switch to video immediately.
+
+Merging damage in slow mode:
+
+- A queued patch whose pixels haven't been read yet will pick up the latest content when it is encoded. So the parts
+  of new damage that overlap a queued patch are removed (possibly the whole damage).
+- Once a patch has started encoding, its pixels are fixed: new damage overlapping it is queued normally.
+- In short: never queue a not-yet-captured area twice, never skip an area whose captured pixels may be stale.
+
+Other rules:
+
 - Use `wl_surface.damage`, skip empty damage, release app buffers as early as possible.
 - A small fixed pool of warm video encoders (server) and decoders (browser) with a simple policy. If the pool is full,
-  extra windows fall back to patches.
+  a window that would be in fast mode stays in slow mode.
 - Hardware encoders when available, falling back to x264. The browser uses software decode for now (no hard decoder
   limits).
 - Rejected: one tiled "atlas" video stream for all windows (too much trouble for the benefit).
