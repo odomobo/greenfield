@@ -8,12 +8,13 @@ The front door: a login page, a per-user session list, and the per-user desktop 
 gateway (monitor)          root in PAM mode. Not network-facing. Authenticates users through native/pam-helper,
 │                          issues login tickets, keeps the session registry, spawns sessions.
 ├── gateway-web            unprivileged (--web-user, default "greenfield"). TLS, the page, sign-in tokens, Origin
-│                          checks, login throttling, viewer files; relays authenticated viewer WebSockets and app
-│                          launches to the user's session socket. Gets the listening socket and TLS key from the
+│                          checks, login throttling, viewer files; relays authenticated viewer WebSockets to the
+│                          user's session socket. Gets the listening socket and TLS key from the
 │                          monitor; asks the monitor (IPC) for everything user-related, by ticket.
 └── pam-helper session     root, tiny C. pam_open_session (pam_systemd → logind session, XDG_RUNTIME_DIR, user bus),
-    └── session-process    then drops to the user: the server compositor + the user's apps. Listens on
-                           /run/greenfield/sessions/<id>/viewer.sock (dir uid:webgroup 2750, socket 0660).
+    └── session-process    then drops to the user: the server compositor, the desktop shell's server side and the
+                           user's apps. Listens on /run/greenfield/sessions/<id>/viewer.sock (dir uid:webgroup
+                           2750, socket 0660).
 ```
 
 TLS ends in the web process, so users' sessions never have access to the key. A session dies when it's ended from
@@ -25,7 +26,7 @@ the session list or when the gateway stops; closing the browser doesn't affect i
 yarn workspaces foreach -A --parallel --topological-dev run build
 cd packages/gateway
 env -u DISPLAY GREENFIELD_DEV_PASSWORD='choose-a-password' \
-  node dist/main.js --dev-auth --bind-ip 127.0.0.1 --bind-port 8443 --applications=$HOME/greenfield-apps.json
+  node dist/main.js --dev-auth --bind-ip 127.0.0.1 --bind-port 8443
 ```
 
 Open https://127.0.0.1:8443/ (self-signed certificate; the fingerprint is printed at startup) and sign in as your
@@ -50,13 +51,24 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin greenfield
 Run:
 
 ```bash
-sudo env -u DISPLAY /usr/local/bin/node /opt/greenfield/packages/gateway/dist/main.js \
-  --bind-port 443 --applications=/etc/greenfield/apps.json
+sudo env -u DISPLAY /usr/local/bin/node /opt/greenfield/packages/gateway/dist/main.js --bind-port 443
 ```
 
 Options: `--cert/--key` for a real certificate (default: self-signed in /var/lib/greenfield/tls), `--hide-hostname`,
 `--allowed-origin` (behind a reverse proxy), `--insecure-plaintext` (HTTP; only on loopback/private addresses, for a
 trusted home LAN), `--encoder`, `--render-device`. `--help` lists everything.
+
+## Desktop shell
+
+The taskbar, Apps menu, window previews and notifications are drawn by the browser (packages/viewer/src/shell); their
+state lives in the session process (src/shell), so it survives the browser going away:
+
+- Apps: the user's and the system's `.desktop` files (`$XDG_DATA_HOME/applications`, `$XDG_DATA_DIRS/*/applications`),
+  without hidden and other desktops' entries. Launched from their `Exec` line (no field codes; `Terminal=true` apps in
+  the first installed terminal), as the user, in the session. Icons from the user's icon theme, hicolor and pixmaps.
+- Pinned apps: `$XDG_CONFIG_HOME/greenfield/pinned.json` (a terminal is pinned until the user changes the list).
+- Notifications: the session serves `org.freedesktop.Notifications` on the session bus and keeps the last 50. With
+  logind, a user's sessions share one bus: the first session gets the notifications, later ones queue for the name.
 
 ## Security properties
 

@@ -1,7 +1,7 @@
 /**
  * The web process: everything network-facing, running unprivileged. TLS, the page, sign-in tokens, Origin checks,
- * rate limiting, the viewer's static files, and relaying authenticated viewer WebSockets and app launches to the
- * user's session process over its Unix socket.
+ * rate limiting, the viewer's static files, and relaying authenticated viewer WebSockets to the user's session process
+ * over its Unix socket.
  *
  * It knows users only through tickets the monitor hands out on successful authentication.
  *
@@ -12,12 +12,11 @@
  */
 import { createHash, randomBytes } from 'node:crypto'
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
-import { createServer as createHTTPServer, IncomingMessage, request as httpRequest, Server, ServerResponse } from 'node:http'
+import { createServer as createHTTPServer, IncomingMessage, Server, ServerResponse } from 'node:http'
 import { createServer as createHTTPSServer } from 'node:https'
 import { connect, Server as NetServer, Socket } from 'node:net'
 import path from 'node:path'
 import { WebSocket, WebSocketServer } from 'ws'
-import { AppConfigSchema } from './app-config'
 import { MAX_SESSION_NAME_LENGTH, MonitorReply, MonitorReplyEnvelope, WebRequest, WebStart } from './ipc'
 import { log } from './log'
 import { errorPage, escapeHTML } from './pages'
@@ -330,11 +329,8 @@ async function handlePost(request: IncomingMessage, response: ServerResponse, ur
     }
     return
   }
-  const action = /^\/api\/sessions\/([A-Za-z0-9_-]{1,64})\/(launch|rename|end)$/.exec(url.pathname)
+  const action = /^\/api\/sessions\/([A-Za-z0-9_-]{1,64})\/(rename|end)$/.exec(url.pathname)
   switch (action?.[2]) {
-    case 'launch':
-      await handleLaunch(request, response, signIn, action[1])
-      return
     case 'rename':
       await handleRename(request, response, signIn, action[1])
       return
@@ -369,48 +365,6 @@ async function handleRename(request: IncomingMessage, response: ServerResponse, 
   } else {
     sendJSON(response, 404, { error: 'not found' })
   }
-}
-
-async function handleLaunch(request: IncomingMessage, response: ServerResponse, signIn: SignIn, sessionId: string) {
-  let body: any
-  try {
-    body = await readJSONBody(request)
-  } catch {
-    sendJSON(response, 400, { error: 'bad request' })
-    return
-  }
-  const app = (start.applications as AppConfigSchema)[typeof body?.app === 'string' ? body.app : '']
-  if (app === undefined) {
-    sendJSON(response, 404, { error: 'unknown application' })
-    return
-  }
-  const reply = await monitor({ type: 'sessionSocket', ticket: signIn.ticket, sessionId })
-  if (!reply.ok || reply.type !== 'socket') {
-    sendJSON(response, 404, { error: 'not found' })
-    return
-  }
-  const payload = JSON.stringify({ name: app.name, executable: app.executable, args: app.args, env: app.env })
-  const upstream = httpRequest(
-    {
-      socketPath: reply.path,
-      path: '/launch',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-      timeout: 15_000,
-    },
-    (upstreamResponse) => {
-      upstreamResponse.resume()
-      sendJSON(response, upstreamResponse.statusCode === 201 ? 201 : 500, {
-        ok: upstreamResponse.statusCode === 201,
-      })
-    },
-  )
-  upstream.on('error', () => {
-    if (!response.headersSent) {
-      sendJSON(response, 502, { error: 'session unavailable' })
-    }
-  })
-  upstream.end(payload)
 }
 
 async function handleGet(request: IncomingMessage, response: ServerResponse, url: URL) {
@@ -451,14 +405,6 @@ async function handleGet(request: IncomingMessage, response: ServerResponse, url
   if (url.pathname === '/api/sessions') {
     const reply = await monitor({ type: 'listSessions', ticket: signIn.ticket })
     sendJSON(response, 200, reply.ok && reply.type === 'sessions' ? reply.sessions : [])
-    return
-  }
-  if (url.pathname === '/api/apps') {
-    sendJSON(
-      response,
-      200,
-      Object.entries(start.applications as AppConfigSchema).map(([key, { name }]) => ({ path: key, name })),
-    )
     return
   }
   sendJSON(response, 404, { error: 'not found' })

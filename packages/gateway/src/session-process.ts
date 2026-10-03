@@ -1,7 +1,8 @@
 /**
  * A user's desktop session: the server-side compositor plus the user's apps. Runs as the user (started through the
- * PAM helper in PAM mode). Serves the viewer WebSocket and app launching on a Unix socket that only the gateway's
- * web process can reach; the web process authenticates browsers and relays to it.
+ * PAM helper in PAM mode). Serves the viewer WebSocket on a Unix socket that only the gateway's web process can
+ * reach; the web process authenticates browsers and relays to it. The desktop shell's server side (apps, launching,
+ * pinned apps, notifications) talks to the viewer over that WebSocket too (shell/service.ts).
  *
  * Lives until it's ended explicitly or the gateway stops; viewers come and go.
  */
@@ -10,7 +11,6 @@ import {
   createSession,
   createSessionController,
   initSurfaceBufferEncoding,
-  launchApplication,
   Session,
   SessionController,
   startServerCompositor,
@@ -21,6 +21,7 @@ import { createServer, IncomingMessage, ServerResponse } from 'node:http'
 import { Socket } from 'node:net'
 import path from 'node:path'
 import { SessionStart } from './ipc'
+import { ShellService } from './shell/service'
 
 const logger = createLogger('session')
 
@@ -34,8 +35,6 @@ for (const name of Object.keys(process.env)) {
     delete process.env[name]
   }
 }
-
-const MAX_BODY = 16 * 1024
 
 process.once('message', (message: SessionStart) => {
   if (message?.type !== 'start') {
@@ -58,7 +57,9 @@ async function start({ sessionId, socketPath, encoder, renderDevice }: SessionSt
     public: { baseURL: '' },
     encoder: { h264Encoder: encoder, renderDevice },
   })
-  const controller = await startServerCompositor(session).then(({ viewerHost }) => createSessionController(viewerHost))
+  const { viewerHost } = await startServerCompositor(session)
+  viewerHost.shell = new ShellService(session)
+  const controller = createSessionController(viewerHost)
 
   const terminate = () => {
     logger.info('Session ending, terminating its apps.')
@@ -100,59 +101,9 @@ function listen(socketPath: string, session: Session, controller: SessionControl
   })
 }
 
-function handleRequest(session: Session, request: IncomingMessage, response: ServerResponse) {
-  const url = new URL(request.url ?? '/', 'http://session')
-  if (request.method === 'POST' && url.pathname === '/launch') {
-    readJSON(request)
-      .then(async (body) => {
-        const { name, executable, args, env } = body ?? {}
-        if (
-          typeof name !== 'string' ||
-          typeof executable !== 'string' ||
-          !Array.isArray(args) ||
-          !args.every((arg: unknown) => typeof arg === 'string') ||
-          typeof env !== 'object' ||
-          env === null
-        ) {
-          response.writeHead(400).end()
-          return
-        }
-        const app = await launchApplication(name, executable, args, env, session)
-        response.writeHead(201, { 'Content-Type': 'application/json' }).end(JSON.stringify({ pid: app.pid }))
-      })
-      .catch((e) => {
-        logger.error(`Launch failed: ${e.message}`)
-        if (!response.headersSent) {
-          response.writeHead(500).end()
-        }
-      })
-    return
-  }
+function handleRequest(_session: Session, _request: IncomingMessage, response: ServerResponse) {
+  // everything goes through the viewer WebSocket (window scene and desktop shell)
   response.writeHead(404).end()
-}
-
-function readJSON(request: IncomingMessage): Promise<any> {
-  return new Promise((resolve, reject) => {
-    let size = 0
-    const chunks: Buffer[] = []
-    request.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > MAX_BODY) {
-        reject(new Error('request too large'))
-        request.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-    request.on('end', () => {
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-      } catch (e) {
-        reject(e)
-      }
-    })
-    request.on('error', reject)
-  })
 }
 
 /**

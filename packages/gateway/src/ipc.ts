@@ -4,8 +4,6 @@
  * The web process never learns passwords beyond forwarding them once for authentication, and can only act on
  * sessions through tickets the monitor issued on successful login.
  */
-import { AppConfigSchema } from './app-config'
-
 export type SessionInfo = {
   id: string
   /** user-visible name, "Session N" until the user renames it */
@@ -59,7 +57,6 @@ export type WebStart = {
   tls: { cert: string; key: string } | undefined
   hostname: string | undefined
   allowedOrigins: string[]
-  applications: AppConfigSchema
   viewerDir: string
   devMode: boolean
 }

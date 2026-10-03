@@ -2,9 +2,6 @@ import { parseArgs } from 'node:util'
 import { readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { isIP } from 'node:net'
-import Ajv from 'ajv'
-import applicationSchema from './app-config-schema.json'
-import { AppConfigSchema } from './app-config'
 
 export type AuthMode = 'pam' | 'dev'
 
@@ -26,7 +23,6 @@ export type GatewayConfig = {
   hostname?: string
   /** extra origins allowed besides the request's own host (e.g. behind a reverse proxy) */
   allowedOrigins: string[]
-  applications: AppConfigSchema
   encoder: 'x264' | 'nvh264' | 'vaapih264'
   renderDevice: string
   viewerDir: string
@@ -43,7 +39,6 @@ const usage = `Usage: gateway [options]
   --web-user <name>          unprivileged user for the web process (default greenfield)
   --hide-hostname            don't show the host name on the login page
   --allowed-origin <origin>  additionally accepted Origin (repeatable), e.g. https://desktop.example.com
-  --applications <file>      launchable applications (JSON)
   --encoder <x264|nvh264|vaapih264>
   --render-device <path>     (default /dev/dri/renderD128)
   --dev-auth                 DEVELOPMENT ONLY: no PAM, no privilege separation. Sessions run as the current user,
@@ -73,6 +68,9 @@ export function isLoopbackAddress(ip: string): boolean {
 }
 
 export function parseConfig(argv: string[]): GatewayConfig {
+  if (argv.some((arg) => arg === '--applications' || arg.startsWith('--applications='))) {
+    fail('--applications was removed: the Apps menu lists the installed applications (their .desktop files)')
+  }
   let values
   try {
     values = parseArgs({
@@ -90,7 +88,6 @@ export function parseConfig(argv: string[]): GatewayConfig {
         'web-user': { type: 'string', default: 'greenfield' },
         'hide-hostname': { type: 'boolean', default: false },
         'allowed-origin': { type: 'string', multiple: true, default: [] },
-        applications: { type: 'string' },
         encoder: { type: 'string', default: 'x264' },
         'render-device': { type: 'string', default: '/dev/dri/renderD128' },
         'dev-auth': { type: 'boolean', default: false },
@@ -168,23 +165,8 @@ export function parseConfig(argv: string[]): GatewayConfig {
     webUser: values['web-user']!,
     hostname: values['hide-hostname'] ? undefined : hostname(),
     allowedOrigins: values['allowed-origin'] as string[],
-    applications: loadApplications(values.applications),
     encoder,
     renderDevice: values['render-device']!,
     viewerDir: require('node:path').resolve(__dirname, '../../viewer/dist'),
   }
-}
-
-function loadApplications(file: string | undefined): AppConfigSchema {
-  if (file === undefined) {
-    return {
-      '/terminal': { name: 'Terminal', executable: 'foot', args: [], env: {} },
-    }
-  }
-  const apps = JSON.parse(readFileSync(file, 'utf8'))
-  const validate = new Ajv().compile(applicationSchema)
-  if (!validate(apps)) {
-    fail(`invalid --applications file: ${JSON.stringify(validate.errors)}`)
-  }
-  return apps as AppConfigSchema
 }

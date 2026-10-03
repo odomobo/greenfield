@@ -99,7 +99,6 @@ export class Monitor {
       tls,
       hostname: config.hostname,
       allowedOrigins: config.allowedOrigins,
-      applications: config.applications,
       viewerDir: config.viewerDir,
       devMode: config.authMode === 'dev',
     }

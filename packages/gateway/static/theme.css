@@ -33,6 +33,21 @@
   --control-height: 34px;
   --card-width: 360px;
   --spacing: 16px;
+
+  /* desktop shell */
+  --taskbar-height: 40px;
+  --color-desktop: #d3dce8;
+  --color-taskbar: #eef1f5;
+  --color-taskbar-border: #dde1e7;
+  --color-subtle-hover: rgba(0, 0, 0, 0.05);
+  --color-subtle-pressed: rgba(0, 0, 0, 0.09);
+  --color-indicator: #8a8a8a;
+  --color-flyout: #f9f9f9;
+  --color-flyout-border: #e0e0e0;
+  --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.14), 0 2px 6px rgba(0, 0, 0, 0.06);
+  --radius-flyout: 8px;
+  --color-connection-ok: #0f7b0f;
+  --color-connection-bad: #c42b1c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -55,6 +70,18 @@
     --color-error-background: #442726;
     --color-focus-ring: #ffffff;
     --shadow-surface: 0 2px 8px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.35);
+
+    --color-desktop: #141a24;
+    --color-taskbar: #1f1f1f;
+    --color-taskbar-border: #2e2e2e;
+    --color-subtle-hover: rgba(255, 255, 255, 0.06);
+    --color-subtle-pressed: rgba(255, 255, 255, 0.1);
+    --color-indicator: #9a9a9a;
+    --color-flyout: #2c2c2c;
+    --color-flyout-border: #3d3d3d;
+    --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
+    --color-connection-ok: #6ccb5f;
+    --color-connection-bad: #ff99a4;
   }
 }
 
