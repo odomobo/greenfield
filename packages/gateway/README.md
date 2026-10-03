@@ -33,7 +33,9 @@ Open https://127.0.0.1:8443/ (self-signed certificate; the fingerprint is printe
 own user with that password. `--dev-auth` skips PAM and privilege separation: sessions run as you. It refuses to
 start on non-loopback addresses, as root, or without a password of at least 8 characters.
 
-End-to-end test: `scripts/test-gateway.sh`.
+End-to-end test: `scripts/test-gateway.sh` (runs `scripts/e2e/auth.sh` and `scripts/e2e/desktop.sh` in parallel; they start
+the gateway with `--dev-auth --dev-time-scale 3`, a test-only flag that divides the failed-sign-in delay and the presence
+timeouts, and is refused without `--dev-auth`).
 
 ## Real mode (PAM, multi-user)
 

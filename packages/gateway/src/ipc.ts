@@ -62,6 +62,8 @@ export type WebStart = {
   allowedOrigins: string[]
   viewerDir: string
   devMode: boolean
+  /** test only (see --dev-time-scale): divides the sign-in delays; 1 in production */
+  timeScale: number
 }
 
 /** Sent by a session process to the monitor once its socket is listening. */

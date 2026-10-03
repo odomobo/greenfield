@@ -26,6 +26,8 @@ export type GatewayConfig = {
   encoder: 'x264' | 'nvh264' | 'vaapih264'
   renderDevice: string
   viewerDir: string
+  /** dev auth only: divides the sign-in delays so tests run fast (1 = production timing) */
+  timeScale: number
 }
 
 const usage = `Usage: gateway [options]
@@ -43,6 +45,7 @@ const usage = `Usage: gateway [options]
   --render-device <path>     (default /dev/dri/renderD128)
   --dev-auth                 DEVELOPMENT ONLY: no PAM, no privilege separation. Sessions run as the current user,
                              who logs in with the password from $GREENFIELD_DEV_PASSWORD. Loopback only.
+  --dev-time-scale <n>       with --dev-auth only: divide the failed-sign-in delay and the presence timeouts by n (tests)
 `
 
 function fail(message: string): never {
@@ -93,6 +96,7 @@ export function parseConfig(argv: string[]): GatewayConfig {
         encoder: { type: 'string', default: 'x264' },
         'render-device': { type: 'string', default: '/dev/dri/renderD128' },
         'dev-auth': { type: 'boolean', default: false },
+        'dev-time-scale': { type: 'string', default: '1' },
       },
     }).values
   } catch (e: any) {
@@ -120,6 +124,13 @@ export function parseConfig(argv: string[]): GatewayConfig {
     fail('--cert and --key must be given together')
   }
 
+  const timeScale = Number(values['dev-time-scale'])
+  if (!Number.isFinite(timeScale) || timeScale < 1 || timeScale > 100) {
+    fail('invalid --dev-time-scale')
+  }
+  if (timeScale !== 1 && !values['dev-auth']) {
+    fail('--dev-time-scale is only allowed together with --dev-auth')
+  }
   const authMode: AuthMode = values['dev-auth'] ? 'dev' : 'pam'
   let devUser: string | undefined
   let devPassword: string | undefined
@@ -162,6 +173,7 @@ export function parseConfig(argv: string[]): GatewayConfig {
     stateDir,
     runtimeDir,
     authMode,
+    timeScale,
     devUser,
     devPassword,
     webUser: values['web-user']!,

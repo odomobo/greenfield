@@ -30,6 +30,8 @@ const TOKEN_MAX_MS = 7 * 24 * 3600 * 1000
 const PRESENCE_ATTACH_MS = 10_000
 /** a token survives losing its presence connection this long (network blips), not longer */
 const PRESENCE_GRACE_MS = 5_000
+/** divides the three delays above in tests (--dev-time-scale, only accepted together with --dev-auth); 1 otherwise */
+const scaled = (ms: number) => ms / (start?.timeScale ?? 1)
 const PRESENCE_PING_MS = 15_000
 /** the first WebSocket message (the token) must arrive within this time */
 const WS_AUTH_TIMEOUT_MS = 10_000
@@ -243,7 +245,7 @@ async function handleLogin(request: IncomingMessage, response: ServerResponse) {
   const startedAt = Date.now()
   const respondFailure = async (message: string) => {
     // failures take the same minimum time whatever the reason
-    const wait = MIN_FAILED_LOGIN_MS - (Date.now() - startedAt)
+    const wait = scaled(MIN_FAILED_LOGIN_MS) - (Date.now() - startedAt)
     if (wait > 0) {
       await new Promise((resolve) => setTimeout(resolve, wait))
     }
@@ -292,7 +294,7 @@ async function handleLogin(request: IncomingMessage, response: ServerResponse) {
     username: reply.username,
     createdAt: Date.now(),
     relays: new Set(),
-    revokeTimer: setTimeout(() => revoke(token), PRESENCE_ATTACH_MS),
+    revokeTimer: setTimeout(() => revoke(token), scaled(PRESENCE_ATTACH_MS)),
   })
   sendJSON(response, 200, { token, username: reply.username })
 }
@@ -463,7 +465,7 @@ function handlePresence(ws: WebSocket) {
     if (signIn?.presence === ws) {
       signIn.presence = undefined
       const closedToken = token!
-      signIn.revokeTimer = setTimeout(() => revoke(closedToken), PRESENCE_GRACE_MS)
+      signIn.revokeTimer = setTimeout(() => revoke(closedToken), scaled(PRESENCE_GRACE_MS))
     }
   })
   ws.on('error', () => ws.terminate())
