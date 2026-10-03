@@ -360,7 +360,7 @@
   font-size: var(--font-size-small);
 }
 
-.app-tile span:last-child {
+.app-tile > span:last-child {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;

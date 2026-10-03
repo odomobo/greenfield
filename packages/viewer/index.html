@@ -8,66 +8,11 @@
     <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/static/theme.css" />
     <link rel="stylesheet" href="/src/style.css" />
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </head>
   <body>
-    <div id="login-view" class="page">
-      <main class="card">
-        <div class="avatar">
-          <svg width="32" height="32" viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              fill="currentColor"
-              d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9Zm0 1.5c-4.1 0-7.5 2.2-7.5 5v1.5h15V18.5c0-2.8-3.4-5-7.5-5Z"
-            />
-          </svg>
-        </div>
-        <h1>Sign in</h1>
-        <p class="subtitle" id="hostname"><!--hostname--></p>
-        <p class="error" role="alert" id="login-error" hidden></p>
-        <form id="login-form" method="post" autocomplete="on">
-          <label for="username">Username</label>
-          <input
-            id="username"
-            name="username"
-            type="text"
-            autocomplete="username"
-            autocapitalize="none"
-            spellcheck="false"
-            required
-            maxlength="64"
-            autofocus
-          />
-          <label for="password">Password</label>
-          <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024" />
-          <button class="primary full" type="submit" id="login-submit">Sign in</button>
-        </form>
-      </main>
-    </div>
-
-    <div id="sessions-view" class="page" hidden>
-      <main class="card wide">
-        <h1 id="welcome"></h1>
-        <p class="subtitle" id="sessions-hostname"></p>
-        <p class="error" role="alert" id="sessions-error" hidden></p>
-        <ul class="sessions" id="session-list" hidden></ul>
-        <p class="empty" id="no-sessions" hidden>You have no running sessions.</p>
-        <div class="row">
-          <button class="link-button" type="button" id="sign-out">Sign out</button>
-          <button class="primary" type="button" id="new-session">Start new session</button>
-        </div>
-      </main>
-    </div>
-
-    <div id="desktop-view" hidden>
-      <header id="taskbar"></header>
-      <main id="output-container">
-        <canvas id="output" tabindex="0"></canvas>
-        <div id="overlay" hidden>
-          <div id="overlay-message"></div>
-          <button type="button" id="overlay-reconnect" hidden>Reconnect</button>
-          <button type="button" id="overlay-sessions" hidden>Back to sessions</button>
-        </div>
-      </main>
-    </div>
+    <!-- The server replaces the placeholder below with the host name (or &nbsp;); the app reads it from here. -->
+    <div id="hostname" hidden><!--hostname--></div>
+    <div id="root"></div>
   </body>
 </html>
