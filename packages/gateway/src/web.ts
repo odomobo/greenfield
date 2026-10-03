@@ -36,7 +36,9 @@ type LoginSession = {
 
 let start!: WebStart
 const loginSessions = new Map<string, LoginSession>()
-const failures = new RateLimiter()
+// per username: few tries; per IP: more, since many users may share an address (NAT)
+const userFailures = new RateLimiter(5)
+const ipFailures = new RateLimiter(20)
 
 // --- monitor RPC ---
 
@@ -292,8 +294,8 @@ async function handleLoginPost(request: IncomingMessage, response: ServerRespons
   }
 
   const ip = clientIP(request)
-  const userKey = `user:${username.toLowerCase()}`
-  if (failures.blocked(`ip:${ip}`) || failures.blocked(userKey)) {
+  const userKey = username.toLowerCase()
+  if (ipFailures.blocked(ip) || userFailures.blocked(userKey)) {
     await respondFailure(username, 'Too many failed attempts. Try again in a few minutes.')
     return
   }
@@ -304,14 +306,14 @@ async function handleLoginPost(request: IncomingMessage, response: ServerRespons
       : ({ ok: false, error: 'auth-failed' } as const)
 
   if (!reply.ok || reply.type !== 'auth') {
-    failures.fail(`ip:${ip}`)
-    failures.fail(userKey)
+    ipFailures.fail(ip)
+    userFailures.fail(userKey)
     log.info(`Failed login from ${ip}.`)
     await respondFailure(username, 'The username or password is incorrect.')
     return
   }
 
-  failures.succeed(userKey)
+  userFailures.succeed(userKey)
   const token = randomBytes(32).toString('base64url')
   const now = Date.now()
   loginSessions.set(token, {

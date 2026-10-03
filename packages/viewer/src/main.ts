@@ -52,7 +52,7 @@ const renderer = new Renderer(canvas, { preserveDrawingBuffer: testMode })
 const desktop = new Desktop(canvas, renderer, connection)
 
 if (testMode) {
-  // hooks for automated tests (see scripts/test-reattach.sh)
+  // hooks for automated tests (see scripts/test-gateway.sh)
   ;(window as any).__viewerTest = {
     connected: () => connection.open,
     windows: () => desktop.debugWindows(),

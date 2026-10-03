@@ -126,6 +126,15 @@ node -e "const [a,b]=process.argv.slice(1).map(Number); if (a<2.9||b<2.9||Math.a
   "$TIME_UNKNOWN" "$TIME_WRONG" || fail "failure timing differs or is too fast"
 echo "    ok"
 
+step "failed logins are throttled, for any username"
+THROTTLED_USER="nobody-$$"
+for i in 1 2 3 4 5; do
+  login_attempt "throttle$i" "$THROTTLED_USER" "wrong-$i" >/dev/null
+done
+login_attempt throttled "$THROTTLED_USER" "wrong-6" >/dev/null
+grep -q "Too many failed attempts" "$WORK/throttled.html" || fail "6th failed login was not throttled"
+echo "    ok"
+
 step "nothing is reachable without logging in"
 [ "$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/me")" = 401 ] || fail "/api/me without login"
 [ "$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/sessions")" = 401 ] || fail "/api/sessions without login"
@@ -152,6 +161,23 @@ SESSION_CSRF="$(echo "$ME_JSON" | sed -n 's/.*"csrf":"\([^"]*\)".*/\1/p')"
   fail "creating a session from a foreign origin"
 [ "$(curl -sk -o /dev/null -w '%{http_code}' -b "$AUTH_JAR" -H "Origin: $BASE" -H 'Content-Type: application/json' --data '{"app":"/foot"}' "$BASE/api/sessions/x/launch")" = 403 ] ||
   fail "launching without the CSRF header"
+echo "    ok"
+
+step "plaintext mode works on loopback, without Secure cookies"
+PLAIN_PORT=$((PORT + 1))
+(exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" node "$REPO/packages/gateway/dist/main.js" --dev-auth \
+  --insecure-plaintext --bind-ip 127.0.0.1 --bind-port "$PLAIN_PORT" --state-dir "$WORK/state") >"$WORK/plain.log" 2>&1 &
+PLAIN_PID=$!
+for _ in $(seq 1 40); do
+  curl -s -o /dev/null "http://127.0.0.1:$PLAIN_PORT/login" && break
+  sleep 0.5
+done
+PLAIN_HEADERS="$(curl -s -D - -o /dev/null "http://127.0.0.1:$PLAIN_PORT/login")"
+kill "$PLAIN_PID" 2>/dev/null || true
+echo "$PLAIN_HEADERS" | grep -qi '^set-cookie: gf_login=' || fail "no login cookie in plaintext mode"
+echo "$PLAIN_HEADERS" | grep -i '^set-cookie:' | grep -qi 'secure' && fail "Secure cookie in plaintext mode"
+echo "$PLAIN_HEADERS" | grep -qi 'strict-transport-security' && fail "HSTS in plaintext mode"
+grep -q "PLAINTEXT MODE" "$WORK/plain.log" || fail "no plaintext warning"
 echo "    ok"
 
 # --- 2. browser flow ---

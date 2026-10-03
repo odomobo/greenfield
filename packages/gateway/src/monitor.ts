@@ -84,8 +84,10 @@ export class Monitor {
     this.web = child
     child.on('message', (message: WebRequestEnvelope) => this.onWebRequest(message))
     child.once('exit', (code, signal) => {
-      log.error(`Web process exited (${signal ?? code}). Shutting down.`)
-      this.shutdown(1)
+      if (!this.shuttingDown) {
+        log.error(`Web process exited (${signal ?? code}). Shutting down.`)
+        this.shutdown(1)
+      }
     })
     const start: WebStart = {
       type: 'start',
@@ -293,6 +295,7 @@ export class Monitor {
     if (this.config.authMode === 'dev') {
       child = fork(sessionProcessPath, [], {
         env: { ...process.env },
+        cwd: user.home,
         stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
       })
     } else {
