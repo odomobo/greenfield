@@ -32,6 +32,7 @@ export const {
   getXWaylandDisplay,
   getCredentials,
   getBufferSize,
+  setTcpNotSentLowat,
 } = westfieldAddon
 
 export type {

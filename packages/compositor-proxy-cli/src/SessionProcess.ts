@@ -3,11 +3,11 @@ import {
   createLogger,
   createSession,
   createSessionController,
-  enableInProcessCompositor,
   initSurfaceBufferEncoding,
   launchApplication,
   Session,
   SessionController,
+  startServerCompositor,
 } from '@gfld/compositor-proxy'
 import { IncomingMessage } from 'node:http'
 import { Socket } from 'node:net'
@@ -52,7 +52,6 @@ export type ToMainProcessMessage =
       payload: {
         replySerial: number
         pid: string
-        key: string
       }
     }
   | {
@@ -64,9 +63,7 @@ export type ToMainProcessMessage =
     }
 
 function isIpcMessage(message: any): message is ToSessionProcessMessage {
-  return (
-    message.type === 'start' || message.type === 'stop' || message.type === 'launchApp' || message.type === 'wsUpgrade'
-  )
+  return message.type === 'start' || message.type === 'launchApp' || message.type === 'wsUpgrade'
 }
 
 process.on('message', (message, sendHandle) => {
@@ -87,7 +84,8 @@ process.on('message', (message, sendHandle) => {
   }
 })
 
-let context: { session: Session; sessionController: SessionController; ready: Promise<void> } | undefined = undefined
+type Context = { session: Session; ready: Promise<SessionController> }
+let context: Context | undefined = undefined
 
 function start({ config, compositorSessionId }: Extract<ToSessionProcessMessage, { type: 'start' }>['payload']) {
   if (context !== undefined) {
@@ -96,29 +94,14 @@ function start({ config, compositorSessionId }: Extract<ToSessionProcessMessage,
   initSurfaceBufferEncoding()
 
   const session = createSession(compositorSessionId, config)
-  const sessionController = createSessionController(session)
   context = {
     session,
-    sessionController,
-    ready: process.env.GFLD_SERVER_COMPOSITOR === '1' ? startServerCompositor(session) : Promise.resolve(),
+    ready: startServerCompositor(session).then(({ viewerHost }) => createSessionController(viewerHost)),
   }
   session.closeListeners.push(() => {
     process.exit()
   })
   logger.info(`Session started.`)
-}
-
-async function startServerCompositor(session: Session): Promise<void> {
-  const serverCompositor = await enableInProcessCompositor(session)
-  // TODO spike: debug output of the server-side surface tree
-  let lastDump = ''
-  setInterval(() => {
-    const dump = JSON.stringify(serverCompositor.dumpSurfaces())
-    if (dump !== lastDump) {
-      lastDump = dump
-      logger.info(`server-side surfaces: ${dump}`)
-    }
-  }, 1000)
 }
 
 async function launchApp({
@@ -127,12 +110,7 @@ async function launchApp({
   executable,
   args,
   env,
-}: Extract<
-  ToSessionProcessMessage,
-  {
-    type: 'launchApp'
-  }
->['payload']) {
+}: Extract<ToSessionProcessMessage, { type: 'launchApp' }>['payload']) {
   if (context === undefined) {
     throw new Error('BUG. Not yet started')
   }
@@ -140,11 +118,9 @@ async function launchApp({
   try {
     await context.ready
     const nativeAppContext = await launchApplication(name, executable, args, env, context.session)
-    // start a timer to terminate the app if no connection is made
-    nativeAppContext.onDisconnect()
     const launchAppSuccess: ToMainProcessMessage = {
       type: 'launchAppSuccess',
-      payload: { replySerial: serial, pid: `${nativeAppContext.pid}`, key: nativeAppContext.key },
+      payload: { replySerial: serial, pid: `${nativeAppContext.pid}` },
     }
     process.send!(launchAppSuccess)
   } catch (e: any) {
@@ -161,6 +137,8 @@ function wsUpgrade({ request }: Extract<ToSessionProcessMessage, { type: 'wsUpgr
     throw new Error('BUG. Not yet started')
   }
 
-  socket.resume()
-  context.sessionController.onWsUpgrade(request, socket)
+  context.ready.then((sessionController) => {
+    socket.resume()
+    sessionController.onWsUpgrade(request, socket)
+  })
 }

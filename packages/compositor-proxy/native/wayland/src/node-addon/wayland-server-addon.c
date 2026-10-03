@@ -3,6 +3,10 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <errno.h>
 #include "westfield-wayland-server-extra.h"
 #include "westfield.h"
 #include "wlr_drm.h"
@@ -1218,6 +1222,30 @@ getBufferSize(napi_env env, napi_callback_info info) {
     return return_value;
 }
 
+// Limits the amount of unsent data the kernel buffers for a TCP socket, so applications can keep their own (priority)
+// queue instead of piling data up in the socket. Returns 0 on success, errno otherwise.
+napi_value
+setTcpNotSentLowat(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[argc], return_value;
+    int32_t fd, bytes;
+
+    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
+    NAPI_CALL(env, napi_get_value_int32(env, argv[0], &fd))
+    NAPI_CALL(env, napi_get_value_int32(env, argv[1], &bytes))
+
+    int result = 0;
+#ifdef TCP_NOTSENT_LOWAT
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &bytes, sizeof(bytes)) < 0) {
+        result = errno;
+    }
+#else
+    result = ENOTSUP;
+#endif
+    NAPI_CALL(env, napi_create_int32(env, result, &return_value))
+    return return_value;
+}
+
 napi_value
 init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
@@ -1250,6 +1278,7 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("equalValueExternal", equalValueExternal),
             DECLARE_NAPI_METHOD("getCredentials", getCredentials),
             DECLARE_NAPI_METHOD("getBufferSize", getBufferSize),
+            DECLARE_NAPI_METHOD("setTcpNotSentLowat", setTcpNotSentLowat),
 
             // xwayland
             DECLARE_NAPI_METHOD("setupXWayland", setupXWayland),

@@ -15,6 +15,7 @@ import Session, { GreenfieldLogger } from '../Session'
 import Surface from '../Surface'
 import { createServerPlatform, ServerPlatformOptions } from './platform'
 import { ServerBuffer } from './ServerBuffer'
+import { WindowScene, WindowSceneEndpoint } from './scene'
 
 export type { InputOutput, InputOutputFD } from '../InputOutput'
 
@@ -46,51 +47,38 @@ export interface ServerClientConnection {
   close(): void
 }
 
-export type WindowInfo = { clientId: string; surfaceId: number; title?: string; appId?: string; active?: boolean }
-
 export interface ServerCompositor {
   readonly session: Session
 
   connectClient(options: ServerClientOptions): ServerClientConnection
 
   /**
-   * Debug view of the server-side surface tree.
+   * What an attached viewer talks to.
    */
-  dumpSurfaces(): unknown
+  readonly scene: WindowSceneEndpoint
 }
 
 export async function createServerCompositor(
   options: ServerPlatformOptions & { logger?: GreenfieldLogger },
 ): Promise<ServerCompositor> {
   await initWasm()
-  const session = await Session.create({ mode: 'floating' }, createServerPlatform(options), options.logger)
+  let outputSize: Size = options.outputSize
+  const session = await Session.create(
+    { mode: 'floating' },
+    createServerPlatform({ ...options, outputSize: () => outputSize }),
+    options.logger,
+  )
 
-  const output = Output.create(() => options.outputSize, 'server', 'landscape-primary')
+  const output = Output.create(() => outputSize, 'viewer', 'landscape-primary')
   session.globals.registerOutput(output)
   session.globals.register()
 
-  // Window metadata only reaches the outside world through the user shell events.
-  // TODO this is where a window-scene protocol towards the browser would hook in.
-  const windows = new Map<string, WindowInfo>()
-  const windowInfo = (surface: { id: number; client: { id: string } }): WindowInfo => {
-    const key = `${surface.client.id}/${surface.id}`
-    let info = windows.get(key)
-    if (info === undefined) {
-      info = { clientId: surface.client.id, surfaceId: surface.id }
-      windows.set(key, info)
-    }
-    return info
-  }
-  const events = session.userShell.events
-  events.surfaceTitleUpdated = (surface, title) => (windowInfo(surface).title = title)
-  events.surfaceAppIdUpdated = (surface, appId) => (windowInfo(surface).appId = appId)
-  events.surfaceActivationUpdated = (surface, active) => (windowInfo(surface).active = active)
-  events.surfaceDestroyed = (surface) => windows.delete(`${surface.client.id}/${surface.id}`)
+  const scene = new WindowScene(session, output, (size) => (outputSize = size))
 
   return {
     session,
     connectClient: (clientOptions) => connectClient(session, clientOptions),
-    dumpSurfaces: () => dumpSurfaces(session, windows),
+    scene,
   }
 }
 
@@ -208,26 +196,4 @@ function serializeWireMessages(eventSerial: number, wireMessages: SendMessage[])
     offset += message.length
   }
   return new Uint8Array(sendBuffer.buffer)
-}
-
-function dumpSurfaces(session: Session, windows: Map<string, WindowInfo>): unknown {
-  const viewStack = session.renderer.sceneGraph.updateViewStack()
-  return Object.values(session.display.clients).map((client) => ({
-    clientId: client.id,
-    surfaces: Object.values(client.connection.wlObjects)
-      .filter((wlObject): wlObject is WlSurfaceResource => wlObject instanceof WlSurfaceResource)
-      .map((wlSurfaceResource) => {
-        const surface = wlSurfaceResource.implementation as Surface
-        const view = surface.role?.view
-        return {
-          id: wlSurfaceResource.id,
-          role: surface.role?.constructor.name,
-          window: windows.get(`${client.id}/${wlSurfaceResource.id}`),
-          size: surface.size,
-          bufferContentSerial: surface.state.bufferContents?.contentSerial,
-          scenePosition: view ? view.viewToSceneSpace({ x: 0, y: 0 }) : undefined,
-          stackIndex: view ? viewStack.indexOf(view) : undefined,
-        }
-      }),
-  }))
 }

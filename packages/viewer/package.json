@@ -1,0 +1,17 @@
+{
+  "name": "@gfld/viewer",
+  "version": "0.1.0",
+  "description": "Browser viewer and window manager for server-side compositor sessions.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "yarn vite --config ./vite.config.ts",
+    "build": "yarn tsc --noEmit && yarn vite build",
+    "preview": "yarn vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.2",
+    "vite": "^5.3.1"
+  },
+  "license": "AGPL-3.0-or-later"
+}

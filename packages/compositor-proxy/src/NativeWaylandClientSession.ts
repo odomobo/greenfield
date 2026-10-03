@@ -80,7 +80,7 @@ export function createNativeClientSession(
     for (const destroyListener of nativeClientSession.destroyListeners) {
       destroyListener()
     }
-    nativeAppContext.sendClientConnectionsDisconnect(nativeClientSession.id)
+    nativeAppContext.closeClientChannels(nativeClientSession.id)
     nativeClientSession.destroyListeners = []
     nativeClientSession.destroyed = true
   })
@@ -363,7 +363,6 @@ export class NativeWaylandClientSession {
         const proxyFD: ProxyFD = {
           handle: fd,
           type: 'unknown',
-          host: this.nativeCompositorSession.webFS.baseURL,
         }
         const encodedProxyFDJSON = textEncoder.encode(JSON.stringify(proxyFD))
         serializedFDs[i] = encodedProxyFDJSON

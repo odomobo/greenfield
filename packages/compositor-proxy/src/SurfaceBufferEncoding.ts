@@ -22,9 +22,74 @@ import { createLogger } from './Logger.js'
 import wlSurfaceInterceptor from './protocol/wl_surface_interceptor.js'
 import { FrameFeedback } from './FrameFeedback.js'
 import { incrementAndGetNextBufferSerial, ProxyBuffer } from './ProxyBuffer.js'
-import { Channel, createFeedbackChannel, createFrameDataChannel } from './Channel.js'
 
 const logger = createLogger('surface-buffer-encoding')
+
+/**
+ * Where encoded frames go. Set by the viewer host.
+ */
+export type FrameSink = {
+  /** true if a viewer is attached and frames should be encoded */
+  readonly active: boolean
+  sendFrame(surfaceKey: string, frame: Buffer): void
+}
+
+let frameSink: FrameSink = {
+  active: false,
+  sendFrame: () => {
+    /* noop */
+  },
+}
+
+export function setFrameSink(sink: FrameSink): void {
+  frameSink = sink
+}
+
+/**
+ * Surfaces with a buffer, by surface key ("<clientId>/<surfaceId>"), so their current content can be re-encoded as a
+ * key frame, e.g. when a viewer (re)attaches.
+ */
+const surfaces = new Map<string, wlSurfaceInterceptor>()
+
+function surfaceKey(surface: wlSurfaceInterceptor): string {
+  return `${surface.userData.nativeClientSession.id}/${surface.id}`
+}
+
+/**
+ * Re-encode the current buffer of a surface as a key frame. The proxy holds on to the last committed buffer until the
+ * next one replaces it, so its content is still valid.
+ */
+export function requestKeyFrame(key: string): void {
+  const surface = surfaces.get(key)
+  if (surface === undefined || surface.destroyed || surface.surfaceState === undefined || !frameSink.active) {
+    return
+  }
+  const proxyBuffer = surface.userData.messageInterceptors[surface.surfaceState.bufferResourceId] as
+    | ProxyBuffer
+    | undefined
+  if (proxyBuffer === undefined || proxyBuffer.destroyed) {
+    return
+  }
+  surface.encoder.requestKeyUnit()
+  const { bufferResourceId, bufferCreationSerial, bufferContentSerial } = surface.surfaceState
+  const reencoding = encodeAndSendBuffer({
+    surfaceKey: key,
+    encoder: surface.encoder,
+    bufferResourceId,
+    bufferCreationSerial,
+    bufferContentSerial,
+  })
+  // the buffer must not be released before this encoding is done
+  surface.surfaceState.encodingPromise = Promise.all([surface.surfaceState.encodingPromise, reencoding]).then(() => {
+    /* noop */
+  })
+}
+
+export function requestKeyFramesForAllSurfaces(): void {
+  for (const key of surfaces.keys()) {
+    requestKeyFrame(key)
+  }
+}
 
 function ensureFrameFeedback(wlSurfaceInterceptor: wlSurfaceInterceptor): FrameFeedback {
   const nativeClientSession = wlSurfaceInterceptor.userData.nativeClientSession
@@ -33,40 +98,17 @@ function ensureFrameFeedback(wlSurfaceInterceptor: wlSurfaceInterceptor): FrameF
   }
 
   if (wlSurfaceInterceptor.frameFeedback === undefined) {
-    const feedbackChannel = createFeedbackChannel(
-      nativeClientSession.id,
-      wlSurfaceInterceptor.id,
-      wlSurfaceInterceptor.userData.nativeClientSession.nativeAppContext,
-    )
     const frameFeedback = new FrameFeedback(
       wlSurfaceInterceptor.wlClient,
       wlSurfaceInterceptor.userData.messageInterceptors,
-      feedbackChannel,
     )
     wlSurfaceInterceptor.frameFeedback = frameFeedback
     nativeClientSession.destroyListeners.push(() => {
       frameFeedback.destroy()
+      surfaces.delete(surfaceKey(wlSurfaceInterceptor))
     })
   }
   return wlSurfaceInterceptor.frameFeedback
-}
-
-function ensureFrameDataChannel(wlSurfaceInterceptor: wlSurfaceInterceptor): Channel {
-  const nativeClientSession = wlSurfaceInterceptor.userData.nativeClientSession
-  if (nativeClientSession === undefined) {
-    throw new Error('BUG. Created a wlSurfaceInterceptor without a nativeClientSession')
-  }
-
-  if (wlSurfaceInterceptor.frameDataChannel === undefined) {
-    wlSurfaceInterceptor.frameDataChannel = createFrameDataChannel(
-      wlSurfaceInterceptor.userData.nativeClientSession.id,
-      wlSurfaceInterceptor.userData.nativeClientSession.nativeAppContext,
-    )
-    nativeClientSession.destroyListeners.push(() => {
-      wlSurfaceInterceptor.frameDataChannel.close()
-    })
-  }
-  return wlSurfaceInterceptor.frameDataChannel
 }
 
 export function initSurfaceBufferEncoding(): void {
@@ -80,6 +122,7 @@ export function initSurfaceBufferEncoding(): void {
     consumed: number
     size: number
   }) {
+    surfaces.delete(surfaceKey(this))
     if (this.encoder) {
       this.encoder.destroy()
     }
@@ -239,7 +282,7 @@ export function initSurfaceBufferEncoding(): void {
     }
 
     const frameFeedback = ensureFrameFeedback(this)
-    const frameDataChannel = ensureFrameDataChannel(this)
+    const key = surfaceKey(this)
     const commitTimestamp = performance.now()
 
     const bufferContentSerial = incrementAndGetNextBufferSerial()
@@ -271,17 +314,23 @@ export function initSurfaceBufferEncoding(): void {
         const frameCallbacksIds = this.pendingFrameCallbacksIds ?? []
         this.pendingFrameCallbacksIds = []
         this.pendingFrameCallbacksIds = []
+        surfaces.set(key, this)
         this.surfaceState = {
           bufferResourceId: this.pendingBufferResourceId,
-          encodingPromise: encodeAndSendBuffer({
-            frameDataChannel,
-            encoder: this.encoder,
-            bufferContentSerial,
-            bufferResourceId: this.pendingBufferResourceId,
-            bufferCreationSerial: proxyBuffer.creationSerial,
-          }).then(() => {
-            frameFeedback.encodingDone(commitTimestamp)
-          }),
+          bufferCreationSerial: proxyBuffer.creationSerial,
+          bufferContentSerial,
+          // Without a viewer nothing is encoded, a key frame of the current buffer is made when one attaches.
+          encodingPromise: frameSink.active
+            ? encodeAndSendBuffer({
+                surfaceKey: key,
+                encoder: this.encoder,
+                bufferContentSerial,
+                bufferResourceId: this.pendingBufferResourceId,
+                bufferCreationSerial: proxyBuffer.creationSerial,
+              }).then(() => {
+                frameFeedback.encodingDone(commitTimestamp)
+              })
+            : Promise.resolve(),
         }
         this.pendingBufferResourceId = undefined
         frameFeedback.commitNotify(frameCallbacksIds)
@@ -386,7 +435,7 @@ export function initSurfaceBufferEncoding(): void {
 }
 
 function encodeAndSendBuffer(args: {
-  frameDataChannel: Channel
+  surfaceKey: string
   encoder: Encoder
   bufferResourceId: number
   bufferCreationSerial: number
@@ -396,8 +445,7 @@ function encodeAndSendBuffer(args: {
     .encodeBuffer(args)
     .then((nodeBuffer) => {
       // FIXME check buffer result, can have an empty size if encoding pipeline was ended
-      // send buffer contents. bufferId + chunk
-      args.frameDataChannel.send(nodeBuffer)
+      frameSink.sendFrame(args.surfaceKey, nodeBuffer)
     })
     .catch((e: Error) => {
       logger.error(`\tname: ${e.name} message: ${e.message}`)

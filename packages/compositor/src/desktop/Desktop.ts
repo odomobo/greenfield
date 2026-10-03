@@ -30,6 +30,16 @@ export interface DesktopSurfaceRole extends SurfaceRole {
   configureResizing(resizing: boolean): void
 }
 
+/**
+ * Window management that is done elsewhere, e.g. by the viewer (browser) of a server-side session. Interactive move and
+ * resize requests are forwarded to it instead of being handled by a compositor pointer grab.
+ */
+export interface RemoteWindowManager {
+  requestMove(desktopSurface: DesktopSurface): void
+
+  requestResize(desktopSurface: DesktopSurface, edges: number): void
+}
+
 export interface DesktopSurface {
   removed(): void
   commit(): void

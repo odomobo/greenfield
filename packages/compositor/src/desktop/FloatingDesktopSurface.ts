@@ -244,7 +244,12 @@ export class FloatingDesktopSurface implements DesktopSurface {
       pointer.grabSerial === grabSerial &&
       pointer.focus.surface.getMainSurface() === this.surface
     ) {
-      MoveGrab.create(this).start()
+      const windowManager = this.surface.session.windowManager
+      if (windowManager) {
+        windowManager.requestMove(this)
+      } else {
+        MoveGrab.create(this).start()
+      }
     }
   }
 
@@ -282,6 +287,12 @@ export class FloatingDesktopSurface implements DesktopSurface {
       return
     }
 
+    const windowManager = this.surface.session.windowManager
+    if (windowManager) {
+      windowManager.requestResize(this, edges)
+      return
+    }
+
     this.resizeEdges = edges
 
     const geometry = this.role.queryGeometry()
@@ -292,9 +303,7 @@ export class FloatingDesktopSurface implements DesktopSurface {
   setFullscreen(fullscreen: boolean): void {
     // FIXME views should have their relevant scene set explicitly based on their location instead of re-calculated each time.
     if (fullscreen) {
-      const fullScreenScene = this.role.view.relevantScene ?? Object.values(this.surface.session.renderer.scenes)[0]
-      const { width, height } = fullScreenScene.canvas
-      this.role.configureSize({ width, height })
+      this.role.configureSize(this.outputSize())
     } else {
       this.role.configureSize({ width: 0, height: 0 })
     }
@@ -304,16 +313,26 @@ export class FloatingDesktopSurface implements DesktopSurface {
 
   setMaximized(maximized: boolean): void {
     if (maximized) {
-      // FIXME views should have their relevant scene set explicitly based on their location instead of re-calculated each time.
-      const maximizedScene = this.role.view.relevantScene ?? Object.values(this.surface.session.renderer.scenes)[0]
-      const { width, height } = maximizedScene.canvas
-      this.role.configureSize({ width, height })
+      this.role.configureSize(this.outputSize())
     } else {
       // zero size means the client should pick it's own size.
       this.role.configureSize({ width: 0, height: 0 })
     }
 
     this.role.configureMaximized(maximized)
+  }
+
+  /**
+   * Size of the output this window is on.
+   */
+  private outputSize(): Size {
+    // FIXME views should have their relevant scene set explicitly based on their location instead of re-calculated each time.
+    const scene = this.role.view.relevantScene ?? Object.values(this.surface.session.renderer.scenes)[0]
+    if (scene) {
+      return { width: scene.canvas.width, height: scene.canvas.height }
+    }
+    // no browser canvas (server-side compositor): the viewer's output
+    return this.surface.session.platform.viewportSize()
   }
 
   commit(): void {

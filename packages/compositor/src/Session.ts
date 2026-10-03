@@ -17,6 +17,7 @@
 
 import { Display } from '@gfld/compositor-protocol'
 import Globals from './Globals'
+import type { RemoteWindowManager } from './desktop/Desktop'
 import { ButtonCode } from './ButtonEvent'
 import type { CompositorSession, SessionConfig } from './index'
 import { FrameDecoder } from './remote/buffer-decoder'
@@ -96,6 +97,10 @@ class Session implements CompositorSession {
   readonly userShell: UserShellApi
   public readonly frameDecoder: FrameDecoder
   public readonly inputQueue: InputQueue
+  /**
+   * Set when window management (move, resize, placement) is done by an external viewer.
+   */
+  windowManager?: RemoteWindowManager
 
   private constructor(
     public readonly display: Display,

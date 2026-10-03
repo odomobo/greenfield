@@ -22,7 +22,6 @@ import { createNativeClientSession, NativeWaylandClientSession } from './NativeW
 import {
   addSocketAuto,
   createDisplay,
-  destroyClient,
   destroyDisplay,
   dispatchRequests,
   DRMHandle,
@@ -39,7 +38,6 @@ import { webcrypto } from 'node:crypto'
 import { Session } from './Session.js'
 import { readFileSync } from 'node:fs'
 import { NativeAppContext } from './NativeAppContext.js'
-import { pid } from 'node:process'
 
 const logger = createLogger('native-compositor-session')
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567' as const
@@ -103,7 +101,7 @@ export class NativeWaylandCompositorSession {
 
   constructor(
     public readonly session: Session,
-    public readonly webFS = createProxyInputOutput(session, session.config.public.baseURL),
+    public readonly webFS = createProxyInputOutput(),
     public readonly clients: ClientEntry[] = [],
   ) {
     this.wlDisplay = createDisplay(
@@ -171,16 +169,9 @@ export class NativeWaylandCompositorSession {
     let nativeAppContext = this.findMatchingNativeAppContext(clientPid)
 
     if (nativeAppContext === undefined) {
-      const firstNativeAppContext = this.session.getFirstNativeAppContext()
-      if (firstNativeAppContext === undefined) {
-        // terminate client, wayland client was not started as an action from the user
-        destroyClient(wlClient)
-        return
-      }
-
+      // A process we didn't launch ourselves, e.g. started from a terminal inside the session.
       const name = this.getNameFromPid(clientPid) ?? 'unknown_app'
       nativeAppContext = this.session.createNativeAppContext(clientPid, name, true)
-      firstNativeAppContext.sendCreateChildAppContext(nativeAppContext, clientPid === pid)
     }
 
     const clientId = newClientId()
@@ -197,16 +188,7 @@ export class NativeWaylandCompositorSession {
       if (index > -1) {
         this.clients.splice(index, 1)
       }
-
-      // close session if all clients have disconnected
-      if (this.clients.length === 0) {
-        // give it some time to tear down
-        setTimeout(() => {
-          if (this.clients.length === 0) {
-            this.session.close()
-          }
-        }, 1000)
-      }
+      // The session outlives its clients, a viewer can still launch new apps.
     })
   }
 }

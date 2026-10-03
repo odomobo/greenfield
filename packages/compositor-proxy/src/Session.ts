@@ -18,7 +18,6 @@
 import { createLogger } from './Logger.js'
 
 import { createNativeCompositorSession, NativeWaylandCompositorSession } from './NativeWaylandCompositorSession.js'
-import { createXWaylandSession, XWaylandSession } from './XWaylandSession.js'
 import { NativeAppContext } from './NativeAppContext.js'
 import { Configschema } from './config.js'
 
@@ -33,7 +32,6 @@ export class Session {
   public compositorPeerIdentity?: string
 
   public readonly nativeWaylandCompositorSession: NativeWaylandCompositorSession
-  public readonly xWaylandSession: XWaylandSession
   private nativeAppContexts: NativeAppContext[] = []
   public closeListeners: (() => void)[] = []
 
@@ -42,8 +40,7 @@ export class Session {
     readonly config: Configschema,
   ) {
     this.nativeWaylandCompositorSession = createNativeCompositorSession(this)
-    this.xWaylandSession = createXWaylandSession(this.nativeWaylandCompositorSession)
-    this.xWaylandSession.createXWaylandListenerSocket()
+    // TODO XWayland: the X window manager still needs to be ported to the server-side compositor.
     logger.info(`Session created.`)
   }
 
@@ -65,17 +62,6 @@ export class Session {
     })
 
     return nativeAppContext
-  }
-
-  getFirstNativeAppContext(): NativeAppContext | undefined {
-    return (
-      this.nativeAppContexts.find((nativeAppContext) => nativeAppContext.signalingWebSocket !== undefined) ??
-      this.nativeAppContexts[0]
-    )
-  }
-
-  findNativeAppContextByKey(key: string): NativeAppContext | undefined {
-    return this.nativeAppContexts.find((nativeAppContext) => nativeAppContext.key === key)
   }
 
   findNativeAppContextByPid(pid: number) {

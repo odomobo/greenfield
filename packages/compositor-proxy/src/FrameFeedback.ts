@@ -1,6 +1,5 @@
 import { destroyWlResourceSilently, flush, sendEvents, WlClient } from './wayland-server.js'
 import { performance } from 'node:perf_hooks'
-import type { Channel } from './Channel.js'
 
 let tickInterval = 16.667
 let nextTickInterval = tickInterval
@@ -38,66 +37,75 @@ function configureFramePipelineTicks(interval: number) {
 
 configureFramePipelineTicks(nextTickInterval)
 
+/**
+ * Frame callback pacing shared by all surfaces of the session, driven by the attached viewer.
+ */
+const viewerPacing = {
+  attached: false,
+  /** ms the viewer needs to decode a frame */
+  decodeDuration: 0,
+  lastFeedbackTimestamp: 0,
+}
+
+/**
+ * Without a viewer (or one that stopped reporting), apps are throttled to roughly this frame callback interval so they
+ * keep working but don't burn CPU rendering frames nobody sees.
+ */
+const DETACHED_FRAME_CALLBACK_DELAY = 1000
+const VIEWER_FEEDBACK_TIMEOUT = 1500
+const DETACHED_TICK_INTERVAL = 100
+
+export function setViewerAttached(attached: boolean): void {
+  viewerPacing.attached = attached
+  viewerPacing.lastFeedbackTimestamp = performance.now()
+  if (!attached) {
+    nextTickInterval = DETACHED_TICK_INTERVAL
+  }
+}
+
+export function onViewerFeedback(refreshInterval: number, decodeDuration: number): void {
+  viewerPacing.lastFeedbackTimestamp = performance.now()
+  viewerPacing.decodeDuration = decodeDuration
+  if (refreshInterval > 0) {
+    nextTickInterval = Math.floor(refreshInterval)
+    if (Math.abs(tickInterval - nextTickInterval) > 500 && feedbackClockTimer) {
+      clearInterval(feedbackClockTimer)
+      feedbackClockTimer = undefined
+      configureFramePipelineTicks(nextTickInterval)
+    }
+  }
+}
+
+function viewerIsPacing(): boolean {
+  return viewerPacing.attached && performance.now() - viewerPacing.lastFeedbackTimestamp < VIEWER_FEEDBACK_TIMEOUT
+}
+
 export class FrameFeedback {
   private serverProcessingDurations: number[] = []
-  private clientProcessingDuration = 0
-  private clientFeedbackTimestamp = performance.now()
-  private parkedFeedbackClockQueue: Feedback[] = []
-  private frameCallbackDelay = 0
   private destroyed = false
   private avgServerProcessingDuration = 0
 
   constructor(
     private wlClient: WlClient,
     private messageInterceptors: Record<number, any>,
-    private feedbackChannel: Channel,
-  ) {
-    feedbackChannel.onMessage = (buffer) => {
-      const data = Buffer.from(buffer, buffer.byteOffset, buffer.byteLength)
-      const refreshInterval = data.readUInt16LE(0)
-      const avgDuration = data.readUInt16LE(2)
-      this.updateDelay(refreshInterval, avgDuration)
-    }
-  }
+  ) {}
 
   destroy() {
     this.destroyed = true
-    this.parkedFeedbackClockQueue = []
-    this.feedbackChannel.close()
   }
 
   commitNotify(frameCallbacksIds: number[]): void {
-    const assumeStalledCompositor = performance.now() - this.clientFeedbackTimestamp > 1500
-    const clockQueue = assumeStalledCompositor ? this.parkedFeedbackClockQueue : feedbackClockQueue
-    clockQueue.push({
+    feedbackClockQueue.push({
       callback: (time) => {
         if (this.destroyed) {
           return
         }
         this.sendFrameDoneEventsWithCallbacks(time, frameCallbacksIds)
       },
-      frameCallbackDelay: this.frameCallbackDelay,
+      frameCallbackDelay: viewerIsPacing()
+        ? Math.floor(Math.max(this.avgServerProcessingDuration, viewerPacing.decodeDuration))
+        : DETACHED_FRAME_CALLBACK_DELAY,
     })
-  }
-
-  private updateDelay(clientRefreshInterval: number, clientProcessingDuration: number) {
-    this.clientFeedbackTimestamp = performance.now()
-    this.clientProcessingDuration = clientProcessingDuration
-    if (this.parkedFeedbackClockQueue.length) {
-      feedbackClockQueue.push(...this.parkedFeedbackClockQueue)
-      this.parkedFeedbackClockQueue = []
-    }
-
-    this.frameCallbackDelay = Math.floor(Math.max(this.avgServerProcessingDuration, this.clientProcessingDuration))
-    nextTickInterval = Math.floor(clientRefreshInterval)
-
-    if (Math.abs(tickInterval - nextTickInterval) > 500) {
-      if (feedbackClockTimer) {
-        clearInterval(feedbackClockTimer)
-        feedbackClockTimer = undefined
-      }
-      configureFramePipelineTicks(nextTickInterval)
-    }
   }
 
   encodingDone(commitTimestamp: number): void {
@@ -110,8 +118,6 @@ export class FrameFeedback {
       serverProcessingDurationSum += serverProcessingDuration
     }
     this.avgServerProcessingDuration = serverProcessingDurationSum / this.serverProcessingDurations.length
-    // console.log(this.avgServerProcessingDuration, this.clientProcessingDuration)
-    this.frameCallbackDelay = Math.floor(Math.max(this.avgServerProcessingDuration, this.clientProcessingDuration))
   }
 
   sendFrameDoneEventsWithCallbacks(frameDoneTimestamp: number, frameCallbackIds: number[]) {

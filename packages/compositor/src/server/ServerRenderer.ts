@@ -13,10 +13,26 @@ import type { CursorType } from '../browser/pointer'
  * Headless renderer. Keeps the scene graph (stacking, view transformations) up to date but draws nothing. Pixels are
  * encoded by the proxy and composited by the attached browser.
  */
+export type ServerCursor =
+  | { kind: 'default' }
+  | { kind: 'hidden' }
+  | { kind: 'named'; name: CursorType }
+  | { kind: 'surface'; view: View; hotspot: Point }
+
 export class ServerRenderer implements CompositorRenderer {
   readonly sceneGraph: SceneGraph = new SceneGraph(() => this.render())
   readonly scenes: { [key: string]: Scene } = {}
   renderFrame?: Promise<void>
+  /**
+   * The viewer does hit testing. While set, pickView returns its pick instead of searching the scene.
+   */
+  pickOverride?: { view?: View }
+  /**
+   * Called after the scene graph was updated.
+   */
+  onRendered?: () => void
+  onCursorChanged?: (cursor: ServerCursor) => void
+  cursor: ServerCursor = { kind: 'default' }
   private renderTaskRegistration?: () => void
 
   constructor(private readonly session: Session) {}
@@ -52,10 +68,14 @@ export class ServerRenderer implements CompositorRenderer {
       }
       afterUpdatePixelContent?.()
       this.session.flush()
+      this.onRendered?.()
     })
   }
 
   pickView(scenePoint: Point): View | undefined {
+    if (this.pickOverride) {
+      return this.pickOverride.view
+    }
     return this.sceneGraph.pickView(scenePoint)
   }
 
@@ -75,27 +95,33 @@ export class ServerRenderer implements CompositorRenderer {
     return this.sceneGraph.hasTopLevelView(topLevelView)
   }
 
-  // TODO cursor and drag-and-drop images should be forwarded to the attached browser
-  updateCursor(view: View, _hotspot: Point): void {
+  updateCursor(view: View, hotspot: Point): void {
     for (const callback of view.surface.state.frameCallbacks) {
       callback.done(Date.now())
     }
     view.surface.state.frameCallbacks = []
     this.session.flush()
+    this.setCursor({ kind: 'surface', view, hotspot })
   }
 
   hideCursor(): void {
-    /* noop */
+    this.setCursor({ kind: 'hidden' })
   }
 
   resetCursor(): void {
-    /* noop */
+    this.setCursor({ kind: 'default' })
   }
 
-  setCursorType(_cursorType: CursorType): void {
-    /* noop */
+  setCursorType(cursorType: CursorType): void {
+    this.setCursor({ kind: 'named', name: cursorType })
   }
 
+  private setCursor(cursor: ServerCursor) {
+    this.cursor = cursor
+    this.onCursorChanged?.(cursor)
+  }
+
+  // TODO drag-and-drop icons should be forwarded to the viewer
   clearDndImage(): void {
     /* noop */
   }

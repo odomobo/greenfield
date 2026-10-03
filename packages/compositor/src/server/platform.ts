@@ -4,13 +4,15 @@ import { ServerRenderer } from './ServerRenderer'
 
 export type ServerPlatformOptions = {
   /**
-   * TODO should follow the size of the attached browser output
+   * Initial output size, replaced by the attached viewer's output size.
    */
   outputSize: Size
   keyboardLanguage: string
 }
 
-export function createServerPlatform(options: ServerPlatformOptions): CompositorPlatform {
+export function createServerPlatform(
+  options: Omit<ServerPlatformOptions, 'outputSize'> & { outputSize: () => Size },
+): CompositorPlatform {
   return {
     createRenderer: (session) => new ServerRenderer(session),
     createFrameDecoder: () => ({
@@ -20,7 +22,7 @@ export function createServerPlatform(options: ServerPlatformOptions): Compositor
       },
     }),
     nextFrame: () => new Promise((resolve) => setTimeout(() => resolve(Date.now()), 16)),
-    viewportSize: () => options.outputSize,
+    viewportSize: options.outputSize,
     keyboardLanguage: () => options.keyboardLanguage,
     initScene: () => {
       throw new Error('BUG. There are no browser scenes on the server.')

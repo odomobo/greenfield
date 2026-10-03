@@ -1308,6 +1308,15 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@gfld/viewer@workspace:packages/viewer":
+  version: 0.0.0-use.local
+  resolution: "@gfld/viewer@workspace:packages/viewer"
+  dependencies:
+    typescript: "npm:^5.5.2"
+    vite: "npm:^5.3.1"
+  languageName: unknown
+  linkType: soft
+
 "@gfld/xtsb@workspace:^, @gfld/xtsb@workspace:libs/xtsb":
   version: 0.0.0-use.local
   resolution: "@gfld/xtsb@workspace:libs/xtsb"

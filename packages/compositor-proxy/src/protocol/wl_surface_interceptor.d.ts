@@ -5,7 +5,6 @@ import type { Channel } from '../../Channel'
 import type { WlClient, MessageDestination } from '../wayland-server'
 
 export default class wl_surface_interceptor {
-  frameDataChannel: Channel
   destroyed: boolean
   frameFeedback?: FrameFeedback
 
@@ -15,7 +14,9 @@ export default class wl_surface_interceptor {
 
   surfaceState?: {
     readonly bufferResourceId: number
-    readonly encodingPromise: Promise<void>
+    readonly bufferCreationSerial: number
+    readonly bufferContentSerial: number
+    encodingPromise: Promise<void>
   }
   bufferDestroyListener?: () => void
 

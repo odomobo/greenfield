@@ -1,0 +1,219 @@
+import { WebSocket } from 'ws'
+import { Socket } from 'node:net'
+import { createLogger } from '../Logger.js'
+import { setTcpNotSentLowat } from '../wayland-server.js'
+import { decodeControl, encodeControl, encodeFrame, isKeyFrame } from './protocol.js'
+
+const logger = createLogger('viewer-transport')
+
+export type ControlMessage = { type: string; [key: string]: any }
+
+export type OutgoingMessage =
+  | { readonly priority: 'control'; readonly message: ControlMessage }
+  | { readonly priority: 'frame'; readonly surface: string; readonly frame: Uint8Array }
+
+/**
+ * Connection to one viewer. Kept small so the WebSocket implementation can later be swapped for e.g. WebTransport
+ * (independent streams per surface + datagrams for input).
+ */
+export interface ViewerTransport {
+  /**
+   * Queue a message. Control messages are always sent before pending frames. Frames are coalesced per surface: a key
+   * frame replaces everything unsent, delta frames are chained behind it up to a small limit.
+   */
+  send(message: OutgoingMessage): void
+
+  /**
+   * Drop what is queued for this surface and only send it again from its next key frame on (e.g. the viewer's decoder
+   * failed and asked for one).
+   */
+  requireKeyFrame(surface: string): void
+
+  close(code: number, reason: string): void
+
+  readonly closed: boolean
+
+  onMessage: (message: ControlMessage) => void
+  onClose: (code: number, reason: string) => void
+  /**
+   * A frame for this surface had to be dropped and the following frames can't be decoded without a key frame.
+   */
+  onKeyFrameNeeded: (surface: string) => void
+}
+
+// Keep the kernel's unsent backlog small, so frames wait in our queue where they can still be coalesced and control
+// messages can overtake them.
+const TCP_NOTSENT_LOWAT_BYTES = 32 * 1024
+// Don't hand a new frame to the socket while more than this is still buffered in user space.
+const FRAME_SEND_BUFFERED_LIMIT = 64 * 1024
+// Max unsent delta frames per surface. Beyond that the viewer is too far behind: drop them and resync with a key frame.
+const MAX_UNSENT_FRAMES_PER_SURFACE = 3
+
+export class WebSocketViewerTransport implements ViewerTransport {
+  onMessage: (message: ControlMessage) => void = () => {
+    /* noop */
+  }
+  onClose: (code: number, reason: string) => void = () => {
+    /* noop */
+  }
+  onKeyFrameNeeded: (surface: string) => void = () => {
+    /* noop */
+  }
+
+  private readonly controlQueue: Buffer[] = []
+  /**
+   * Unsent frames per surface, each chain starts with a key frame or continues a stream the viewer already decodes.
+   * Map iteration order (insertion) gives a rough oldest-first fairness.
+   */
+  private readonly pendingFrames = new Map<string, Uint8Array[]>()
+  /**
+   * Surfaces whose next frame must be a key frame because a frame was dropped.
+   */
+  private readonly needsKeyFrame = new Set<string>()
+  private readonly keyFrameSent = new Set<string>()
+  private framesInFlight = 0
+  private _closed = false
+
+  constructor(private readonly ws: WebSocket) {
+    ws.binaryType = 'nodebuffer'
+    this.limitSocketBacklog()
+    ws.on('message', (data: Buffer, isBinary: boolean) => {
+      if (!isBinary) {
+        this.close(4400, 'Expected binary messages.')
+        return
+      }
+      let message: ControlMessage
+      try {
+        message = decodeControl(data)
+      } catch (e: any) {
+        logger.error(`Invalid message from viewer: ${e.message}`)
+        this.close(4400, e.message)
+        return
+      }
+      this.onMessage(message)
+    })
+    ws.on('close', (code, reason) => {
+      this._closed = true
+      this.onClose(code, reason.toString())
+    })
+    ws.on('error', (error) => logger.error(`Viewer connection error: ${error.message}`))
+  }
+
+  get closed(): boolean {
+    return this._closed
+  }
+
+  send(message: OutgoingMessage): void {
+    if (this._closed) {
+      return
+    }
+    if (message.priority === 'control') {
+      this.controlQueue.push(encodeControl(message.message))
+    } else {
+      this.queueFrame(message.surface, message.frame)
+    }
+    this.pump()
+  }
+
+  close(code: number, reason: string): void {
+    if (this._closed) {
+      return
+    }
+    this._closed = true
+    this.pendingFrames.clear()
+    this.controlQueue.length = 0
+    this.ws.close(code, reason)
+  }
+
+  requireKeyFrame(surface: string): void {
+    this.pendingFrames.delete(surface)
+    this.needsKeyFrame.add(surface)
+  }
+
+  private queueFrame(surface: string, frame: Uint8Array) {
+    if (isKeyFrame(frame)) {
+      // everything unsent is superseded
+      this.pendingFrames.delete(surface)
+      this.pendingFrames.set(surface, [frame])
+      this.needsKeyFrame.delete(surface)
+      return
+    }
+
+    const chain = this.pendingFrames.get(surface)
+    const decodable = !this.needsKeyFrame.has(surface) && (this.keyFrameSent.has(surface) || chain !== undefined)
+    if (!decodable) {
+      // the viewer can't decode this, wait for a key frame
+      this.requestKeyFrame(surface)
+      return
+    }
+
+    if (chain === undefined) {
+      this.pendingFrames.set(surface, [frame])
+    } else if (chain.length < MAX_UNSENT_FRAMES_PER_SURFACE) {
+      chain.push(frame)
+    } else {
+      // too far behind, resync
+      this.pendingFrames.delete(surface)
+      this.requestKeyFrame(surface)
+    }
+  }
+
+  private requestKeyFrame(surface: string) {
+    if (this.needsKeyFrame.has(surface)) {
+      return
+    }
+    this.needsKeyFrame.add(surface)
+    this.onKeyFrameNeeded(surface)
+  }
+
+  private pump() {
+    if (this._closed || this.ws.readyState !== WebSocket.OPEN) {
+      return
+    }
+
+    // control messages always go first, they are small
+    while (this.controlQueue.length) {
+      this.ws.send(this.controlQueue.shift()!, { binary: true })
+    }
+
+    // roughly one frame in flight
+    if (this.framesInFlight > 0 || this.ws.bufferedAmount > FRAME_SEND_BUFFERED_LIMIT) {
+      return
+    }
+    const next = this.pendingFrames.entries().next()
+    if (next.done) {
+      return
+    }
+    const [surface, chain] = next.value
+    const frame = chain.shift()!
+    // re-insert at the back for fairness between surfaces
+    this.pendingFrames.delete(surface)
+    if (chain.length) {
+      this.pendingFrames.set(surface, chain)
+    }
+    if (isKeyFrame(frame)) {
+      this.keyFrameSent.add(surface)
+    }
+    this.framesInFlight++
+    // The callback fires once the data was handed to the kernel. With TCP_NOTSENT_LOWAT that means most of it has
+    // actually left, so the next frame (possibly a newer one for the same surface) is picked as late as possible.
+    this.ws.send(encodeFrame(surface, frame), { binary: true }, () => {
+      this.framesInFlight--
+      this.pump()
+    })
+  }
+
+  private limitSocketBacklog() {
+    // ws keeps the underlying net.Socket private
+    const socket: Socket | undefined = (this.ws as any)._socket
+    const fd: number | undefined = (socket as any)?._handle?.fd
+    if (fd === undefined || fd < 0) {
+      logger.info('Could not reach the viewer socket fd, TCP_NOTSENT_LOWAT not set.')
+      return
+    }
+    const result = setTcpNotSentLowat(fd, TCP_NOTSENT_LOWAT_BYTES)
+    if (result !== 0) {
+      logger.info(`Could not set TCP_NOTSENT_LOWAT on viewer socket (errno ${result}).`)
+    }
+  }
+}

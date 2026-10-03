@@ -1,64 +1,20 @@
 import { NativeWaylandClientSession } from './NativeWaylandClientSession.js'
-import { randomBytes } from 'node:crypto'
-import { ChannelDesc, WebSocketChannel } from './Channel.js'
+import { Channel } from './Channel.js'
 import { createLogger } from './Logger.js'
 import { spawn } from 'node:child_process'
 import { Session } from './Session.js'
 import { setTimeout } from 'node:timers'
-import { WebSocket } from 'ws'
 
-export type RemoteAppContextAttributes = Readonly<{
-  baseURL: string
-  signalURL: string
-  pid: string
-  key: string
-  name: string
-  internal: boolean
-}>
-
-export const enum SignalingMessageType {
-  CONNECT_CHANNEL,
-  DISCONNECT_CHANNEL,
-  CREATE_CHILD_APP_CONTEXT,
-  APP_TERMINATED,
-  KILL_APP,
-}
-
-type SignalingMessage =
-  | {
-      readonly type: SignalingMessageType.CONNECT_CHANNEL
-      readonly data: { url: string; desc: ChannelDesc }
-    }
-  | {
-      readonly type: SignalingMessageType.DISCONNECT_CHANNEL
-      readonly data: { channelId: string }
-    }
-  | {
-      readonly type: SignalingMessageType.CREATE_CHILD_APP_CONTEXT
-      readonly data: { baseURL: string; signalURL: string; name: string; internal: boolean }
-    }
-  | {
-      readonly type: SignalingMessageType.APP_TERMINATED
-      readonly data: { exitCode: number } | { signal: string }
-    }
-  | {
-      readonly type: SignalingMessageType.KILL_APP
-      readonly data: { signal: 'SIGTERM' }
-    }
-
-const textEncoder = new TextEncoder()
-
+/**
+ * A (launched or externally started) application process and its Wayland connections. Its lifetime is independent of
+ * any attached viewer.
+ */
 export class NativeAppContext {
-  public readonly key = randomBytes(8).toString('hex')
-
   private nativeClientSessions: NativeWaylandClientSession[] = []
-  public signalingWebSocket: WebSocket | undefined
   public readonly destroyListeners: (() => void)[] = []
 
-  private readonly signalingSendBuffer: Uint8Array[] = []
-  private readonly channels: Record<string, WebSocketChannel> = {}
+  private readonly channels: Record<string, Channel> = {}
   private sigKillTimer?: NodeJS.Timeout
-  private sigHupTimer?: NodeJS.Timeout
 
   constructor(
     readonly session: Session,
@@ -76,42 +32,19 @@ export class NativeAppContext {
       (otherNativeClientSession) => otherNativeClientSession !== nativeClientSession,
     )
     if (this.external && this.nativeClientSessions.length === 0) {
-      this.onExit({ exitCode: 0 })
+      this.onExit()
     }
   }
 
-  signalingSend(message: Uint8Array) {
-    if (this.signalingWebSocket) {
-      this.signalingWebSocket.send(message, { binary: true })
-    } else {
-      this.signalingSendBuffer.push(message)
-    }
-  }
-
-  private flushCachedSignalingSends() {
-    if (this.signalingWebSocket === undefined || this.signalingSendBuffer.length === 0) {
-      return
-    }
-    for (const message of this.signalingSendBuffer) {
-      this.signalingWebSocket.send(message, { binary: true })
-    }
-    this.signalingSendBuffer.splice(0, this.signalingSendBuffer.length)
-  }
-
-  onExit(args: { exitCode: number } | { signal: string }) {
+  onExit() {
     if (this.sigKillTimer) {
       clearTimeout(this.sigKillTimer)
       this.sigKillTimer = undefined
-    }
-    if (this.sigHupTimer) {
-      clearTimeout(this.sigHupTimer)
-      this.sigHupTimer = undefined
     }
     for (const destroyListener of this.destroyListeners) {
       destroyListener()
     }
     this.destroyListeners.splice(0, this.destroyListeners.length)
-    this.sendExit(args)
   }
 
   kill(signal: 'SIGTERM' | 'SIGHUP') {
@@ -123,129 +56,36 @@ export class NativeAppContext {
           try {
             process.kill(this.pid, 'SIGKILL')
           } catch (e: any) {
-            if (e.code === 'ESRCH') {
-              // PID already destroyed, we can safely ignore this error.
-            } else {
+            if (e.code !== 'ESRCH') {
               throw e
             }
           }
         }, 10000)
       }
     } catch (e: any) {
-      if (e.code === 'ESRCH') {
-        // PID already destroyed, we can safely ignore this error.
-      } else {
+      // ESRCH: PID already gone, we can safely ignore this error.
+      if (e.code !== 'ESRCH') {
         throw e
       }
     }
   }
 
-  onConnect(signalingWebSocket: WebSocket) {
-    this.signalingWebSocket = signalingWebSocket
-    if (this.sigHupTimer) {
-      clearTimeout(this.sigHupTimer)
-      this.sigHupTimer = undefined
-    }
-    this.flushCachedSignalingSends()
-  }
-
-  onDisconnect() {
-    this.signalingWebSocket = undefined
-
-    if (this.sigKillTimer === undefined && this.sigHupTimer === undefined) {
-      this.sigHupTimer = setTimeout(() => {
-        this.sigHupTimer = undefined
-        this.kill('SIGHUP')
-      }, 600 * 1000)
-    }
-  }
-
-  sendConnectionRequest(channel: WebSocketChannel) {
-    const url: URL = new URL(this.session.config.public.baseURL)
-    url.searchParams.append('id', `${channel.desc.id}`)
-    url.searchParams.append('key', `${channel.nativeAppContext.key}`)
-    url.searchParams.append('compositorSessionId', `${channel.nativeAppContext.session.compositorSessionId}`)
-    url.pathname = url.pathname.endsWith('/') ? `${url.pathname}channel` : `${url.pathname}/channel`
-    const connectionRequest: SignalingMessage = {
-      type: SignalingMessageType.CONNECT_CHANNEL,
-      data: { url: url.href, desc: channel.desc },
-    }
-    this.channels[channel.desc.id] = channel
-    channel.onClose = () => {
-      delete this.channels[channel.desc.id]
-    }
-    this.signalingSend(textEncoder.encode(JSON.stringify(connectionRequest)))
-  }
-
-  registerInProcessChannel(channel: WebSocketChannel) {
+  registerChannel(channel: Channel) {
     this.channels[channel.desc.id] = channel
     channel.onClose = () => {
       delete this.channels[channel.desc.id]
     }
   }
 
-  sendChannelDisconnect(channel: WebSocketChannel) {
-    if (channel.inProcess) {
-      channel.doClose()
-      return
-    }
-    const clientDisconnect: SignalingMessage = {
-      type: SignalingMessageType.DISCONNECT_CHANNEL,
-      data: { channelId: channel.desc.id },
-    }
-    this.signalingSend(textEncoder.encode(JSON.stringify(clientDisconnect)))
-  }
-
-  sendClientConnectionsDisconnect(clientId: string) {
-    // Only disconnect the channels of this client. An app can have several Wayland connections, e.g. Mesa opens a
+  closeClientChannels(clientId: string) {
+    // Only close the channels of this client. An app can have several Wayland connections, e.g. Mesa opens a
     // short-lived one while probing EGL, and closing one must not take down the others.
     for (const channel of Object.values(this.channels)) {
       if (channel.desc.clientId === clientId) {
-        this.sendChannelDisconnect(channel)
+        channel.close()
       }
     }
   }
-
-  findChannelById(channelId: string): WebSocketChannel | undefined {
-    return this.channels[channelId]
-  }
-
-  sendCreateChildAppContext(nativeAppContext: NativeAppContext, internal: boolean) {
-    const proxyURL = new URL(this.session.config.public.baseURL)
-    proxyURL.pathname += proxyURL.pathname.endsWith('/') ? 'signal' : '/signal'
-    proxyURL.searchParams.set('compositorSessionId', this.session.compositorSessionId)
-    proxyURL.searchParams.set('key', nativeAppContext.key)
-
-    const data: RemoteAppContextAttributes = {
-      baseURL: this.session.config.public.baseURL,
-      signalURL: proxyURL.href,
-      name: nativeAppContext.name,
-      pid: `${nativeAppContext.pid}`,
-      key: nativeAppContext.key,
-      internal,
-    }
-
-    const newClientNotify: SignalingMessage = {
-      type: SignalingMessageType.CREATE_CHILD_APP_CONTEXT,
-      data,
-    }
-    this.signalingSend(textEncoder.encode(JSON.stringify(newClientNotify)))
-  }
-
-  sendExit(args: { exitCode: number } | { signal: string }) {
-    const exitMessage: SignalingMessage = {
-      type: SignalingMessageType.APP_TERMINATED,
-      data: args,
-    }
-    this.signalingSend(textEncoder.encode(JSON.stringify(exitMessage)))
-  }
-}
-
-export function isSignalingMessage(messageObject: any): messageObject is SignalingMessage {
-  if (messageObject === null) {
-    return false
-  }
-  return messageObject.type === SignalingMessageType.KILL_APP
 }
 
 export function launchApplication(
@@ -255,7 +95,6 @@ export function launchApplication(
   env: Record<string, string>,
   session: Session,
 ): Promise<NativeAppContext> {
-  // TODO create child logger from proxy session logger
   return new Promise<NativeAppContext>((resolve, reject) => {
     const appLogger = createLogger(applicationExecutable)
 
@@ -264,11 +103,8 @@ export function launchApplication(
       ...env,
       WAYLAND_DISPLAY: session.nativeWaylandCompositorSession.waylandDisplay,
     }
-    appLogger.info(
-      `Launching application ${applicationExecutable} with args ${JSON.stringify(
-        args,
-      )} and environment ${JSON.stringify(appEnv)}`,
-    )
+    // Don't log the environment, it can contain secrets.
+    appLogger.info(`Launching application ${applicationExecutable} with args ${JSON.stringify(args)}`)
     const childProcess = spawn(applicationExecutable, args, {
       env: appEnv,
     })
@@ -295,19 +131,18 @@ export function launchApplication(
       })
 
       if (childProcess.pid === undefined) {
-        throw new Error('BUG? Tried to create client signaling for child process without an id.')
+        throw new Error('BUG? Spawned child process without a pid.')
       }
 
       const nativeAppContext = session.createNativeAppContext(childProcess.pid, name, false)
       childProcess.once('exit', (exitCode, signal) => {
         if (exitCode !== null) {
           appLogger.info(`Child process terminated with exit code: ${exitCode}.`)
-          nativeAppContext.onExit({ exitCode })
         }
         if (signal !== null) {
           appLogger.info(`Child process terminated with signal: ${signal}.`)
-          nativeAppContext.onExit({ signal })
         }
+        nativeAppContext.onExit()
       })
       resolve(nativeAppContext)
     })

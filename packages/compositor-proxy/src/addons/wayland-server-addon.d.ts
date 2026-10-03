@@ -101,6 +101,9 @@ declare namespace westfieldAddon {
   function getCredentials(wlClient: WlClient, pidUidGid: Uint32Array): void
 
   function getBufferSize(wlClient: WlClient, bufferId: number): { width: number; height: number } | undefined
+
+  /** returns 0 on success, errno otherwise */
+  function setTcpNotSentLowat(fd: number, bytes: number): number
 }
 
 export = westfieldAddon

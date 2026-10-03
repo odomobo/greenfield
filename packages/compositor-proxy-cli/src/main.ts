@@ -3,7 +3,7 @@ import { createServer, IncomingMessage } from 'node:http'
 import { ChildProcess, fork } from 'node:child_process'
 import { ToSessionProcessMessage } from './SessionProcess.js'
 import { Socket } from 'node:net'
-import { authRequest, handleGET, handleOptions } from './main-controller.js'
+import { authRequest, handleLaunch, handleListApps, handleOptions, sessionIdFromURL } from './main-controller.js'
 import { args } from './main-args.js'
 import { inspect } from 'node:util'
 import path from 'node:path'
@@ -41,34 +41,51 @@ function main() {
 
   const server = createServer({ noDelay: true })
 
+  const ensureSessionProcess = (compositorSessionId: string): ChildProcess => {
+    let childProcess = sessionProcesses[compositorSessionId]
+    if (childProcess !== undefined) {
+      return childProcess
+    }
+    logger.info(`Starting session "${compositorSessionId}".`)
+    childProcess = fork(path.join(__dirname, './SessionProcess'))
+    childProcess.once('exit', (code, signal) => {
+      logger.info(`Session "${compositorSessionId}" exited: ${signal || code}`)
+      delete sessionProcesses[compositorSessionId]
+    })
+    childProcess.once('error', (err) => {
+      logger.error(`Session "${compositorSessionId}" error: ${err.message}`)
+      delete sessionProcesses[compositorSessionId]
+    })
+    sessionProcesses[compositorSessionId] = childProcess
+    const start: ToSessionProcessMessage = {
+      type: 'start',
+      payload: { compositorSessionId, config },
+    }
+    // queued by node until the child is up
+    childProcess.send(start)
+    return childProcess
+  }
+
+  const rejectUpgrade = (request: IncomingMessage, socket: Socket, code: number) => {
+    new WebSocketServer({ perMessageDeflate: false, noServer: true }).handleUpgrade(
+      request,
+      socket,
+      Buffer.from([]),
+      (ws) => ws.close(code),
+    )
+  }
+
   server.on('upgrade', (request, socket: Socket) => {
     const url = new URL(request.url ?? '', `http://${request.headers.host}`)
-    const compositorSessionId = url.searchParams.get('compositorSessionId')
-    if (compositorSessionId === null) {
-      new WebSocketServer({ perMessageDeflate: false, noServer: true }).handleUpgrade(
-        request as IncomingMessage,
-        socket,
-        Buffer.from([]),
-        (ws) => {
-          ws.close(4403)
-        },
-      )
+    const compositorSessionId = sessionIdFromURL(url)
+    if (compositorSessionId === undefined || url.pathname !== '/viewer') {
+      rejectUpgrade(request, socket, 4403)
       return
     }
+    // TODO authenticate viewers (login/gateway)
 
-    const childProcess = sessionProcesses[compositorSessionId]
-    if (childProcess === undefined) {
-      new WebSocketServer({ perMessageDeflate: false, noServer: true }).handleUpgrade(
-        request as IncomingMessage,
-        socket,
-        Buffer.from([]),
-        (ws) => {
-          ws.close(4403)
-        },
-      )
-      return
-    }
-
+    // attaching a viewer starts the session if it doesn't exist yet
+    const childProcess = ensureSessionProcess(compositorSessionId)
     socket.pause()
     const wsUpgrade: ToSessionProcessMessage = {
       type: 'wsUpgrade',
@@ -86,47 +103,31 @@ function main() {
   server.on('request', (request, response) => {
     const url = new URL(request.url ?? '', `http://${request.headers.host}`)
     if (request.method === 'OPTIONS') {
-      handleOptions(config, request, response, url)
+      handleOptions(config, request, response)
       return
     }
 
     if (request.method === 'GET') {
-      const caps = authRequest(request, response, url)
-      if (caps === undefined) {
+      if (!authRequest(request, response)) {
         return
       }
 
-      const { compositorSessionId } = caps
-
-      let childProcess = sessionProcesses[compositorSessionId]
-      if (childProcess === undefined) {
-        logger.info('No proxy session exists for this compositor, spawning a new one.')
-        childProcess = fork(path.join(__dirname, './SessionProcess'))
-
-        childProcess.once('exit', (code, signal) => {
-          logger.info(`Proxy session exited: ${signal || code}`)
-          delete sessionProcesses[compositorSessionId]
-        })
-        childProcess.once('error', (err) => {
-          logger.error(`Proxy session error: ${err.message}`)
-          delete sessionProcesses[compositorSessionId]
-        })
-        sessionProcesses[compositorSessionId] = childProcess
-        childProcess.once('spawn', () => {
-          const start: ToSessionProcessMessage = {
-            type: 'start',
-            payload: {
-              compositorSessionId,
-              config,
-            },
-          }
-          childProcess.send(start)
-          handleGET(childProcess, compositorSessionId, config, request, response, url, args['applications'])
-        })
-      } else {
-        handleGET(childProcess, compositorSessionId, config, request, response, url, args['applications'])
+      if (url.pathname === '/apps') {
+        handleListApps(config, response, args['applications'])
+        return
       }
 
+      if (url.pathname === '/launch') {
+        const compositorSessionId = sessionIdFromURL(url)
+        if (compositorSessionId === undefined) {
+          response.writeHead(400, 'Bad Request').end()
+          return
+        }
+        handleLaunch(ensureSessionProcess(compositorSessionId), config, response, url, args['applications'])
+        return
+      }
+
+      response.writeHead(404, 'Not Found').end()
       return
     }
 

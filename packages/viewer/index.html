@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Desktop</title>
+    <link rel="stylesheet" href="/src/style.css" />
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <header id="bar">
+      <div id="apps"></div>
+      <div id="status"></div>
+    </header>
+    <main id="output-container">
+      <canvas id="output" tabindex="0"></canvas>
+      <div id="overlay" hidden>
+        <div id="overlay-message"></div>
+        <button id="overlay-reconnect" hidden>Reconnect</button>
+      </div>
+    </main>
+  </body>
+</html>
