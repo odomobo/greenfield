@@ -451,32 +451,12 @@ export function initSurfaceBufferEncoding(): void {
     }
   }
 
-  /**
-   * enter
-   */
-  wlSurfaceInterceptor.prototype.R7 = function (_message: WireMessage) {
-    return {
-      native: false,
-      browser: true,
-      neverReplies: true,
-    }
-  }
+  // wl_surface request opcodes, from protocol/wayland.xml: 7 set_buffer_transform, 8 set_buffer_scale, 9 damage_buffer.
 
   /**
-   * leave
+   * set_buffer_transform: [R]equest w opcode [7] = R7
    */
-  wlSurfaceInterceptor.prototype.R8 = function (_message: WireMessage) {
-    return {
-      native: false,
-      browser: true,
-      neverReplies: true,
-    }
-  }
-
-  /**
-   * set_buffer_transform
-   */
-  wlSurfaceInterceptor.prototype.R9 = function (message: WireMessage) {
+  wlSurfaceInterceptor.prototype.R7 = function (message: WireMessage) {
     const [transform] = unmarshallArgs(message, 'i') as number[]
     this.pendingBufferTransform = transform
     return {
@@ -487,9 +467,9 @@ export function initSurfaceBufferEncoding(): void {
   }
 
   /**
-   * set_buffer_scale
+   * set_buffer_scale: [R]equest w opcode [8] = R8
    */
-  wlSurfaceInterceptor.prototype.R10 = function (message: WireMessage) {
+  wlSurfaceInterceptor.prototype.R8 = function (message: WireMessage) {
     const [scale] = unmarshallArgs(message, 'i') as number[]
     this.pendingBufferScale = scale
     return {
@@ -500,9 +480,9 @@ export function initSurfaceBufferEncoding(): void {
   }
 
   /**
-   * damage_buffer (buffer coordinates)
+   * damage_buffer: [R]equest w opcode [9] = R9 (buffer coordinates)
    */
-  wlSurfaceInterceptor.prototype.R11 = function (message: WireMessage) {
+  wlSurfaceInterceptor.prototype.R9 = function (message: WireMessage) {
     const rect = readRect(message)
     ;(this.pendingDamage ??= []).push({ rect, bufferCoordinates: true })
     return {

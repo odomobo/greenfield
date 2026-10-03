@@ -4,7 +4,15 @@ import type { Patch } from '@gfld/scene-protocol'
 import { EncoderPool } from '../EncoderPool.js'
 import { INITIAL_FAST_MS } from '../policy.js'
 import { area, Rect } from '../region.js'
-import { BufferInfo, EncodingContext, EncodingSink, SurfaceEncoder, SurfaceHost } from '../SurfaceEncoder.js'
+import {
+  BufferInfo,
+  EncodingContext,
+  EncodingSink,
+  PatchPump,
+  PatchSource,
+  SurfaceEncoder,
+  SurfaceHost,
+} from '../SurfaceEncoder.js'
 
 const r = (x: number, y: number, width: number, height: number): Rect => ({ x, y, width, height })
 
@@ -291,4 +299,39 @@ test('refresh resends the whole surface in its current mode', async () => {
   await settle()
   await settle()
   assert.equal(area(env.sink.patches.map(({ patch }) => patch.rect)), 1000 * 1000)
+})
+
+test("a surface's patches are sent in capture order, even when their encodings finish out of order", async () => {
+  const sink = new FakeSink()
+  const encodings: ((png: Uint8Array) => void)[] = []
+  const pump = new PatchPump(sink, () => new Promise<Uint8Array>((resolve) => encodings.push(resolve)), {
+    error: () => undefined,
+  })
+  const rects = [r(0, 0, 100, 100), r(10, 10, 5, 5)]
+  let serial = 0
+  const source: PatchSource = {
+    key: 'a',
+    destroyed: false,
+    get hasQueuedPatches() {
+      return serial < rects.length
+    },
+    capturePatch() {
+      const rect = rects[serial++]
+      return { rect, pixels: new Uint8Array(4), surfaceSize: { width: 100, height: 100 }, serial, epoch: 0 }
+    },
+    isCurrent: () => true,
+  }
+  pump.schedule(source)
+  assert.equal(encodings.length, 2)
+  // the newer, smaller patch finishes encoding first
+  encodings[1](new Uint8Array([2]))
+  await settle()
+  assert.equal(sink.patches.length, 0)
+  encodings[0](new Uint8Array([1]))
+  await settle()
+  assert.deepEqual(
+    sink.patches.map(({ patch }) => patch.contentSerial),
+    [1, 2],
+  )
+  assert.equal(pump.patchesInFlight, 0)
 })

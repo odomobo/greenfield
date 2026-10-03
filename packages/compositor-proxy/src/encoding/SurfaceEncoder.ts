@@ -340,6 +340,11 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
 export class PatchPump {
   private readonly ready = new Set<PatchSource>()
   private inFlight = 0
+  /**
+   * Per surface, the last captured patch's send. Encodings finish in any order, but a surface's patches must be sent
+   * in capture order: a newer patch can overlap an older one, and the older one must not be drawn over it.
+   */
+  private readonly sendTails = new Map<PatchSource, Promise<void>>()
 
   constructor(
     private readonly sink: EncodingSink,
@@ -386,23 +391,33 @@ export class PatchPump {
           this.pump()
         }
       }
-      this.encodePng(captured.pixels, captured.rect.width, captured.rect.height).then(
-        (png) => {
-          if (!surface.isCurrent(captured.epoch) || !this.sink.active) {
+      const encoding = this.encodePng(captured.pixels, captured.rect.width, captured.rect.height)
+      const previous = this.sendTails.get(surface) ?? resolved
+      const tail = previous
+        .then(() => encoding)
+        .then(
+          (png) => {
+            if (!surface.isCurrent(captured.epoch) || !this.sink.active) {
+              done()
+              return
+            }
+            this.sink.sendPatch(
+              surface.key,
+              { contentSerial: captured.serial, surfaceSize: captured.surfaceSize, rect: captured.rect, png },
+              done,
+            )
+          },
+          (error: Error) => {
+            this.logger.error(`Patch encoding of ${surface.key} failed: ${error.message}`)
             done()
-            return
-          }
-          this.sink.sendPatch(
-            surface.key,
-            { contentSerial: captured.serial, surfaceSize: captured.surfaceSize, rect: captured.rect, png },
-            done,
-          )
-        },
-        (error: Error) => {
-          this.logger.error(`Patch encoding of ${surface.key} failed: ${error.message}`)
-          done()
-        },
-      )
+          },
+        )
+      this.sendTails.set(surface, tail)
+      void tail.then(() => {
+        if (this.sendTails.get(surface) === tail) {
+          this.sendTails.delete(surface)
+        }
+      })
     }
   }
 }
