@@ -31,6 +31,7 @@ export const {
   equalValueExternal,
   getXWaylandDisplay,
   getCredentials,
+  getBufferSize,
 } = westfieldAddon
 
 export type {

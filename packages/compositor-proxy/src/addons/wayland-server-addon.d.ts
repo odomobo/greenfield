@@ -99,6 +99,8 @@ declare namespace westfieldAddon {
   function getXWaylandDisplay(xWayland: XWaylandHandle): number
 
   function getCredentials(wlClient: WlClient, pidUidGid: Uint32Array): void
+
+  function getBufferSize(wlClient: WlClient, bufferId: number): { width: number; height: number } | undefined
 }
 
 export = westfieldAddon

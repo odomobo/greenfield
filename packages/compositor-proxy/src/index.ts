@@ -4,3 +4,4 @@ export { createSessionController, SessionController } from './SessionController.
 export { createSession, Session } from './Session.js'
 export { launchApplication, NativeAppContext, RemoteAppContextAttributes } from './NativeAppContext.js'
 export { Configschema } from './config.js'
+export { enableInProcessCompositor } from './InProcessCompositor.js'

@@ -1182,6 +1182,42 @@ getCredentials(napi_env env, napi_callback_info info) {
     return return_value;
 }
 
+// expected arguments in order:
+// - wl_client client
+// - uint32 buffer resource id
+// returns {width, height} for wl_shm buffers, undefined otherwise
+napi_value
+getBufferSize(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[argc], return_value, width_value, height_value;
+    struct wl_client *client;
+    uint32_t buffer_id;
+    struct wl_resource *buffer_resource;
+    struct wl_shm_buffer *shm_buffer;
+
+    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
+    NAPI_CALL(env, napi_get_value_external(env, argv[0], (void **) &client));
+    NAPI_CALL(env, napi_get_value_uint32(env, argv[1], &buffer_id))
+    NAPI_CALL(env, napi_get_undefined(env, &return_value))
+
+    buffer_resource = wl_client_get_object(client, buffer_id);
+    if (buffer_resource == NULL) {
+        return return_value;
+    }
+    shm_buffer = wl_shm_buffer_get(buffer_resource);
+    if (shm_buffer == NULL) {
+        // TODO dmabuf buffer sizes
+        return return_value;
+    }
+
+    NAPI_CALL(env, napi_create_object(env, &return_value))
+    NAPI_CALL(env, napi_create_int32(env, wl_shm_buffer_get_width(shm_buffer), &width_value))
+    NAPI_CALL(env, napi_create_int32(env, wl_shm_buffer_get_height(shm_buffer), &height_value))
+    NAPI_CALL(env, napi_set_named_property(env, return_value, "width", width_value))
+    NAPI_CALL(env, napi_set_named_property(env, return_value, "height", height_value))
+    return return_value;
+}
+
 napi_value
 init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
@@ -1213,6 +1249,7 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("makePipe", makePipe),
             DECLARE_NAPI_METHOD("equalValueExternal", equalValueExternal),
             DECLARE_NAPI_METHOD("getCredentials", getCredentials),
+            DECLARE_NAPI_METHOD("getBufferSize", getBufferSize),
 
             // xwayland
             DECLARE_NAPI_METHOD("setupXWayland", setupXWayland),

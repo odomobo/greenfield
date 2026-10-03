@@ -45,6 +45,11 @@ export interface Channel {
 }
 
 export interface WebSocketChannel extends Channel {
+  /**
+   * True if this channel is handled inside this process (see InProcessChannelFactory).
+   */
+  readonly inProcess?: boolean
+
   doOpen(ws: WebSocket): void
 
   doMessage(buffer: Buffer): void
@@ -52,6 +57,32 @@ export interface WebSocketChannel extends Channel {
   doClose(): void
 
   ws?: WebSocket
+}
+
+/**
+ * Creates a channel that is handled inside this process instead of by a remote browser, or returns undefined to fall
+ * back to a regular WebSocket channel. Used to run the compositor (protocol implementation) server-side.
+ */
+export type InProcessChannelFactory = (
+  desc: ChannelDesc,
+  nativeAppContext: NativeAppContext,
+) => WebSocketChannel | undefined
+
+let inProcessChannelFactory: InProcessChannelFactory | undefined
+
+export function setInProcessChannelFactory(factory: InProcessChannelFactory | undefined): void {
+  inProcessChannelFactory = factory
+}
+
+function createAndConnectChannel(desc: ChannelDesc, nativeAppContext: NativeAppContext): WebSocketChannel {
+  const inProcessChannel = inProcessChannelFactory?.(desc, nativeAppContext)
+  if (inProcessChannel) {
+    nativeAppContext.registerInProcessChannel(inProcessChannel)
+    return inProcessChannel
+  }
+  const channel = createChannel(desc, nativeAppContext)
+  nativeAppContext.sendConnectionRequest(channel)
+  return channel
 }
 
 function createChannel(desc: ChannelDesc, nativeAppContext: NativeAppContext) {
@@ -71,9 +102,7 @@ export function createXWMDataChannel(clientId: string, nativeAppContext: NativeA
     clientId,
     channelType: ChannelType.ARQ,
   }
-  const channel = createChannel(desc, nativeAppContext)
-  nativeAppContext.sendConnectionRequest(channel)
-  return channel
+  return createAndConnectChannel(desc, nativeAppContext)
 }
 
 export function createFrameDataChannel(clientId: string, nativeAppContext: NativeAppContext): Channel {
@@ -83,9 +112,7 @@ export function createFrameDataChannel(clientId: string, nativeAppContext: Nativ
     clientId,
     channelType: ChannelType.ARQ,
   }
-  const channel = createChannel(desc, nativeAppContext)
-  nativeAppContext.sendConnectionRequest(channel)
-  return channel
+  return createAndConnectChannel(desc, nativeAppContext)
 }
 
 export function createProtocolChannel(clientId: string, nativeAppContext: NativeAppContext): Channel {
@@ -95,9 +122,7 @@ export function createProtocolChannel(clientId: string, nativeAppContext: Native
     clientId,
     channelType: ChannelType.ARQ,
   }
-  const channel = createChannel(desc, nativeAppContext)
-  nativeAppContext.sendConnectionRequest(channel)
-  return channel
+  return createAndConnectChannel(desc, nativeAppContext)
 }
 
 export function createFeedbackChannel(
@@ -112,9 +137,7 @@ export function createFeedbackChannel(
     surfaceId,
     channelType: ChannelType.SIMPLE,
   }
-  const channel = createChannel(desc, nativeAppContext)
-  nativeAppContext.sendConnectionRequest(channel)
-  return channel
+  return createAndConnectChannel(desc, nativeAppContext)
 }
 
 export class SimpleChannel implements WebSocketChannel {

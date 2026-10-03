@@ -177,7 +177,18 @@ export class NativeAppContext {
     this.signalingSend(textEncoder.encode(JSON.stringify(connectionRequest)))
   }
 
+  registerInProcessChannel(channel: WebSocketChannel) {
+    this.channels[channel.desc.id] = channel
+    channel.onClose = () => {
+      delete this.channels[channel.desc.id]
+    }
+  }
+
   sendChannelDisconnect(channel: WebSocketChannel) {
+    if (channel.inProcess) {
+      channel.doClose()
+      return
+    }
     const clientDisconnect: SignalingMessage = {
       type: SignalingMessageType.DISCONNECT_CHANNEL,
       data: { channelId: channel.desc.id },

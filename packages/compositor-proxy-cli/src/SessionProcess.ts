@@ -3,6 +3,7 @@ import {
   createLogger,
   createSession,
   createSessionController,
+  enableInProcessCompositor,
   initSurfaceBufferEncoding,
   launchApplication,
   Session,
@@ -86,7 +87,7 @@ process.on('message', (message, sendHandle) => {
   }
 })
 
-let context: { session: Session; sessionController: SessionController } | undefined = undefined
+let context: { session: Session; sessionController: SessionController; ready: Promise<void> } | undefined = undefined
 
 function start({ config, compositorSessionId }: Extract<ToSessionProcessMessage, { type: 'start' }>['payload']) {
   if (context !== undefined) {
@@ -99,11 +100,25 @@ function start({ config, compositorSessionId }: Extract<ToSessionProcessMessage,
   context = {
     session,
     sessionController,
+    ready: process.env.GFLD_SERVER_COMPOSITOR === '1' ? startServerCompositor(session) : Promise.resolve(),
   }
   session.closeListeners.push(() => {
     process.exit()
   })
   logger.info(`Session started.`)
+}
+
+async function startServerCompositor(session: Session): Promise<void> {
+  const serverCompositor = await enableInProcessCompositor(session)
+  // TODO spike: debug output of the server-side surface tree
+  let lastDump = ''
+  setInterval(() => {
+    const dump = JSON.stringify(serverCompositor.dumpSurfaces())
+    if (dump !== lastDump) {
+      lastDump = dump
+      logger.info(`server-side surfaces: ${dump}`)
+    }
+  }, 1000)
 }
 
 async function launchApp({
@@ -123,6 +138,7 @@ async function launchApp({
   }
 
   try {
+    await context.ready
     const nativeAppContext = await launchApplication(name, executable, args, env, context.session)
     // start a timer to terminate the app if no connection is made
     nativeAppContext.onDisconnect()
