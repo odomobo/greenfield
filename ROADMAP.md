@@ -23,10 +23,10 @@ This document records the design decisions made so far and the order of the rema
 
 - **Session process** (one per desktop session, runs as the user): the Greenfield protocol implementation running in
   Node on top of the libwayland fork, plus the GStreamer encoder. Apps connect to it like any Wayland compositor.
-  (The protocol implementation and libwayland fork are being replaced by wlroots, see Core item 3.)
+  (The protocol implementation and libwayland fork are being replaced by wlroots, see Core item 2.)
 - **Viewer** (`packages/viewer`): the browser side. Receives a window-scene protocol (windows, positions, sizes,
   frames) over one WebSocket, decodes frames (WebCodecs), composites with WebGL, does all window management and draws
-  the shell. (Compositing moves to one DOM element per window, see Core item 5.)
+  the shell. (Compositing moves to one DOM element per window, see Core item 4.)
 - **Gateway** (`packages/gateway`): privilege-separated.
   - Root monitor + a small C PAM helper for authentication and starting sessions (with `pam_systemd`/logind).
   - Unprivileged web process (system user `greenfield`) serving the page and relaying connections to session processes
@@ -88,6 +88,15 @@ A stray press of the browser's back button (e.g. a mouse side button) must not t
     concurrently, so the app has usually redrawn by the time it ends. A new frame arriving mid-animation is shown scaled
     to the animated shape.
 - Apps draw their own decorations (client-side decorations). Browser-drawn decorations via `xdg-decoration` come later.
+- **Input regions**: clicks outside a surface's input region (`wl_surface.set_input_region`, e.g. most of a client-side
+  shadow) go to whatever is underneath; the pointer and cursor follow the same hit test.
+- **Child windows** (dialogs, `xdg_toplevel.set_parent`) are separate windows in the scene with a parent. They are
+  stacked directly above their parent (raising either raises both), move with it, are minimized, restored and animated
+  with it, and have no taskbar button of their own (the parent's shows as active while a child is). The server centers
+  a new dialog on its parent; the user can still move it. Closing a dialog gives the keyboard back to its parent.
+- **HiDPI**: the viewer renders at `devicePixelRatio`; window content that maps onto whole device pixels is sampled
+  without blurring. Positions and sizes in the scene protocol stay in CSS pixels. The scale is reported to the server,
+  which doesn't tell apps yet (needs wlroots), so apps still draw at scale 1.
 
 ## Desktop shell
 
@@ -183,19 +192,13 @@ Other rules:
 - Desktop shell: top taskbar, Apps menu, hover previews, pinned apps, notifications, window animations.
 - Smart encoding: per-surface video/patch modes with encoder and decoder pools (hardware encoders and dmabuf
   readback untested).
+- Input regions, child windows (dialogs) that move, stack and minimize with their parent, and viewer-side HiDPI (see
+  [Window management](#window-management)). Detecting a pixel ratio change without a resize (moving the browser to
+  another monitor) is unverified: headless Chrome's emulation doesn't fire the events real browsers do.
 
 ### Core
 
-1. **Small gaps that don't depend on the compositor library** (their protocol and viewer work survives the wlroots
-   migration below):
-   - Input regions: send each surface's `wl_surface.set_input_region` rectangles in the scene protocol and hit-test
-     against them in the viewer, so clicks on a window's shadow margin go to whatever is underneath. This is metadata
-     only; it doesn't depend on pixels or alpha.
-   - Child dialogs move with their parent: parent relationships in the scene protocol; the viewer moves (and stacks)
-     children with their parent.
-   - HiDPI, viewer side: render at `devicePixelRatio` and report the viewer's scale to the server in the scene
-     protocol. Advertising the scale to apps (output scale, fractional scaling) waits for wlroots.
-2. **wlroots prototype.** Verify that wlroots 0.17.4 fits before committing to the migration: a small C core in the
+1. **wlroots prototype.** Verify that wlroots 0.17.4 fits before committing to the migration: a small C core in the
    session process's Node addon on wlroots' headless backend (one virtual output sized to the browser), foot drawing
    into it, and its window shown in the existing viewer through the scene protocol and the existing encoders.
    - Check: building wlroots 0.17.4 from the submodule against Ubuntu 24.04's packages; driving its event loop from
@@ -204,7 +207,7 @@ Other rules:
      (pixman renderer, shared-memory buffers).
    - Outcome: a go/no-go and a size estimate for the migration. If it doesn't fit, fall back to porting XWayland,
      clipboard and drag-and-drop to the TypeScript compositor.
-3. **Migrate the server-side compositor to wlroots 0.17.4.** wlroots implements the Wayland protocols; we supply only
+2. **Migrate the server-side compositor to wlroots 0.17.4.** wlroots implements the Wayland protocols; we supply only
    the policy, which is thin because window management happens in the browser.
    - wlroots is a git submodule pinned to the 0.17.4 tag, built with meson as a static library with only what we use
      (headless backend, pixman and GLES2 renderers, XWayland), and linked into the native addon. Its API changes
@@ -229,8 +232,8 @@ Other rules:
      - HiDPI, server side: output scale and fractional scaling (`wp_fractional_scale_v1`).
    - Must still pass `scripts/test-gateway.sh` and the encoding tests; GPU (dmabuf) buffers stay untested without
      hardware.
-4. **Two-factor sign-in via PAM prompts.**
-5. **Viewer: one DOM element per window instead of one WebGL canvas.** Each window becomes a positioned element with
+3. **Two-factor sign-in via PAM prompts.**
+4. **Viewer: one DOM element per window instead of one WebGL canvas.** Each window becomes a positioned element with
    its own canvas, stacked in DOM order, so the browser does stacking, clipping, hit-testing, occlusion and window
    moves/animations (CSS transforms), and window decorations and shadows can be HTML/CSS that stacks with its window.
    - Patches: `drawImage` of the decoded PNG into the window's 2D canvas. Opaque video: `drawImage(VideoFrame)`, which
@@ -243,13 +246,13 @@ Other rules:
 
 ### First extra feature
 
-6. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle.
+5. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle.
 
 ### Lower priority
 
-7. Browser-drawn window decorations via `xdg-decoration` (GTK apps will still draw their own); wlroots provides the
+6. Browser-drawn window decorations via `xdg-decoration` (GTK apps will still draw their own); wlroots provides the
    protocol.
-8. **Don't send what can't be seen: minimized, fully covered and partially covered windows**, all with one algorithm,
+7. **Don't send what can't be seen: minimized, fully covered and partially covered windows**, all with one algorithm,
    computed on the server. It already has every window's position, stacking order, minimized state and opaque region
    (`wl_surface.set_opaque_region`; a translucent window on top doesn't hide what's below it).
    - Each surface's visible region is its rectangle minus the opaque windows above it (minimized: nothing visible).
@@ -262,13 +265,13 @@ Other rules:
    - Taskbar hover previews may show a slightly stale image of a hidden window (accepted).
    - The viewer's own state can briefly run ahead of the server's (a drag, an animation); at worst a region updates a
      few milliseconds late.
-9. Hardware video decoding in the browser.
-10. Downloadable/user-written CSS themes.
-11. WebTransport, only if the single WebSocket ever becomes a bottleneck.
-12. **Browser-drawn window shadows** (very low priority, nice-to-have). Only draw a shadow when we know the window is a
+8. Hardware video decoding in the browser.
+9. Downloadable/user-written CSS themes.
+10. WebTransport, only if the single WebSocket ever becomes a bottleneck.
+11. **Browser-drawn window shadows** (very low priority, nice-to-have). Only draw a shadow when we know the window is a
     plain opaque rectangle: its `wl_surface.set_opaque_region` covers the whole surface. Such an app draws no shadow
     margin and no transparent corners of its own, so there is nothing to crop or replace.
-    - Qualifying windows get a themeable shadow from us: a CSS `box-shadow` on the window's element (see Core item 5).
+    - Qualifying windows get a themeable shadow from us: a CSS `box-shadow` on the window's element (see Core item 4).
       This doesn't depend on who draws the chrome: with our chrome (`xdg-decoration`), the shadow goes around chrome
       and content together.
     - Qualifying windows that draw their own chrome get their corners slightly rounded with CSS, clipping a few corner
@@ -281,11 +284,11 @@ Other rules:
     - Verify which toolkits (GTK, Qt, Chromium) declare their opaque region reliably; ones that don't simply never
       get our shadow.
 
-13. **Viewer improvements.** Details to come from the user when this item is reached; ask before starting.
+12. **Viewer improvements.** Details to come from the user when this item is reached; ask before starting.
 
 ### Last
 
-14. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
+13. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
     is manual (see `packages/gateway` docs).
 
 ### Needs verification on other hardware

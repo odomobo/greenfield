@@ -211,6 +211,8 @@ export class FloatingDesktopSurface implements DesktopSurface {
   lastSize?: Size
   savedPosition?: Point
   focusCount = 0
+  /** the role (e.g. xdg_toplevel) is gone, nothing can be configured anymore */
+  private roleRemoved = false
   xWayland: XWayland = {
     isSet: false,
     position: ORIGIN,
@@ -331,7 +333,8 @@ export class FloatingDesktopSurface implements DesktopSurface {
   }
 
   commit(): void {
-    if (this.surface.size === undefined) {
+    // a commit after the role was destroyed (e.g. a dialog being hidden) must not map it again
+    if (this.surface.size === undefined || this.roleRemoved) {
       return
     }
 
@@ -394,7 +397,9 @@ export class FloatingDesktopSurface implements DesktopSurface {
 
   loseFocus(): void {
     if (--this.focusCount === 0) {
-      this.role.configureActivated(false)
+      if (!this.roleRemoved) {
+        this.role.configureActivated(false)
+      }
       this.surface.session.userShell.events.surfaceActivationUpdated?.(this.compositorSurface, false)
     }
   }
@@ -428,7 +433,12 @@ export class FloatingDesktopSurface implements DesktopSurface {
       this.prepareFullscreen()
     }
 
-    this.surface.session.renderer.raiseSurface(this.surface)
+    // a child window (dialog) is drawn as part of its parent's tree: raise the whole window
+    let root = this.surface
+    while (root.parent && root.parent !== root) {
+      root = root.parent
+    }
+    this.surface.session.renderer.raiseSurface(root)
   }
 
   minimize(): void {
@@ -470,6 +480,14 @@ export class FloatingDesktopSurface implements DesktopSurface {
 
   removed(): void {
     this.surface.session.renderer.removeTopLevelView(this.role.view)
+    // The role went away but the wl_surface may live on (e.g. a hidden dialog): move the keyboard focus on, to the
+    // parent window if it's on top.
+    this.roleRemoved = true
+    const seat = this.surface.session.globals.seat
+    if (seat.focusedSurface === this) {
+      seat.keyboard.setFocus(undefined)
+      seat.dropFocus()
+    }
     this.surface.session.userShell.events.surfaceDestroyed?.(this.compositorSurface)
   }
 

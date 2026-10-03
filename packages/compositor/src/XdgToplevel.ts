@@ -97,6 +97,11 @@ export default class XdgToplevel implements XdgToplevelRequests, DesktopSurfaceR
       if (this.added) {
         this.desktopSurface.removed()
       }
+      // The wl_surface may get a new xdg_toplevel later (e.g. a dialog shown again), like a popup's surface.
+      this.desktopSurface.setParent(undefined)
+      if (this.xdgSurface.surface.role === this) {
+        this.xdgSurface.surface.role = undefined
+      }
     })
     this.desktopSurface.init()
   }

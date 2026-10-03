@@ -15,6 +15,7 @@ import { KeyEvent } from '../KeyEvent'
 import { ORIGIN, minusPoint, Point } from '../math/Point'
 import { Size } from '../math/Size'
 import Output from '../Output'
+import { createPixmanRegion, intersect, rectangles } from '../Region'
 import Session from '../Session'
 import Surface from '../Surface'
 import View from '../View'
@@ -23,11 +24,23 @@ import { ServerCursor, ServerRenderer } from './ServerRenderer'
 
 export type ControlMessage = { type: string; [key: string]: any }
 
-export type SceneSurface = { id: string; x: number; y: number; width: number; height: number }
+export type SceneRect = { x: number; y: number; width: number; height: number }
+
+export type SceneSurface = {
+  id: string
+  x: number
+  y: number
+  width: number
+  height: number
+  /** input region in surface local coordinates, clipped to the surface; absent: the whole surface */
+  input?: SceneRect[]
+}
 
 export type SceneWindow = {
   /** surface key of the window's main surface */
   id: string
+  /** surface key of the parent window (xdg_toplevel.set_parent), e.g. for dialogs */
+  parent?: string
   title: string
   appId: string
   activated: boolean
@@ -47,7 +60,7 @@ export type SceneWindow = {
    * tell when the client caught up with a size it asked for, even if the client rounds the size (e.g. to cells).
    */
   configuredSize?: { width: number; height: number }
-  /** all surfaces of the window (subsurfaces, popups, child windows), bottom to top, relative to the window origin */
+  /** the window's surfaces (subsurfaces, popups; not child windows), bottom to top, relative to the window origin */
   surfaces: SceneSurface[]
 }
 
@@ -65,6 +78,18 @@ export function surfaceKey(surface: Surface): string {
 
 type WindowMetadata = { title: string; appId: string; activated: boolean; placed: boolean; minimized: boolean }
 
+/** Input regions with more rectangles than this are sent as their bounding box (e.g. rounded corners, pixel rows). */
+const MAX_INPUT_RECTS = 64
+
+/** The top level surface a (child window or popup) surface belongs to. */
+function rootSurface(surface: Surface): Surface {
+  let root = surface
+  while (root.parent && root.parent !== root) {
+    root = root.parent
+  }
+  return root
+}
+
 // AxisEvent wants the DOM WheelEvent delta mode constants
 const DOM_DELTA_PIXEL = 0
 const DOM_DELTA_LINE = 1
@@ -74,6 +99,12 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
   private send?: (message: ControlMessage) => void
   private lastSceneJSON = ''
   private readonly metadata = new Map<string, WindowMetadata>()
+  /**
+   * The viewer's device pixel ratio. Stored for when apps can be told (output scale, fractional scaling), which waits
+   * for the wlroots migration; nothing uses it yet.
+   */
+  viewerScale = 1
+  private scratchRegion?: number
 
   constructor(
     private readonly session: Session,
@@ -174,8 +205,9 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
   private windows(): SceneWindow[] {
     const windows: SceneWindow[] = []
     for (const view of this.renderer.sceneGraph.topLevelViews) {
-      // child windows (dialogs) are part of their parent's surface tree
-      if (view.parent || view.destroyed || !view.mapped) {
+      // Child windows (dialogs) are part of their parent's surface tree on this side. They are sent as windows of their
+      // own with a parent; the viewer stacks them above it.
+      if (view.destroyed || !view.mapped || (view.parent && !view.parent.mapped)) {
         continue
       }
       const desktopSurface = view.surface.role?.desktopSurface
@@ -188,6 +220,7 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
       const geometry = view.surface.geometry
       windows.push({
         id: key,
+        parent: view.parent ? surfaceKey(view.parent.surface) : undefined,
         title: metadata.title,
         appId: metadata.appId,
         activated: metadata.activated,
@@ -222,6 +255,10 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
         if (childView === view && view !== rootView) {
           continue
         }
+        // child windows are windows of their own (popups aren't top level views)
+        if (childView !== view && this.renderer.sceneGraph.hasTopLevelView(childView)) {
+          continue
+        }
         const { size } = childView.surface
         if (childView.mapped && size && childView.surface.state.buffer) {
           const position = minusPoint(childView.viewToSceneSpace(ORIGIN), origin)
@@ -231,6 +268,7 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
             y: Math.round(position.y),
             width: size.width,
             height: size.height,
+            input: this.inputRegion(childView.surface),
           })
         }
         if (childView !== view) {
@@ -242,6 +280,31 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
     return surfaces
   }
 
+  /** The surface's input region clipped to the surface, or undefined if that's the whole surface. */
+  private inputRegion(surface: Surface): SceneRect[] | undefined {
+    const size = surface.size
+    if (size === undefined) {
+      return undefined
+    }
+    this.scratchRegion ??= createPixmanRegion()
+    intersect(this.scratchRegion, surface.state.inputPixmanRegion, surface.pixmanRegion)
+    const boxes = rectangles(this.scratchRegion)
+    if (boxes.length === 1) {
+      const [{ x0, y0, x1, y1 }] = boxes
+      if (x0 <= 0 && y0 <= 0 && x1 >= size.width && y1 >= size.height) {
+        return undefined
+      }
+    }
+    if (boxes.length > MAX_INPUT_RECTS) {
+      const x0 = Math.min(...boxes.map((box) => box.x0))
+      const y0 = Math.min(...boxes.map((box) => box.y0))
+      const x1 = Math.max(...boxes.map((box) => box.x1))
+      const y1 = Math.max(...boxes.map((box) => box.y1))
+      return [{ x: x0, y: y0, width: x1 - x0, height: y1 - y0 }]
+    }
+    return boxes.map(({ x0, y0, x1, y1 }) => ({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 }))
+  }
+
   requestMove(desktopSurface: DesktopSurface): void {
     this.send?.({ type: 'interactive', mode: 'move', window: surfaceKey(desktopSurface.surface) })
   }
@@ -250,12 +313,13 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
     this.send?.({ type: 'interactive', mode: 'resize', window: surfaceKey(desktopSurface.surface), edges })
   }
 
+  /** A child window can't be minimized on its own: its whole window (parent and children) is. */
   requestMinimize(desktopSurface: DesktopSurface): void {
-    this.setMinimized(desktopSurface.surface, true)
+    this.setMinimized(rootSurface(desktopSurface.surface), true)
   }
 
   isMinimized(surface: Surface): boolean {
-    return this.metadata.get(surfaceKey(surface))?.minimized ?? false
+    return this.metadata.get(surfaceKey(rootSurface(surface)))?.minimized ?? false
   }
 
   maximizeRequested(desktopSurface: DesktopSurface, maximized: boolean): void {
@@ -276,12 +340,13 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
     metadata.minimized = minimized
     if (minimized) {
       const seat = this.session.globals.seat
-      // the active window, also while the viewer page doesn't have the keyboard (then keyboard.focus is unset)
-      if (seat.focusedSurface?.surface === surface) {
+      // the active window or one of its children, also while the viewer page doesn't have the keyboard (then
+      // keyboard.focus is unset)
+      if (seat.focusedSurface && rootSurface(seat.focusedSurface.surface) === surface) {
         seat.keyboard.setFocus(undefined)
         seat.dropFocus()
       }
-      if (seat.savedKbdFocus === surface) {
+      if (seat.savedKbdFocus && rootSurface(seat.savedKbdFocus) === surface) {
         seat.savedKbdFocus = undefined
       }
     }
@@ -324,7 +389,7 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
       case 'window.activate': {
         const surface = this.findSurface(message.window)
         if (surface) {
-          this.setMinimized(surface, false)
+          this.setMinimized(rootSurface(surface), false)
         }
         this.findDesktopSurface(message.window)?.activate()
         this.session.flush()
@@ -334,7 +399,7 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
       case 'window.minimize': {
         const surface = this.findSurface(message.window)
         if (surface?.role?.desktopSurface) {
-          this.setMinimized(surface, Boolean(message.minimized))
+          this.setMinimized(rootSurface(surface), Boolean(message.minimized))
         }
         break
       }
@@ -354,7 +419,12 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
     }
   }
 
-  private updateOutput(size: { width?: number; height?: number }) {
+  private updateOutput(size: { width?: number; height?: number; scale?: number }) {
+    const scale = Number(size.scale)
+    if (scale > 0 && scale <= 16 && scale !== this.viewerScale) {
+      this.viewerScale = scale
+      this.session.logger.info(`Viewer scale: ${scale}`)
+    }
     const width = Math.round(Number(size.width))
     const height = Math.round(Number(size.height))
     if (!(width > 0 && height > 0)) {
@@ -473,7 +543,8 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
   private moveWindow(message: ControlMessage) {
     const surface = this.findSurface(message.window)
     const view = surface?.role?.view
-    if (surface === undefined || view === undefined || view.parent) {
+    // windows only (child windows included), popups are positioned by their client
+    if (surface === undefined || view === undefined || !this.renderer.sceneGraph.hasTopLevelView(view)) {
       return
     }
     const x = Math.round(Number(message.x))
@@ -482,7 +553,9 @@ export class WindowScene implements WindowSceneEndpoint, RemoteWindowManager {
       return
     }
     this.metadataFor({ id: surface.resource.id, client: surface.resource.client }).placed = true
-    view.positionOffset = minusPoint({ x, y }, surface.surfaceChildSelf.position)
+    // a child window's position is relative to its parent
+    const parentOrigin = view.parent ? view.parent.viewToSceneSpace(ORIGIN) : ORIGIN
+    view.positionOffset = minusPoint(minusPoint({ x, y }, parentOrigin), surface.surfaceChildSelf.position)
     this.session.renderer.render()
   }
 
