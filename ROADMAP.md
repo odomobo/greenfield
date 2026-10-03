@@ -195,23 +195,24 @@ Other rules:
      children with their parent.
    - HiDPI, viewer side: render at `devicePixelRatio` and report the viewer's scale to the server in the scene
      protocol. Advertising the scale to apps (output scale, fractional scaling) waits for wlroots.
-2. **wlroots prototype.** Verify that wlroots 0.20 fits before committing to the migration: a small C core in the
+2. **wlroots prototype.** Verify that wlroots 0.17.4 fits before committing to the migration: a small C core in the
    session process's Node addon on wlroots' headless backend (one virtual output sized to the browser), foot drawing
    into it, and its window shown in the existing viewer through the scene protocol and the existing encoders.
-   - Check: building wlroots 0.20 and the newer dependencies it needs on Ubuntu 24.04 (which ships 0.17); driving
-     its event loop from Node; our timer-driven frame callbacks (`wlr_surface_send_frame_done`); reading committed
-     buffers and damage into `SurfaceEncoder`; injecting pointer and keyboard input; per-window rather than
-     composited output; no GPU (pixman renderer, shared-memory buffers).
+   - Check: building wlroots 0.17.4 from the submodule against Ubuntu 24.04's packages; driving its event loop from
+     Node; our timer-driven frame callbacks (`wlr_surface_send_frame_done`); reading committed buffers and damage
+     into `SurfaceEncoder`; injecting pointer and keyboard input; per-window rather than composited output; no GPU
+     (pixman renderer, shared-memory buffers).
    - Outcome: a go/no-go and a size estimate for the migration. If it doesn't fit, fall back to porting XWayland,
      clipboard and drag-and-drop to the TypeScript compositor.
-3. **Migrate the server-side compositor to wlroots 0.20.** wlroots implements the Wayland protocols; we supply only
+3. **Migrate the server-side compositor to wlroots 0.17.4.** wlroots implements the Wayland protocols; we supply only
    the policy, which is thin because window management happens in the browser.
-   - wlroots is a git submodule pinned to the latest 0.20.x release tag, built with meson as a static library with
-     only what we use (headless backend, pixman and GLES2 renderers, XWayland), and linked into the native addon. Its
-     API changes between 0.x releases, so upgrades are deliberate, like today's libwayland fork.
-   - Its dependencies are newer than Ubuntu 24.04's (it needs libwayland >= 1.24, wayland-protocols >= 1.47, libdrm
-     >= 2.4.129, libxkbcommon >= 1.8, pixman >= 0.43). wlroots' own meson fallbacks fetch them at `HEAD`, which isn't
-     reproducible, so we pin each to a release tag (submodules or our own wrap files) and build them the same way.
+   - wlroots is a git submodule pinned to the 0.17.4 tag, built with meson as a static library with only what we use
+     (headless backend, pixman and GLES2 renderers, XWayland), and linked into the native addon. Its API changes
+     between 0.x releases, so upgrades are deliberate, like today's libwayland fork.
+   - 0.17.4 is the newest release whose dependencies (libwayland, wayland-protocols, libdrm, pixman, libxkbcommon,
+     xcb) are all satisfied by Ubuntu 24.04's packages, so nothing else is built from source. 0.18 would need a newer
+     libwayland, 0.19 also a newer pixman, 0.20 four newer libraries. Not having 0.18's explicit sync
+     (`linux-drm-syncobj`, mostly for NVIDIA) is accepted; upgrade when the supported distros catch up.
    - A narrow C core (wlroots wiring) exposes high-level events and calls to TypeScript: window created, updated or
      gone; buffer committed with damage; inject input; configure and resize. The buffer-to-encoder path stays native.
    - Keeps: the viewer, the scene protocol, the gateway, the transport, the encoding policy (`SurfaceEncoder`, patches,
