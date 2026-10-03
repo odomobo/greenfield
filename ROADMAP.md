@@ -103,14 +103,19 @@ Drawn by the browser in HTML/CSS.
   - Left-aligned: Apps button, pinned apps (with a running indicator) and running windows grouped by app.
   - Hover previews of a group's windows, from the images the browser already has.
   - Icons from the app's `.desktop` file and the XDG icon theme, with a generic fallback.
-  - Right side: mute toggle (once audio exists), connection indicator, notifications, clock.
+  - Right side: connection indicator, notifications, clock. A mute toggle is added with audio.
+  - Right-click menus (New window, Pin/Unpin, window actions) are a convenience only; everything in them is also
+    reachable from the Apps menu or previews.
 - **Apps menu** (not "Start"), top to bottom:
   1. Header row: user, session name (click to rename), session menu (Disconnect, Log out).
   2. Search.
-  3. Pinned apps and all apps from the user's `.desktop` files.
-- Pinned apps are stored on the server, per user.
-- **Notifications** via `org.freedesktop.Notifications`: pop-ups at the top right below the taskbar, plus a history
-  list.
+  3. Pinned apps and all apps from the user's and the system's `.desktop` files.
+- Apps come only from installed `.desktop` files (launched from their `Exec` line in the session's environment). The
+  gateway's old `--applications` option was removed.
+- Pinned apps are stored on the server, per user, in `$XDG_CONFIG_HOME/greenfield/pinned.json`.
+- **Notifications** via `org.freedesktop.Notifications`, served by the session process on the session's D-Bus bus
+  (it starts a bus if the user has none): pop-ups at the top right below the taskbar, plus a history list (last 50,
+  kept across reconnects). Notification action buttons are not supported yet.
 
 ## Encoding policy
 
@@ -143,11 +148,19 @@ Drawn by the browser in HTML/CSS.
 
 ## Remaining work, in order
 
+### Done
+
+- Server-side compositor and window scene protocol with reattach, takeover and frame pacing.
+- GPU (dmabuf) buffer sizes fixed (untested on real GPU hardware).
+- Sign-in gateway with privilege separation, per-user sessions, per-page sign-in, session list with rename.
+- Instant resizing, left/top anchoring, windows kept on screen.
+- Back-navigation protection.
+- Desktop shell: top taskbar, Apps menu, hover previews, pinned apps, notifications, window animations.
+
 ### Core
 
-1. **Desktop shell** (in progress).
-2. **Smart encoding + encoder/decoder pool** (see [Encoding policy](#encoding-policy)).
-3. **Gaps that make it usable day to day**:
+1. **Smart encoding + encoder/decoder pool** (see [Encoding policy](#encoding-policy)).
+2. **Gaps that make it usable day to day**:
    - X11 apps: port XWayland support to the new architecture.
    - Clipboard between remote apps and the local machine; drag and drop.
    - Child dialogs move with their parent.
@@ -155,21 +168,21 @@ Drawn by the browser in HTML/CSS.
      against them in the viewer, so clicks on a window's shadow margin go to whatever is underneath. This is metadata
      only; it doesn't depend on pixels or alpha.
    - HiDPI rendering.
-4. **Two-factor sign-in via PAM prompts.**
+3. **Two-factor sign-in via PAM prompts.**
 
 ### First extra feature
 
-5. **Audio playback** (see [Audio](#audio-playback-only)); wire up the taskbar mute toggle.
+4. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle.
 
 ### Lower priority
 
-6. Browser-drawn window decorations via `xdg-decoration` (GTK apps will still draw their own).
-7. Hidden/minimized windows: the viewer tells the server to stop sending updates (and the app gets no frame callbacks /
+5. Browser-drawn window decorations via `xdg-decoration` (GTK apps will still draw their own).
+6. Hidden/minimized windows: the viewer tells the server to stop sending updates (and the app gets no frame callbacks /
    is marked suspended). On re-show, briefly show the last image scaled to the window until fresh frames arrive.
-8. Hardware video decoding in the browser.
-9. Downloadable/user-written CSS themes.
-10. WebTransport, only if the single WebSocket ever becomes a bottleneck.
-11. **Browser-drawn window shadows** (very low priority, nice-to-have). Follow the Windows 11 approach: only draw a
+7. Hardware video decoding in the browser.
+8. Downloadable/user-written CSS themes.
+9. WebTransport, only if the single WebSocket ever becomes a bottleneck.
+10. **Browser-drawn window shadows** (very low priority, nice-to-have). Follow the Windows 11 approach: only draw a
     shadow when the compositor knows the window's shape.
     - Opaque windows (the `wl_surface.set_opaque_region` covers the `xdg_surface.set_window_geometry` rectangle,
       allowing for corners): crop the app's own shadow off at the encoder (saves bandwidth), round the corners in the
@@ -183,7 +196,7 @@ Drawn by the browser in HTML/CSS.
 
 ### Last
 
-12. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
+11. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
     is manual (see `packages/gateway` docs).
 
 ### Needs verification on other hardware
@@ -191,3 +204,7 @@ Drawn by the browser in HTML/CSS.
 - Real PAM sign-in (needs root).
 - GPU (dmabuf) buffers on a machine with a GPU.
 - Firefox: whether a mouse back button over the desktop is fully blocked.
+
+### Known issues
+
+- Pinning two apps in quick succession once left only one pinned; not reproduced since.
