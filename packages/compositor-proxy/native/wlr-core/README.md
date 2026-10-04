@@ -135,6 +135,31 @@ XWayland (wave 2 B):
   `ZINK` lines in the session log are that fallback. Without a compositing manager GTK draws no client-side shadow under
   X11, so an X11 window is exactly its X11 window (geometry 0, 0, width, height). xev doesn't set WM_CLASS.
 
+### Video encoder (`native/encoding/src/gst_frame_encoder.c`)
+
+- **Two paths, picked per buffer.** x264 with shared memory buffers (the case here: no GPU) takes the CPU pipelines
+  (`appsrc ! videoconvert ! videobox ! x264enc`; the alpha stream is built by `shm_frame_buffer_to_new_alpha_sample`:
+  alpha bytes as the luma of an I420 frame, no GL). dmabuf buffers and the hardware encoders (nvh264, vaapih264) take the
+  GL pipelines (glupload, glshader, glcolorconvert, gldownload). Pipelines are created when a path is first used (the
+  CPU ones at warm-up); the dmabuf/GL path is untested here (no `/dev/dri`). Switching paths forces a key frame.
+- **The knobs** are the `X264_*` defines at the top of the file: speed preset, quantizer (CRF) and the VBV cap
+  (`bitrate` + `vbv-buf-capacity`) for the opaque and alpha streams, and the padding multiple. With `pass=qual`,
+  x264enc's `bitrate` is not a target but the VBV max rate (checked: it caps a noise stream), and `vbv-buf-capacity=0`
+  turns the cap off (unbounded bitrate). Superfast keeps CABAC and 8x8dct, so `profile=high` still holds and matches
+  the viewer's `avc1.64001f`; keep the two consistent if you change the preset to ultrafast (no CABAC, no 8x8dct).
+- **Padding is at the top left**: the image is in the bottom right corner of the coded frame (the viewer's renderer
+  crops with `encodedSize`). The CPU path does it with `videobox` (negative left/top), the GL path in the shader. The
+  videobox is configured by the appsrc pad probe before the caps of a new size reach it. Padding is black (alpha 0 in the
+  alpha stream); coded sizes are multiples of 16 for x264 (the hardware encoders keep 128, untested at 16).
+- The alpha luma is BT.601 limited range (0 is 16, 255 is 235), what the viewer's shader expects; the opaque CPU path
+  asks videoconvert for `colorimetry=bt601` for the same reason.
+- Encoded frames are matched to their results on the pipelines' threads: the result queue has a mutex, and
+  `has_split_alpha` is set before the first buffer is pushed (the CPU path is fast enough to race it).
+- Checked with a scratch C harness around `do_gst_frame_encoder_*` and `openh264dec` (no libav here): the decoded
+  frame has the image bottom right, alpha ramp and padding right, delta frames decode, and a size change mid-stream
+  starts a new SPS (openh264dec in gst drops one frame there; the browser doesn't). The e2e checks that the viewer
+  decodes foot's video frames without failures (`__viewerTest.videoFrames()`).
+
 ## Not done yet (later waves of the migration)
 
 The browser clipboard bridge (clipboard between Wayland apps already works: data device + primary selection; X11 <->

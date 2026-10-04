@@ -222,6 +222,14 @@ export class Desktop {
   /** For tests: hold every scene back this long (ms), in order, as if the server were slow. */
   debugSceneDelay = 0
 
+  private videoFramesDecoded = 0
+  private videoFramesFailed = 0
+
+  /** How many video frames decoded and how many failed to, in all. For tests. */
+  debugVideoFrames(): { decoded: number; failed: number } {
+    return { decoded: this.videoFramesDecoded, failed: this.videoFramesFailed }
+  }
+
   /** Running state animations by window. For tests. */
   debugAnimations(): Record<string, string> {
     return Object.fromEntries([...this.animations].map(([id, { kind }]) => [id, kind]))
@@ -576,12 +584,16 @@ export class Desktop {
       .decode(frame)
       .then(
         (decoded) => {
+          this.videoFramesDecoded++
           this.recordDecodeDuration(performance.now() - start)
           this.keyFrameRequested.delete(surface)
           this.renderer.upload(surface, decoded)
           this.scheduleRender()
         },
-        (error) => this.decodeFailed(surface, error),
+        (error) => {
+          this.videoFramesFailed++
+          this.decodeFailed(surface, error)
+        },
       )
   }
 

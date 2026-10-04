@@ -22,6 +22,51 @@
 #include "encoder.h"
 #include "gst_frame_encoder_drm_formats.h"
 
+/*
+ * Video here is only used for busy surfaces (everything else goes out as PNG patches), so it should be cheap to encode
+ * and low in bitrate, not high quality. The knobs to tune are the X264_* settings below.
+ *
+ * Two encode paths, chosen per buffer (see gst_frame_encoder_encode):
+ *  - CPU path (x264, shared memory buffers): no GL at all. Opaque stream: appsrc ! videoconvert ! videobox (padding) !
+ *    x264enc. Alpha stream: our own C code writes the buffer's alpha bytes as the luma of an I420 frame of the padded
+ *    size (neutral chroma), straight into x264enc. Uploading a CPU buffer to a GL texture only to read it back again
+ *    is a waste, and the GL context is not needed.
+ *  - GL path (dmabuf buffers, and the hardware encoders nvh264 / vaapih264): glupload ! glshader (padding and alpha
+ *    extraction) ! glcolorconvert ! (gldownload) ! encoder. For GPU buffers the data is already in GPU memory, so
+ *    this is the cheap way there.
+ */
+
+/* ---- x264 settings (CPU and GL paths alike) ---- */
+/* x264's own preset: speed against compression. Slower than "superfast" costs CPU for a small bitrate gain. */
+#define X264_SPEED_PRESET "superfast"
+/*
+ * Rate control is quality based: pass=qual is x264's CRF mode and `quantizer` is the CRF value (0-50, lower is better
+ * quality and more bitrate; 23 is x264's usual default). In this mode the `bitrate` property does not set a target:
+ * together with `vbv-buf-capacity` it becomes the VBV cap (vbv-maxrate = bitrate in kbit/s, vbv-bufsize =
+ * bitrate * vbv-buf-capacity / 1000), so the stream is as cheap as the quantizer allows but never above that rate.
+ * (Don't set vbv-buf-capacity=0: that switches the cap off and the bitrate becomes unbounded.) Key frames have to fit
+ * in the VBV buffer, so a very low cap or a short buffer lowers the quality of key frames.
+ */
+#define X264_OPAQUE_QUANTIZER "26"
+#define X264_OPAQUE_MAX_BITRATE_KBPS "4000"
+#define X264_ALPHA_QUANTIZER "26"
+#define X264_ALPHA_MAX_BITRATE_KBPS "400"
+#define X264_VBV_BUFFER_MS "400"
+/* Shared by the opaque and alpha streams. bframes=0 and rc-lookahead=0 are implied by zerolatency, listed for clarity. */
+#define X264_COMMON \
+        "x264enc speed-preset=" X264_SPEED_PRESET " tune=zerolatency bframes=0 rc-lookahead=0 sliced-threads=true " \
+        "byte-stream=true pass=qual vbv-buf-capacity=" X264_VBV_BUFFER_MS " "
+#define X264_OPAQUE_ENCODER X264_COMMON "quantizer=" X264_OPAQUE_QUANTIZER " bitrate=" X264_OPAQUE_MAX_BITRATE_KBPS
+#define X264_ALPHA_ENCODER X264_COMMON "quantizer=" X264_ALPHA_QUANTIZER " bitrate=" X264_ALPHA_MAX_BITRATE_KBPS
+/* What follows the encoder. The viewer's decoder is configured for High profile (decoder.ts: avc1.64001f). */
+#define X264_OUTPUT_CAPS "video/x-h264,profile=high,stream-format=byte-stream,alignment=au"
+
+/* The viewer's shader decodes BT.601 limited range, the same as the GL path produces. */
+#define CPU_PATH_YUV_CAPS "video/x-raw,format=I420,colorimetry=bt601"
+
+/* Coded sizes are padded to a multiple of this (and at least this big); the viewer crops to the real size. */
+#define X264_CODED_SIZE_MULTIPLE 16
+
 #define FPS 60
 #define GF_BUFFER_CONTENT_SERIAL_META "BUFFER_CONTENT_SERIAL"
 const GstMetaInfo *gfBufferContentSerialMetaInfo = NULL;
@@ -95,7 +140,16 @@ struct frame_encoder_description {
     enum frame_encoding_type frame_encoding_type;
     const char *opaque_pipeline_definition;
     const char *alpha_pipeline_definition;
+    // CPU path for shared memory buffers (see the top of the file), NULL if the encoder only has the GL path
+    const char *cpu_opaque_pipeline_definition;
+    const char *cpu_alpha_pipeline_definition;
     bool split_alpha;
+};
+
+enum encode_path {
+    PATH_GL = 0,
+    PATH_CPU = 1,
+    PATH_COUNT
 };
 
 struct frame_encoder {
@@ -104,6 +158,7 @@ struct frame_encoder {
 
     frame_callback_func frame_callback;
     GQueue *frame_encoding_results;
+    GMutex results_mutex; // the queue is used by the caller and the pipelines' threads
     void *user_data;
     struct westfield_egl *westfield_egl;
 
@@ -112,6 +167,8 @@ struct frame_encoder {
 
 struct gst_frame_encoder_pipeline {
     struct gst_frame_encoder *gst_frame_encoder;
+    enum encode_path path;
+    bool is_alpha;
     GstElement *pipeline;
     gulong app_src_pad_probe;
     bool playing;
@@ -127,8 +184,9 @@ struct gst_frame_encoder_pipeline {
 struct gst_frame_encoder {
     struct frame_encoder *frame_encoder;
     const struct frame_encoder_description *description;
-    struct gst_frame_encoder_pipeline *alpha_pipeline;
-    struct gst_frame_encoder_pipeline *opaque_pipeline;
+    // created when first needed: [path][is_alpha]
+    struct gst_frame_encoder_pipeline *pipelines[PATH_COUNT][2];
+    enum encode_path path_in_use; // the path of the last buffer, see gst_frame_encoder_switch_path
 
     GstGLDisplay *wrapped_gst_gl_display;
     GstGLContext *wrapped_gst_gl_context;
@@ -339,11 +397,13 @@ gst_new_encoded_frame_sample(GstAppSink *appsink, gpointer user_data) {
     gst_structure_get_uint(s, "buffer_content_serial", &buffer_content_serial);
 
     // make sure we have the right encoding result
+    g_mutex_lock(&callback_data->encoder->results_mutex);
     link = g_queue_find_custom(callback_data->encoder->frame_encoding_results, &buffer_content_serial,
                                has_buffer_content_serial);
     if (link) {
         encoding_result = link->data;
     }
+    g_mutex_unlock(&callback_data->encoder->results_mutex);
 
     if (encoding_result == NULL) {
         g_error("BUG? No encoding result container available for encoded sample with content serial: %d.",
@@ -365,7 +425,9 @@ gst_new_encoded_frame_sample(GstAppSink *appsink, gpointer user_data) {
 
         if (is_complete) {
             encoded_frame = frame_encoding_result_to_encoded_frame(encoding_result, true);
+            g_mutex_lock(&callback_data->encoder->results_mutex);
             g_queue_delete_link(callback_data->encoder->frame_encoding_results, link);
+            g_mutex_unlock(&callback_data->encoder->results_mutex);
             frame_encoding_result_free(encoding_result);
             callback_data->encoder->frame_callback(callback_data->encoder->user_data, encoded_frame);
         }
@@ -374,7 +436,9 @@ gst_new_encoded_frame_sample(GstAppSink *appsink, gpointer user_data) {
         gst_buffer_map(encoding_result->sample.buffer, &encoding_result->sample.info, GST_MAP_READ);
 
         encoded_frame = frame_encoding_result_to_encoded_frame(encoding_result, false);
+        g_mutex_lock(&callback_data->encoder->results_mutex);
         g_queue_delete_link(callback_data->encoder->frame_encoding_results, link);
+        g_mutex_unlock(&callback_data->encoder->results_mutex);
         frame_encoding_result_free(encoding_result);
         callback_data->encoder->frame_callback(callback_data->encoder->user_data, encoded_frame);
     }
@@ -434,12 +498,13 @@ gst_frame_encoder_pipeline_coded_size(const struct frame_encoder_description *fr
     }
     mod = *coded_height % frame_encoder_description->height_multiple;
     if (mod) {
-        *coded_height = *coded_height + (frame_encoder_description->width_multiple - mod);
+        *coded_height = *coded_height + (frame_encoder_description->height_multiple - mod);
     }
 }
 
+// GL path: the shader scales the image into the padded frame, the capsfilter after it sets the coded size
 static inline void
-gst_frame_encoder_pipeline_config(struct gst_frame_encoder_pipeline *gst_frame_encoder_pipeline) {
+gst_frame_encoder_pipeline_config_gl(struct gst_frame_encoder_pipeline *gst_frame_encoder_pipeline) {
     GstStructure *uniforms;
     GstCaps *shader_src_caps;
     GstCapsFeatures *shader_src_caps_features;
@@ -479,6 +544,30 @@ gst_frame_encoder_pipeline_config(struct gst_frame_encoder_pipeline *gst_frame_e
     gst_caps_unref(shader_src_caps);
 }
 
+// CPU path, opaque stream: videobox adds the padding (a negative left / top is a border) at the top left, so that the
+// image is in the bottom right corner of the coded frame, like the GL path does (see the viewer's renderer.ts).
+static inline void
+gst_frame_encoder_pipeline_config_cpu(struct gst_frame_encoder_pipeline *gst_frame_encoder_pipeline) {
+    GstElement *videobox = gst_bin_get_by_name(GST_BIN(gst_frame_encoder_pipeline->pipeline), "pad");
+    g_object_set(videobox,
+                 "left", -(gint) (gst_frame_encoder_pipeline->coded_width - gst_frame_encoder_pipeline->width),
+                 "top", -(gint) (gst_frame_encoder_pipeline->coded_height - gst_frame_encoder_pipeline->height),
+                 "right", 0,
+                 "bottom", 0,
+                 NULL);
+    gst_object_unref(videobox);
+}
+
+static inline void
+gst_frame_encoder_pipeline_config(struct gst_frame_encoder_pipeline *gst_frame_encoder_pipeline) {
+    if (gst_frame_encoder_pipeline->path == PATH_GL) {
+        gst_frame_encoder_pipeline_config_gl(gst_frame_encoder_pipeline);
+    } else if (!gst_frame_encoder_pipeline->is_alpha) {
+        gst_frame_encoder_pipeline_config_cpu(gst_frame_encoder_pipeline);
+    }
+    // the CPU alpha stream needs nothing: its frames are built in the coded size
+}
+
 static inline void
 gst_frame_encoder_pipeline_destroy(struct gst_frame_encoder_pipeline *gst_frame_encoder_pipeline) {
     GstAppSrc *app_src;
@@ -504,36 +593,48 @@ gst_frame_encoder_pipeline_destroy(struct gst_frame_encoder_pipeline *gst_frame_
     gst_frame_encoder_pipeline->pipeline = NULL;
 }
 
+static inline gboolean
+gst_frame_encoder_destroy_if_eos(struct gst_frame_encoder *gst_frame_encoder);
+
 static inline void
 gst_frame_encoder_eos(struct gst_frame_encoder *gst_frame_encoder) {
-    GstAppSrc *app_src;
-
-    app_src = GST_APP_SRC(gst_bin_get_by_name(GST_BIN(gst_frame_encoder->opaque_pipeline->pipeline), "src"));
-    gst_app_src_end_of_stream(app_src);
-    gst_object_unref(app_src);
-
-    if (gst_frame_encoder->alpha_pipeline) {
-        app_src = GST_APP_SRC(gst_bin_get_by_name(GST_BIN(gst_frame_encoder->alpha_pipeline->pipeline), "src"));
-        gst_app_src_end_of_stream(app_src);
-        gst_object_unref(app_src);
+    for (int path = 0; path < PATH_COUNT; path++) {
+        for (int is_alpha = 0; is_alpha < 2; is_alpha++) {
+            struct gst_frame_encoder_pipeline *pipeline = gst_frame_encoder->pipelines[path][is_alpha];
+            if (pipeline == NULL) {
+                continue;
+            }
+            if (!pipeline->playing) {
+                // never got a frame, so no EOS message would ever come: it can go right away
+                pipeline->eos = true;
+                continue;
+            }
+            GstAppSrc *app_src = GST_APP_SRC(gst_bin_get_by_name(GST_BIN(pipeline->pipeline), "src"));
+            gst_app_src_end_of_stream(app_src);
+            gst_object_unref(app_src);
+        }
     }
+    // frees the encoder right here if no pipeline was playing
+    gst_frame_encoder_destroy_if_eos(gst_frame_encoder);
 }
 
 static inline gboolean
 gst_frame_encoder_destroy_if_eos(struct gst_frame_encoder *gst_frame_encoder) {
-    if (gst_frame_encoder->opaque_pipeline && gst_frame_encoder->opaque_pipeline->eos) {
-        gst_frame_encoder_pipeline_destroy(gst_frame_encoder->opaque_pipeline);
-        g_free(gst_frame_encoder->opaque_pipeline);
-        gst_frame_encoder->opaque_pipeline = NULL;
+    bool pipelines_left = false;
+    for (int path = 0; path < PATH_COUNT; path++) {
+        for (int is_alpha = 0; is_alpha < 2; is_alpha++) {
+            struct gst_frame_encoder_pipeline *pipeline = gst_frame_encoder->pipelines[path][is_alpha];
+            if (pipeline && pipeline->eos) {
+                gst_frame_encoder_pipeline_destroy(pipeline);
+                g_free(pipeline);
+                gst_frame_encoder->pipelines[path][is_alpha] = NULL;
+            } else if (pipeline) {
+                pipelines_left = true;
+            }
+        }
     }
 
-    if (gst_frame_encoder->alpha_pipeline && gst_frame_encoder->alpha_pipeline->eos) {
-        gst_frame_encoder_pipeline_destroy(gst_frame_encoder->alpha_pipeline);
-        g_free(gst_frame_encoder->alpha_pipeline);
-        gst_frame_encoder->alpha_pipeline = NULL;
-    }
-
-    if (gst_frame_encoder->opaque_pipeline == NULL && gst_frame_encoder->alpha_pipeline == NULL) {
+    if (!pipelines_left) {
         // TODO (re)use gl contexts & display for all pipelines
         if (gst_frame_encoder->shared_gst_gl_context) {
             gst_gl_display_remove_context(gst_frame_encoder->wrapped_gst_gl_display,
@@ -655,34 +756,44 @@ gst_frame_encoder_pipeline_app_src_have_data(GstPad *pad, GstPadProbeInfo *info,
 }
 
 static inline struct gst_frame_encoder_pipeline *
-gst_frame_encoder_pipeline_create(struct gst_frame_encoder *gst_encoder, const bool is_alpha) {
+gst_frame_encoder_pipeline_create(struct gst_frame_encoder *gst_encoder, const enum encode_path path,
+                                  const bool is_alpha) {
     struct gst_frame_encoder_pipeline *gst_frame_encoder_pipeline = g_new0(struct gst_frame_encoder_pipeline, 1);
     struct sample_callback_data *callback_data;
     GstAppSink *app_sink;
     GstAppSrc *app_src;
     GstPad *pad;
     GError *parse_error = NULL;
-    gst_frame_encoder_pipeline->pipeline = gst_parse_launch_full(
-            is_alpha ? gst_encoder->description->alpha_pipeline_definition
-                     : gst_encoder->description->opaque_pipeline_definition, NULL,
-            GST_PARSE_FLAG_FATAL_ERRORS,
-            &parse_error);
+    const struct frame_encoder_description *description = gst_encoder->description;
+    const char *definition;
+    if (path == PATH_CPU) {
+        definition = is_alpha ? description->cpu_alpha_pipeline_definition : description->cpu_opaque_pipeline_definition;
+    } else {
+        definition = is_alpha ? description->alpha_pipeline_definition : description->opaque_pipeline_definition;
+    }
+    gst_frame_encoder_pipeline->gst_frame_encoder = gst_encoder;
+    gst_frame_encoder_pipeline->path = path;
+    gst_frame_encoder_pipeline->is_alpha = is_alpha;
+    gst_frame_encoder_pipeline->pipeline = gst_parse_launch_full(definition, NULL, GST_PARSE_FLAG_FATAL_ERRORS,
+                                                                 &parse_error);
     if (gst_frame_encoder_pipeline->pipeline == NULL) {
         g_free(gst_frame_encoder_pipeline);
         g_error("BUG? Failed to create encoding pipeline from it's definition: %s", parse_error->message);
     }
 
-    GstElement *glshader = gst_bin_get_by_name(GST_BIN(gst_frame_encoder_pipeline->pipeline), "shader");
-    if (glshader == NULL) {
-        g_error("Can't get element with name 'shader' from encoding pipeline. Missing gstreamer plugin element?");
+    if (path == PATH_GL) {
+        GstElement *glshader = gst_bin_get_by_name(GST_BIN(gst_frame_encoder_pipeline->pipeline), "shader");
+        if (glshader == NULL) {
+            g_error("Can't get element with name 'shader' from encoding pipeline. Missing gstreamer plugin element?");
+        }
+        if (is_alpha) {
+            g_object_set(glshader, "fragment", alpha_fragment_shader, NULL);
+        } else {
+            g_object_set(glshader, "fragment", opaque_fragment_shader, NULL);
+        }
+        g_object_set(glshader, "vertex", vertex_shader, NULL);
+        gst_object_unref(glshader);
     }
-    if (is_alpha) {
-        g_object_set(glshader, "fragment", alpha_fragment_shader, NULL);
-    } else {
-        g_object_set(glshader, "fragment", opaque_fragment_shader, NULL);
-    }
-    g_object_set(glshader, "vertex", vertex_shader, NULL);
-    gst_object_unref(glshader);
 
     app_sink = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(gst_frame_encoder_pipeline->pipeline), "sink"));
     gst_app_sink_set_wait_on_eos(app_sink, true);
@@ -706,6 +817,16 @@ gst_frame_encoder_pipeline_create(struct gst_frame_encoder *gst_encoder, const b
     return gst_frame_encoder_pipeline;
 }
 
+// The pipeline for a path and stream, created on first use.
+static inline struct gst_frame_encoder_pipeline *
+gst_frame_encoder_get_pipeline(struct gst_frame_encoder *gst_encoder, const enum encode_path path,
+                               const bool is_alpha) {
+    if (gst_encoder->pipelines[path][is_alpha] == NULL) {
+        gst_encoder->pipelines[path][is_alpha] = gst_frame_encoder_pipeline_create(gst_encoder, path, is_alpha);
+    }
+    return gst_encoder->pipelines[path][is_alpha];
+}
+
 static inline void
 gst_frame_encoder_create(struct frame_encoder *encoder, const struct frame_encoder_description *description) {
     struct gst_frame_encoder *gst_frame_encoder = g_new0(struct gst_frame_encoder, 1);
@@ -716,26 +837,25 @@ gst_frame_encoder_create(struct frame_encoder *encoder, const struct frame_encod
         gst_frame_encoder_ensure_gst_gl_setup(gst_frame_encoder);
     }
 
-    gst_frame_encoder->opaque_pipeline = (struct gst_frame_encoder_pipeline *) gst_frame_encoder_pipeline_create(
-            gst_frame_encoder,
-            false);
-    if (gst_frame_encoder->opaque_pipeline == NULL) {
-        g_error("BUG? Failed to create opaque pipeline.");
-    }
-    gst_frame_encoder->opaque_pipeline->gst_frame_encoder = gst_frame_encoder;
-
-    if (gst_frame_encoder->description->split_alpha) {
-        gst_frame_encoder->alpha_pipeline = (struct gst_frame_encoder_pipeline *) gst_frame_encoder_pipeline_create(
-                gst_frame_encoder, true);
-        if (gst_frame_encoder->alpha_pipeline == NULL) {
-            g_error("BUG? Failed to create alpha pipeline.");
-        }
-        gst_frame_encoder->alpha_pipeline->gst_frame_encoder = gst_frame_encoder;
+    // Warm up: the pipelines for the path that shared memory buffers take (what the apps we serve mostly send), so the
+    // first frame doesn't pay for creating them. The other path's pipelines are created when a buffer needs them.
+    const enum encode_path warm_path = description->cpu_opaque_pipeline_definition ? PATH_CPU : PATH_GL;
+    gst_frame_encoder_get_pipeline(gst_frame_encoder, warm_path, false);
+    if (description->split_alpha) {
+        gst_frame_encoder_get_pipeline(gst_frame_encoder, warm_path, true);
     }
 
+    gst_frame_encoder->path_in_use = warm_path;
     encoder->impl = gst_frame_encoder;
 }
 
+static inline void
+gst_frame_encoder_force_key_unit(struct gst_frame_encoder_pipeline *pipeline) {
+    gst_element_send_event(pipeline->pipeline, gst_event_new_custom(GST_EVENT_CUSTOM_DOWNSTREAM,
+                                                                    gst_structure_new("GstForceKeyUnit",
+                                                                                      "all-headers", G_TYPE_BOOLEAN,
+                                                                                      TRUE, NULL)));
+}
 
 static inline void
 gst_frame_encoder_request_key_unit(struct gst_frame_encoder *gst_encoder) {
@@ -743,19 +863,35 @@ gst_frame_encoder_request_key_unit(struct gst_frame_encoder *gst_encoder) {
         // no pipeline yet, the next one starts with a key frame anyway
         return;
     }
-    gst_element_send_event(gst_encoder->opaque_pipeline->pipeline, gst_event_new_custom(GST_EVENT_CUSTOM_DOWNSTREAM,
-                                                                                        gst_structure_new(
-                                                                                                "GstForceKeyUnit",
-                                                                                                "all-headers",
-                                                                                                G_TYPE_BOOLEAN, TRUE,
-                                                                                                NULL)));
-    if (gst_encoder->alpha_pipeline) {
-        gst_element_send_event(gst_encoder->alpha_pipeline->pipeline, gst_event_new_custom(GST_EVENT_CUSTOM_DOWNSTREAM,
-                                                                                           gst_structure_new(
-                                                                                                   "GstForceKeyUnit",
-                                                                                                   "all-headers",
-                                                                                                   G_TYPE_BOOLEAN, TRUE,
-                                                                                                   NULL)));
+    for (int path = 0; path < PATH_COUNT; path++) {
+        for (int is_alpha = 0; is_alpha < 2; is_alpha++) {
+            if (gst_encoder->pipelines[path][is_alpha]) {
+                gst_frame_encoder_force_key_unit(gst_encoder->pipelines[path][is_alpha]);
+            }
+        }
+    }
+}
+
+// Picks the path for a buffer: shared memory buffers go through the CPU pipelines where the encoder has them.
+static inline enum encode_path
+gst_frame_encoder_path_for_buffer(const struct gst_frame_encoder *gst_encoder, const struct frame_buffer *frame_buffer) {
+    if (frame_buffer->type == SHM && gst_encoder->description->cpu_opaque_pipeline_definition) {
+        return PATH_CPU;
+    }
+    return PATH_GL;
+}
+
+// The viewer decodes one stream per surface, so when the buffers switch to the other path (the new pipelines start with
+// a key frame, but ones used before continue from where they were) the stream has to start over with a key frame.
+static inline void
+gst_frame_encoder_switch_path(struct gst_frame_encoder *gst_encoder, const enum encode_path path) {
+    if (gst_encoder->path_in_use != path) {
+        gst_encoder->path_in_use = path;
+        for (int is_alpha = 0; is_alpha < 2; is_alpha++) {
+            if (gst_encoder->pipelines[path][is_alpha]) {
+                gst_frame_encoder_force_key_unit(gst_encoder->pipelines[path][is_alpha]);
+            }
+        }
     }
 }
 
@@ -826,12 +962,69 @@ shmbuf_support_format_from_wl_shm_format(const enum wl_shm_format buffer_format)
     return NULL;
 }
 
+// CPU path, alpha stream: an I420 frame of the coded size whose luma is the buffer's alpha (BT.601 limited range, 0 is
+// 16 and 255 is 235, which is what the viewer expects) and whose chroma is neutral. Like the GL path, the image is in
+// the bottom right corner; the padding is transparent. The buffer is ARGB8888 or XRGB8888: little endian, so the alpha
+// is the fourth byte of a pixel.
+static GstSample *
+shm_frame_buffer_to_new_alpha_sample(const struct frame_buffer *frame_buffer, const uint32_t coded_width,
+                                     const uint32_t coded_height) {
+    static uint8_t luma_of_alpha[256];
+    static bool luma_of_alpha_ready = false;
+    if (!luma_of_alpha_ready) {
+        for (int a = 0; a < 256; a++) {
+            luma_of_alpha[a] = 16 + (a * 219 + 127) / 255;
+        }
+        luma_of_alpha_ready = true;
+    }
+
+    const gsize luma_size = (gsize) coded_width * coded_height;
+    const gsize chroma_size = (gsize) (coded_width / 2) * (coded_height / 2);
+    GstBuffer *buffer = gst_buffer_new_allocate(NULL, luma_size + 2 * chroma_size, NULL);
+    GstMapInfo map;
+    gst_buffer_map(buffer, &map, GST_MAP_WRITE);
+
+    memset(map.data, 16, luma_size);
+    memset(map.data + luma_size, 128, 2 * chroma_size);
+
+    const uint32_t x_offset = coded_width - frame_buffer->width;
+    const uint32_t y_offset = coded_height - frame_buffer->height;
+    for (uint32_t y = 0; y < frame_buffer->height; y++) {
+        const uint8_t *src = (const uint8_t *) frame_buffer->impl.shm.buffer_data +
+                             (gsize) y * frame_buffer->impl.shm.buffer_stride + 3;
+        uint8_t *dst = map.data + (gsize) (y + y_offset) * coded_width + x_offset;
+        for (uint32_t x = 0; x < frame_buffer->width; x++) {
+            dst[x] = luma_of_alpha[src[(gsize) x * 4]];
+        }
+    }
+    gst_buffer_unmap(buffer, &map);
+
+    const gsize offset[] = {0, luma_size, luma_size + chroma_size, 0};
+    const gint stride[] = {(gint) coded_width, (gint) (coded_width / 2), (gint) (coded_width / 2), 0};
+    gst_buffer_add_video_meta_full(buffer, GST_VIDEO_FRAME_FLAG_NONE, GST_VIDEO_FORMAT_I420, coded_width, coded_height,
+                                   3, offset, stride);
+
+    GstCaps *caps = gst_caps_new_simple("video/x-raw",
+                                        "framerate", GST_TYPE_FRACTION, FPS, 1,
+                                        "format", G_TYPE_STRING, "I420",
+                                        "width", G_TYPE_INT, coded_width,
+                                        "height", G_TYPE_INT, coded_height,
+                                        "colorimetry", G_TYPE_STRING, "bt601",
+                                        NULL);
+    GstSample *sample = gst_sample_new(buffer, caps, NULL, NULL);
+    gst_caps_unref(caps);
+    gst_buffer_unref(buffer);
+    return sample;
+}
+
 static inline void
 gst_frame_encoder_encode_shm(struct gst_frame_encoder *gst_frame_encoder, const struct frame_buffer *frame_buffer,
                              struct frame_encoding_result *frame_encoding_result) {
     GstCaps *sample_caps;
     GstSample *opaque_sample, *alpha_sample;
     uint32_t coded_width, coded_height;
+    const enum encode_path path = gst_frame_encoder_path_for_buffer(gst_frame_encoder, frame_buffer);
+    gst_frame_encoder_switch_path(gst_frame_encoder, path);
 
     const struct shmbuf_support_format *shmbuf_support_format = shmbuf_support_format_from_wl_shm_format(
             frame_buffer->impl.shm.buffer_format);
@@ -853,24 +1046,29 @@ gst_frame_encoder_encode_shm(struct gst_frame_encoder *gst_frame_encoder, const 
     frame_encoding_result->props.height = frame_buffer->height;
     frame_encoding_result->props.coded_width = coded_width;
     frame_encoding_result->props.coded_height = coded_height;
+    // decided before anything is pushed: the encoded frames come back on another thread
+    const bool has_alpha = shmbuf_support_format->has_alpha && gst_frame_encoder->description->split_alpha;
+    frame_encoding_result->has_split_alpha = has_alpha;
+    g_mutex_lock(&gst_frame_encoder->frame_encoder->results_mutex);
     g_queue_push_tail(gst_frame_encoder->frame_encoder->frame_encoding_results, frame_encoding_result);
+    g_mutex_unlock(&gst_frame_encoder->frame_encoder->results_mutex);
     opaque_sample = shm_frame_buffer_to_new_gst_frame_sample(frame_buffer, shmbuf_support_format, sample_caps);
 
-    gst_frame_encoder_pipeline_encode(gst_frame_encoder->opaque_pipeline, opaque_sample,
+    gst_frame_encoder_pipeline_encode(gst_frame_encoder_get_pipeline(gst_frame_encoder, path, false), opaque_sample,
                                       frame_encoding_result->props.buffer_content_serial);
     gst_sample_unref(opaque_sample);
 
-    if (shmbuf_support_format->has_alpha && gst_frame_encoder->description->split_alpha) {
-        frame_encoding_result->has_split_alpha = true;
+    if (has_alpha) {
+        if (path == PATH_CPU) {
+            alpha_sample = shm_frame_buffer_to_new_alpha_sample(frame_buffer, coded_width, coded_height);
+        } else {
+            alpha_sample = shm_frame_buffer_to_new_gst_frame_sample(frame_buffer, shmbuf_support_format,
+                                                                    sample_caps);
+        }
 
-        alpha_sample = shm_frame_buffer_to_new_gst_frame_sample(frame_buffer, shmbuf_support_format,
-                                                                sample_caps);
-
-        gst_frame_encoder_pipeline_encode(gst_frame_encoder->alpha_pipeline, alpha_sample,
+        gst_frame_encoder_pipeline_encode(gst_frame_encoder_get_pipeline(gst_frame_encoder, path, true), alpha_sample,
                                           frame_encoding_result->props.buffer_content_serial);
         gst_sample_unref(alpha_sample);
-    } else {
-        frame_encoding_result->has_split_alpha = false;
     }
 
     gst_caps_unref(sample_caps);
@@ -983,25 +1181,30 @@ gst_frame_encoder_encode_dmabuf(struct gst_frame_encoder *gst_frame_encoder,
     frame_encoding_result->props.height = frame_buffer->height;
     frame_encoding_result->props.coded_width = coded_width;
     frame_encoding_result->props.coded_height = coded_height;
+    // decided before anything is pushed: the encoded frames come back on another thread
+    frame_encoding_result->has_split_alpha = dmabuf_has_alpha && gst_frame_encoder->description->split_alpha;
+    g_mutex_lock(&gst_frame_encoder->frame_encoder->results_mutex);
     g_queue_push_tail(gst_frame_encoder->frame_encoder->frame_encoding_results, frame_encoding_result);
+    g_mutex_unlock(&gst_frame_encoder->frame_encoder->results_mutex);
 
-    opaque_sample = gst_frame_encoder_pipeline_dmabuf_attributes_to_new_gst_sample(gst_frame_encoder->opaque_pipeline,
-                                                                                   frame_buffer,
+    // dmabuf buffers always take the GL path
+    gst_frame_encoder_switch_path(gst_frame_encoder, PATH_GL);
+    struct gst_frame_encoder_pipeline *opaque_pipeline = gst_frame_encoder_get_pipeline(gst_frame_encoder, PATH_GL,
+                                                                                        false);
+    opaque_sample = gst_frame_encoder_pipeline_dmabuf_attributes_to_new_gst_sample(opaque_pipeline, frame_buffer,
                                                                                    sample_caps);
-    gst_frame_encoder_pipeline_encode(gst_frame_encoder->opaque_pipeline, opaque_sample,
+    gst_frame_encoder_pipeline_encode(opaque_pipeline, opaque_sample,
                                       frame_encoding_result->props.buffer_content_serial);
     gst_sample_unref(opaque_sample);
 
-    if (dmabuf_has_alpha && gst_frame_encoder->description->split_alpha) {
-        frame_encoding_result->has_split_alpha = true;
-        alpha_sample = gst_frame_encoder_pipeline_dmabuf_attributes_to_new_gst_sample(gst_frame_encoder->alpha_pipeline,
-                                                                                      frame_buffer,
+    if (frame_encoding_result->has_split_alpha) {
+        struct gst_frame_encoder_pipeline *alpha_pipeline = gst_frame_encoder_get_pipeline(gst_frame_encoder, PATH_GL,
+                                                                                           true);
+        alpha_sample = gst_frame_encoder_pipeline_dmabuf_attributes_to_new_gst_sample(alpha_pipeline, frame_buffer,
                                                                                       sample_caps);
-        gst_frame_encoder_pipeline_encode(gst_frame_encoder->alpha_pipeline, alpha_sample,
+        gst_frame_encoder_pipeline_encode(alpha_pipeline, alpha_sample,
                                           frame_encoding_result->props.buffer_content_serial);
         gst_sample_unref(alpha_sample);
-    } else {
-        frame_encoding_result->has_split_alpha = false;
     }
 
     gst_caps_unref(sample_caps);
@@ -1060,8 +1263,8 @@ static const struct frame_encoder_description frame_encoder_descriptions[] = {
                                               "gldownload ! "
                                               // The ueue is silent
                                               "queue silent=true ! "
-                                              "x264enc me=2 analyse=51 dct8x8=true cabac=true bframes=0 b-adapt=false rc-lookahead=0 sliced-threads=true byte-stream=true tune=zerolatency psy-tune=2 bitrate=12000 vbv-buf-capacity=160 ! "
-                                              "video/x-h264,profile=high,stream-format=byte-stream,alignment=au ! "
+                                              X264_OPAQUE_ENCODER " ! "
+                                              X264_OUTPUT_CAPS " ! "
                                               "appsink name=sink ",
                 .alpha_pipeline_definition = "appsrc name=src format=3 stream-type=0 ! "
                                              "glupload ! "
@@ -1071,14 +1274,26 @@ static const struct frame_encoder_description frame_encoder_descriptions[] = {
                                              "glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! "
                                              "gldownload ! "
                                              "queue silent=true ! "
-                                             "x264enc me=2 analyse=51 dct8x8=true cabac=true bframes=0 b-adapt=false rc-lookahead=0 sliced-threads=true byte-stream=true tune=zerolatency psy-tune=2 bitrate=1200 vbv-buf-capacity=160 ! "
-                                             "video/x-h264,profile=high,stream-format=byte-stream,alignment=au ! "
+                                             X264_ALPHA_ENCODER " ! "
+                                             X264_OUTPUT_CAPS " ! "
                                              "appsink name=sink ",
+                .cpu_opaque_pipeline_definition = "appsrc name=src format=3 stream-type=0 ! "
+                                                  "videoconvert ! " CPU_PATH_YUV_CAPS " ! "
+                                                  "videobox name=pad ! "
+                                                  "queue silent=true ! "
+                                                  X264_OPAQUE_ENCODER " ! "
+                                                  X264_OUTPUT_CAPS " ! "
+                                                  "appsink name=sink ",
+                .cpu_alpha_pipeline_definition = "appsrc name=src format=3 stream-type=0 ! "
+                                                 "queue silent=true ! "
+                                                 X264_ALPHA_ENCODER " ! "
+                                                 X264_OUTPUT_CAPS " ! "
+                                                 "appsink name=sink ",
                 .split_alpha = true,
-                .width_multiple = 128,
-                .height_multiple = 128,
-                .min_width = 128,
-                .min_height = 128,
+                .width_multiple = X264_CODED_SIZE_MULTIPLE,
+                .height_multiple = X264_CODED_SIZE_MULTIPLE,
+                .min_width = X264_CODED_SIZE_MULTIPLE,
+                .min_height = X264_CODED_SIZE_MULTIPLE,
         },
         {
                 .name = "nvh264",
@@ -1163,6 +1378,7 @@ do_gst_frame_encoder_create(char preferred_frame_encoder[16], frame_callback_fun
     frame_encoder->frame_callback = frame_ready_callback;
     frame_encoder->user_data = user_data;
     frame_encoder->frame_encoding_results = g_queue_new();
+    g_mutex_init(&frame_encoder->results_mutex);
     frame_encoder->westfield_egl = westfield_egl;
 
     // Warm up: create the preferred (video) encoder's pipelines right away, so the first frame doesn't pay for it.

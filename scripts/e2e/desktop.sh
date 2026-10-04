@@ -164,6 +164,10 @@ wait_for "() => !$(visible apps-menu)" "the Apps menu to close"
 wait_for "() => { const w = window.__viewerTest.windows(); return w.length === 1 && w[0].placed && w[0].hasContent }" "foot window" 40
 wait_for "() => document.querySelector('#taskbar-items button[data-group=\"$TEST_APP\"]').matches('.running.active')" \
   "foot's window in its pinned taskbar button" 10
+# A new surface starts in video mode, so the session's x264 encoder (CPU path for shared memory buffers, opaque and alpha
+# streams) produced frames, and the browser decoded them all.
+wait_for "() => window.__viewerTest.videoFrames().decoded > 0" "decoded video frames of foot's window" 10
+[ "$(pw_eval "() => window.__viewerTest.videoFrames().failed")" = 0 ] || fail "video frames failed to decode"
 # Our foot is the one started by this test's gateway (other foots, e.g. in the user's own sessions, aren't ours).
 descends_from() {
   local pid="$1" ancestor="$2"
