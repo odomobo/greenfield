@@ -43,7 +43,7 @@ process.once('message', (message: SessionStart) => {
 async function start({ socketPath, encoder }: SessionStart) {
   setupSessionEnvironment()
 
-  const { viewerHost, apps } = startWlrootsCompositor({ h264Encoder: encoder })
+  const { viewerHost, apps } = startWlrootsCompositor({ h264Encoder: encoder === 'none' ? undefined : encoder })
   // Apps get WAYLAND_DISPLAY when launched; it's not set in this process: GStreamer's GL would connect to our own
   // display as a client.
   viewerHost.shell = new ShellService(apps)
