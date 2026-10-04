@@ -520,6 +520,44 @@ single large item never stalls the link. Initial window before any estimate: 64 
   11. 2-item floor: a single item larger than the in-flight limit is still sent.
 - `scripts/test-gateway.sh` must still pass (the e2e link is local, so the controller should simply stay out of the
   way: check that no e2e step got slower).
+- As implemented (phase 1 of 2b, `packages/compositor-proxy/src/viewer/congestion.ts`, test in `test/congestion.test.ts`
+  with the harness `test/sim-link.ts`): every scenario runs on three seeds (item sizes 4–30 KB, jitter, bursts), about
+  0.5 s for all. Where the assertions differ from the list above:
+  - Bandwidth probes (ProbeBW_UP and the ProbeBW_DOWN that drains it) have their own bound. A probe sends 25% faster
+    than the link on purpose and only sees its queue a round trip later, so its peak is about threshold-to-end-it plus
+    what it adds in that round trip. At 40 ms RTT probes peak at 30–45 ms, asserted ≤ 50 ms (scenarios 1, 3 and 6:
+    "never over 30 ms" in 6 and "under 25 ms within 1 s" in 3 hold outside of probes, at 0–18 ms). At 300 ms RTT they
+    peak at 23–46 ms, under the 0.3 × RTT (90 ms) of scenario 2.
+  - 8: with up to ~26 ms of noise (16 ms batching, ±5 ms jitter) on top of a real queue, about three times as many
+    rounds go over the threshold as on a clean link (~1 a second). They only resize the short-term bounds to the
+    measured delivery rate: asserted harmless instead (throughput ≥ 80%, measured 93–97%; bandwidth estimate ≥ 80% of
+    the link; CRUISE queue ≤ 25 ms, measured ≤ 23 ms with under 1% of items over 20 ms).
+  - Measured (12 seeds): 1: 96–98% of the link, CRUISE ≤ 2 ms; 2: 88–92%; 4: ≥ 95% within 6 s; 5: 88–98% 12 s after
+    the RTT change; 6: 5 ms outside probes, `min_rtt` stays within 5 ms of base + one item's transmission time; 7: no
+    ProbeRTT and no drop of `max_bw` over 30 s of bursts; 9: backlog never over 1 MB + one item + one-way volume,
+    throughput = the viewer's apply rate.
+- Deviations from the draft (all listed at the top of `congestion.ts`, each found by a failing scenario):
+  - The delay signal: a sample is high when its queue (RTT less the item's own transmission time, size / max_bw,
+    the lowest of the last 20 ms of samples to see through ack bursts) exceeds 20 ms; a round is too high when more
+    than half of its samples (at least 4) are high, or 4 in a row are (a 300 ms round's early samples predate the
+    queue).
+  - Reactions size the bounds from the measured delivery rate, as the draft's loss reactions never shrink a standing
+    queue without loss: `inflight_shortterm` = bw_latest × (min_rtt + 10 ms), `inflight_longterm` on a too-high probe
+    = bw_latest × (min_rtt + 20 ms), both plus `extra_acked` (ack aggregation, as the draft's cwnd has it).
+  - ProbeBW_UP ends once 4 samples in a row show a queue over 10 ms (waiting for the 20 ms threshold made probes peak
+    at 45–55 ms).
+  - A too-high round outside of probing with a delivery rate under 80% of `max_bw` means the capacity dropped: it also
+    lowers `inflight_longterm`, restarts the `max_bw` filter from the delivery rate and postpones the next probe
+    (otherwise the stale `max_bw` refilled the queue to 200 ms every time REFILL or ProbeRTT reset the short-term
+    bounds).
+  - `min_rtt` rising by more than 25% (only possible after 10 s without a lower sample) restarts the model in Startup:
+    until then the delay signal reads the longer path as a queue and cuts the model down to almost nothing.
+  - An item sent into an empty pipe whose RTT (less its transmission time) is within 5% + 1 ms of the minimum
+    refreshes the ProbeRTT timer, so an idle desktop doesn't enter ProbeRTT every 5 s.
+  - The pacing rate is initialized from the first RTT sample (the draft has the handshake's), or Startup sends in
+    line-rate bursts that trip the delay signal long before the pipe is full.
+  - No send quantum, no offload budget; the draft's per-packet constants use SMSS = 1448 bytes, and the Reno
+    coexistence time scale counts packets of that size, not items.
 
 ### Rejected and deferred
 
@@ -764,7 +802,10 @@ single large item never stalls the link. Initial window before any estimate: 64 
       callback keeps an interactive window (foot) responsive: foot's keystroke reaches the screen within the usual
       wait while the busy client runs.
     - Report: CPU use and the busy client's frame rate with and without a busy client, by hand, not asserted.
-2b. **Our own congestion control.** The spec is
+2b. **Our own congestion control.** Phase 1 done on branch `core2b` (not merged): the controller and its
+    simulated-link test, the scene protocol's ACK (version 11), the viewer's acks and backlog reports, the server
+    decoding them (`ViewerTransport.onAck`, unused). Phase 2, after 2a is merged: gate sends with the controller in
+    2a's scheduler, the pacing timer, the 256 KB safety limit, frame callbacks without the decode-time delay. The spec is
     [Transport and congestion control](#transport-and-congestion-control); this lists the work. Opus fork (subtle:
     bugs show up as random latency spikes), own branch and worktree, after 2a is merged (it plugs into 2a's send
     scheduler).
