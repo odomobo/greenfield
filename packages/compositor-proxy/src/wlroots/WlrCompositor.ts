@@ -15,6 +15,7 @@ import { ControlMessage } from '../viewer/ViewerTransport.js'
 import type { Patch, SceneRect, SceneSurface, SceneWindow } from '@gfld/scene-protocol'
 import { EvDevKeyCode } from './keys.js'
 import { Apps } from './Apps.js'
+import { X11Windows } from './X11.js'
 
 const logger = createLogger('wlroots')
 /** GFLD_WLR_TRACE=1: log wlroots events and viewer messages */
@@ -24,7 +25,11 @@ type H264Encoder = 'x264' | 'nvh264' | 'vaapih264'
 
 /** The native core (native/wlr-core), injectable so the policy can be tested without wlroots. */
 export type WlrNative = Omit<typeof WlrCoreAddon, 'create'> & {
-  create(onEvent: WlrCoreAddon.EventHandler, width: number, height: number): { socket: string; fd: number }
+  create(
+    onEvent: WlrCoreAddon.EventHandler,
+    width: number,
+    height: number,
+  ): { socket: string; fd: number; x11Display?: string }
 }
 
 /** Watches a file descriptor, calls back when it's readable (the poll addon in production). */
@@ -126,6 +131,9 @@ const inactiveSink: EncodingSink = {
 
 export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   readonly waylandDisplay: string
+  /** the X11 display for X11 apps (XWayland), undefined if there's none */
+  readonly x11Display?: string
+  private readonly x11: X11Windows
   private send?: (message: ControlMessage) => void
   private sink: EncodingSink = inactiveSink
   private readonly encoding: EncodingContext<WlrEncoder>
@@ -163,14 +171,18 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.encoding = new EncodingContext(forwardingSink, pool, encodePng, logger)
     this.encoding.startTicking()
 
-    const { socket, fd } = this.wlr.create(
+    this.x11 = new X11Windows((sid, x, y) => this.wlr.setPosition(sid, x, y))
+    const { socket, fd, x11Display } = this.wlr.create(
       (type, ...args) => this.onEvent(type, args),
       this.output.width,
       this.output.height,
     )
     this.waylandDisplay = socket
+    this.x11Display = x11Display
     watchFd(fd, () => this.wlr.dispatch())
-    logger.info(`Listening on: WAYLAND_DISPLAY="${socket}" (wlroots).`)
+    logger.info(
+      `Listening on: WAYLAND_DISPLAY="${socket}" (wlroots)` + (x11Display ? `, DISPLAY="${x11Display}".` : '.'),
+    )
   }
 
   // -------------------------------------------------------------------------------------------------------------------
@@ -260,10 +272,14 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
           y: 0,
           seq: 0,
         })
+        if (args[1] === true) {
+          this.x11.added(args[0])
+        }
         break
       case 'toplevel-destroy': {
         const window = this.windows.get(args[0])
         this.windows.delete(args[0])
+        this.x11.removed(args[0])
         this.stack = this.stack.filter((sid) => sid !== args[0])
         if (window && this.active === window.sid) {
           this.activateNext(window)
@@ -323,6 +339,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       }
       case 'cursor-shape':
         this.send?.({ type: 'cursor', kind: 'named', name: args[0] })
+        break
+      case 'x11-geometry':
+        this.scheduleScene()
         break
     }
   }
@@ -561,6 +580,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       // maximized and fullscreen windows cover the output; their own position is kept for when they're restored
       const { x, y } =
         state.maximized || state.fullscreen ? { x: -state.geometry[0], y: -state.geometry[1] } : this.positionOf(window)
+      this.x11.shownAt(window.sid, x, y)
       const parent = window.parent === undefined ? undefined : this.surfaces.get(window.parent)
       windows.push({
         id: surface.key,
@@ -805,6 +825,7 @@ export function startWlrootsCompositor(config: { h264Encoder: H264Encoder; video
     },
   )
   const apps = new Apps(compositor.waylandDisplay)
+  apps.x11Display = compositor.x11Display
   compositor.clientListener = apps
   return { viewerHost: new ViewerHost(compositor, compositor), compositor, apps }
 }

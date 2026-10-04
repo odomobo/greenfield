@@ -52,8 +52,9 @@ async function start({ socketPath, encoder }: SessionStart) {
   // the gateway went away or asked us to stop: don't leave orphaned apps behind
   const terminate = () => endSession(apps)
   process.once('disconnect', terminate)
-  process.once('SIGTERM', terminate)
-  process.once('SIGINT', terminate)
+  // on, not once: a second signal while ending must not kill us before we exit (exiting cleans up after XWayland)
+  process.on('SIGTERM', terminate)
+  process.on('SIGINT', terminate)
 
   await listen(socketPath, controller)
   process.send?.({ type: 'ready' })

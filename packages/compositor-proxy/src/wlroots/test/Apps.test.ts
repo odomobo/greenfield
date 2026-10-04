@@ -1,5 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { Apps, ProcessInfo } from '../Apps.js'
 
 /** A made-up process tree: pid -> parent and name. */
@@ -76,4 +79,23 @@ test('clients without a process, or of the session process itself, are not apps'
   assert.deepEqual(apps.pids, [])
   apps.clientDisconnected(1)
   apps.clientDisconnected(3)
+})
+
+test('X11 apps get the session X11 display, and only when there is one', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'gfld-apps-'))
+  try {
+    const displayOf = async (apps: Apps, name: string) => {
+      const file = path.join(dir, name)
+      await apps.launch(name, 'sh', ['-c', `printf %s "\${DISPLAY-unset}" > ${file}.tmp && mv ${file}.tmp ${file}`])
+      await waitFor(() => existsSync(file), `${name} to write its DISPLAY`)
+      return readFileSync(file, 'utf8')
+    }
+    const apps = new Apps('wayland-test')
+    apps.x11Display = ':7'
+    assert.equal(await displayOf(apps, 'with-x11'), ':7')
+    // without one, apps keep what the session process has (the gateway's session process has no DISPLAY)
+    assert.equal(await displayOf(new Apps('wayland-test'), 'without-x11'), process.env.DISPLAY ?? 'unset')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

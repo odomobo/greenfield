@@ -91,6 +91,10 @@ const commands = {
   async press(key) {
     await current.keyboard.press(key)
   },
+  /** a PNG of the page, for looking at a failure: screenshot <file> */
+  async screenshot(file) {
+    await current.screenshot({ path: file })
+  },
   async resize(args) {
     const [width, height] = args.split(' ').map(Number)
     await current.setViewportSize({ width, height })

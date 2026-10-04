@@ -37,6 +37,7 @@
 #include <wlr/util/log.h>
 #include "node_api.h"
 #include "wlr_core.h"
+#include "wlr_core_internal.h"
 
 #define DECLARE_NAPI_METHOD(name, func) { name, 0, func, 0, 0, 0, napi_default, 0 }
 #define NAPI_CALL(env, the_call)                                                    \
@@ -50,38 +51,6 @@
         }                                                                           \
     }
 
-struct core {
-    napi_env env;
-    napi_ref on_event;
-
-    struct wl_display *display;
-    struct wl_event_loop *loop;
-    struct wlr_backend *backend;
-    struct wlr_output *output;
-    struct wlr_compositor *compositor;
-    struct wlr_xdg_shell *xdg_shell;
-    struct wlr_seat *seat;
-    struct wlr_keyboard keyboard;
-    struct wlr_cursor_shape_manager_v1 *cursor_shape_manager;
-    const char *socket;
-
-    struct wl_list surfaces; // gsurf.link
-    /* > 0 while JavaScript handles an event (and may call back in) */
-    int emitting;
-    uint32_t next_sid;
-    uint32_t next_client_id;
-
-    struct wl_listener new_surface;
-    struct wl_listener new_xdg_surface;
-    struct wl_listener request_set_cursor;
-    struct wl_listener request_set_selection;
-    struct wl_listener request_set_primary_selection;
-    struct wl_listener request_set_shape;
-    struct wl_listener keyboard_key;
-    struct wl_listener keyboard_modifiers;
-    struct wl_listener client_created;
-};
-
 /* Our id for a Wayland client, reported to JavaScript with its process (client-new, client-destroy). */
 struct client_id {
     struct wl_listener destroy;
@@ -89,42 +58,8 @@ struct client_id {
     uint32_t id;
 };
 
-/* A wl_surface, of any role. Toplevels are reported by the sid of their surface. */
-struct gsurf {
-    struct wl_list link;
-    struct core *core;
-    uint32_t sid;
-    struct wlr_surface *surface;
-    char key[32];
-    /*
-     * The last committed buffer, locked until the next commit replaces it (wlroots itself unlocks it right after the
-     * commit event): patches read it later, when there is room to send them.
-     */
-    struct wlr_buffer *buffer;
-
-    struct wl_listener commit;
-    struct wl_listener destroy;
-    struct wl_listener map;
-    struct wl_listener unmap;
-
-    struct wlr_xdg_toplevel *toplevel;
-    struct wl_listener xdg_destroy;
-    struct wl_listener request_move;
-    struct wl_listener request_resize;
-    struct wl_listener request_maximize;
-    struct wl_listener request_fullscreen;
-    struct wl_listener request_minimize;
-    struct wl_listener set_title;
-    struct wl_listener set_app_id;
-    struct wl_listener set_parent;
-};
-
 /* The one core of this process (there is one session per process). */
 static struct core *the_core = NULL;
-
-static void emit(struct core *core, const char *type, size_t argc, napi_value *argv);
-static napi_value u32(struct core *core, uint32_t value);
-static napi_value i32(struct core *core, int32_t value);
 
 static void
 client_id_destroy(struct wl_listener *listener, void *data) {
@@ -164,7 +99,7 @@ handle_client_created(struct wl_listener *listener, void *data) {
     emit(core, "client-new", 2, args);
 }
 
-static struct gsurf *
+struct gsurf *
 gsurf_from_surface(struct core *core, struct wlr_surface *surface) {
     if (surface == NULL) {
         return NULL;
@@ -178,7 +113,7 @@ gsurf_from_surface(struct core *core, struct wlr_surface *surface) {
     return NULL;
 }
 
-static struct gsurf *
+struct gsurf *
 gsurf_from_sid(struct core *core, uint32_t sid) {
     struct gsurf *gsurf;
     wl_list_for_each(gsurf, &core->surfaces, link) {
@@ -192,7 +127,7 @@ gsurf_from_sid(struct core *core, uint32_t sid) {
 // ---------------------------------------------------------------------------------------------------------------------
 // events to JavaScript: onEvent(type, ...args)
 
-static void
+void
 emit(struct core *core, const char *type, size_t argc, napi_value *argv) {
     napi_env env = core->env;
     napi_value args[12], callback, global, result;
@@ -223,21 +158,21 @@ emit(struct core *core, const char *type, size_t argc, napi_value *argv) {
     }
 }
 
-static napi_value
+napi_value
 u32(struct core *core, uint32_t value) {
     napi_value result;
     napi_create_uint32(core->env, value, &result);
     return result;
 }
 
-static napi_value
+napi_value
 i32(struct core *core, int32_t value) {
     napi_value result;
     napi_create_int32(core->env, value, &result);
     return result;
 }
 
-static napi_value
+napi_value
 str(struct core *core, const char *value) {
     napi_value result;
     if (value == NULL) {
@@ -248,7 +183,7 @@ str(struct core *core, const char *value) {
     return result;
 }
 
-static napi_value
+napi_value
 boolean(struct core *core, bool value) {
     napi_value result;
     napi_get_boolean(core->env, value, &result);
@@ -317,6 +252,9 @@ handle_surface_commit(struct wl_listener *listener, void *data) {
 static void
 handle_surface_map(struct wl_listener *listener, void *data) {
     struct gsurf *gsurf = wl_container_of(listener, gsurf, map);
+    if (gsurf->xwin) {
+        x11_surface_mapped(gsurf);
+    }
     napi_value args[] = {u32(gsurf->core, gsurf->sid)};
     emit(gsurf->core, "surface-map", 1, args);
 }
@@ -324,6 +262,9 @@ handle_surface_map(struct wl_listener *listener, void *data) {
 static void
 handle_surface_unmap(struct wl_listener *listener, void *data) {
     struct gsurf *gsurf = wl_container_of(listener, gsurf, unmap);
+    if (gsurf->xwin) {
+        x11_surface_unmapped(gsurf);
+    }
     napi_value args[] = {u32(gsurf->core, gsurf->sid)};
     emit(gsurf->core, "surface-unmap", 1, args);
 }
@@ -349,6 +290,10 @@ static void
 handle_surface_destroy(struct wl_listener *listener, void *data) {
     struct gsurf *gsurf = wl_container_of(listener, gsurf, destroy);
     struct core *core = gsurf->core;
+    if (gsurf->xwin) {
+        // before XWayland's own listener (it dissociates the X11 window after this): reports toplevel-destroy
+        x11_surface_destroyed(gsurf);
+    }
     napi_value args[] = {u32(core, gsurf->sid)};
     gsurf_toplevel_listeners_remove(gsurf);
     wl_list_remove(&gsurf->commit.link);
@@ -671,12 +616,22 @@ create(napi_env env, napi_callback_info info) {
         return undefined(env);
     }
     the_core = core;
+    // GFLD_XWAYLAND=0: no X11 apps
+    const char *x11_display = NULL;
+    const char *xwayland_setting = getenv("GFLD_XWAYLAND");
+    if (xwayland_setting == NULL || strcmp(xwayland_setting, "0") != 0) {
+        x11_display = x11_create(core);
+    }
 
     NAPI_CALL(env, napi_create_object(env, &result))
     NAPI_CALL(env, napi_create_string_utf8(env, core->socket, NAPI_AUTO_LENGTH, &value))
     NAPI_CALL(env, napi_set_named_property(env, result, "socket", value))
     NAPI_CALL(env, napi_create_int32(env, wl_event_loop_get_fd(core->loop), &value))
     NAPI_CALL(env, napi_set_named_property(env, result, "fd", value))
+    if (x11_display) {
+        NAPI_CALL(env, napi_create_string_utf8(env, x11_display, NAPI_AUTO_LENGTH, &value))
+        NAPI_CALL(env, napi_set_named_property(env, result, "x11Display", value))
+    }
     return result;
 }
 
@@ -839,44 +794,57 @@ keyboardFocus(napi_env env, napi_callback_info info) {
     return undefined(env);
 }
 
-static struct wlr_xdg_toplevel *
-toplevel_arg(napi_env env, struct core *core, napi_value value) {
-    struct gsurf *gsurf = gsurf_from_sid(core, arg_u32(env, value));
-    return gsurf ? gsurf->toplevel : NULL;
+/* A state in configure()'s state object: -1 if it's not there. */
+static int
+state_flag(napi_env env, napi_value state, const char *name) {
+    napi_value value;
+    bool flag;
+    if (napi_get_named_property(env, state, name, &value) == napi_ok &&
+        napi_get_value_bool(env, value, &flag) == napi_ok) {
+        return flag;
+    }
+    return -1;
 }
 
 // configure(sid, width, height (negative: unchanged), { maximized, fullscreen, activated, resizing })
 static napi_value
 configure(napi_env env, napi_callback_info info) {
-    napi_value argv[4], value;
+    napi_value argv[4];
     struct core *core = core_or_throw(env);
     if (core == NULL || !get_args(env, info, 4, argv)) {
         return undefined(env);
     }
-    struct wlr_xdg_toplevel *toplevel = toplevel_arg(env, core, argv[0]);
+    struct configure_request request = {
+            .width = arg_i32(env, argv[1]),
+            .height = arg_i32(env, argv[2]),
+            .maximized = state_flag(env, argv[3], "maximized"),
+            .fullscreen = state_flag(env, argv[3], "fullscreen"),
+            .activated = state_flag(env, argv[3], "activated"),
+            .resizing = state_flag(env, argv[3], "resizing"),
+    };
+    struct gsurf *gsurf = gsurf_from_sid(core, arg_u32(env, argv[0]));
+    if (gsurf && x11_configure(gsurf, &request)) {
+        flush(core);
+        return undefined(env);
+    }
+    struct wlr_xdg_toplevel *toplevel = gsurf ? gsurf->toplevel : NULL;
     if (toplevel == NULL || !toplevel->base->initialized) {
         return undefined(env);
     }
-    int32_t width = arg_i32(env, argv[1]), height = arg_i32(env, argv[2]);
-    if (width >= 0 && height >= 0) {
-        wlr_xdg_toplevel_set_size(toplevel, width, height);
+    if (request.width >= 0 && request.height >= 0) {
+        wlr_xdg_toplevel_set_size(toplevel, request.width, request.height);
     }
-    bool flag;
-    if (napi_get_named_property(env, argv[3], "maximized", &value) == napi_ok &&
-        napi_get_value_bool(env, value, &flag) == napi_ok) {
-        wlr_xdg_toplevel_set_maximized(toplevel, flag);
+    if (request.maximized >= 0) {
+        wlr_xdg_toplevel_set_maximized(toplevel, request.maximized);
     }
-    if (napi_get_named_property(env, argv[3], "fullscreen", &value) == napi_ok &&
-        napi_get_value_bool(env, value, &flag) == napi_ok) {
-        wlr_xdg_toplevel_set_fullscreen(toplevel, flag);
+    if (request.fullscreen >= 0) {
+        wlr_xdg_toplevel_set_fullscreen(toplevel, request.fullscreen);
     }
-    if (napi_get_named_property(env, argv[3], "activated", &value) == napi_ok &&
-        napi_get_value_bool(env, value, &flag) == napi_ok) {
-        wlr_xdg_toplevel_set_activated(toplevel, flag);
+    if (request.activated >= 0) {
+        wlr_xdg_toplevel_set_activated(toplevel, request.activated);
     }
-    if (napi_get_named_property(env, argv[3], "resizing", &value) == napi_ok &&
-        napi_get_value_bool(env, value, &flag) == napi_ok) {
-        wlr_xdg_toplevel_set_resizing(toplevel, flag);
+    if (request.resizing >= 0) {
+        wlr_xdg_toplevel_set_resizing(toplevel, request.resizing);
     }
     flush(core);
     return undefined(env);
@@ -888,9 +856,11 @@ closeToplevel(napi_env env, napi_callback_info info) {
     napi_value argv[1];
     struct core *core = core_or_throw(env);
     if (core && get_args(env, info, 1, argv)) {
-        struct wlr_xdg_toplevel *toplevel = toplevel_arg(env, core, argv[0]);
-        if (toplevel) {
-            wlr_xdg_toplevel_send_close(toplevel);
+        struct gsurf *gsurf = gsurf_from_sid(core, arg_u32(env, argv[0]));
+        if (gsurf && x11_close(gsurf)) {
+            flush(core);
+        } else if (gsurf && gsurf->toplevel) {
+            wlr_xdg_toplevel_send_close(gsurf->toplevel);
             flush(core);
         }
     }
@@ -905,29 +875,38 @@ toplevelState(napi_env env, napi_callback_info info) {
     if (core == NULL || !get_args(env, info, 1, argv)) {
         return undefined(env);
     }
-    struct wlr_xdg_toplevel *toplevel = toplevel_arg(env, core, argv[0]);
-    if (toplevel == NULL) {
+    struct gsurf *gsurf = gsurf_from_sid(core, arg_u32(env, argv[0]));
+    struct toplevel_state state = {0};
+    if (gsurf == NULL) {
         return undefined(env);
+    } else if (!x11_toplevel_state(gsurf, &state)) {
+        struct wlr_xdg_toplevel *toplevel = gsurf->toplevel;
+        if (toplevel == NULL) {
+            return undefined(env);
+        }
+        wlr_xdg_surface_get_geometry(toplevel->base, &state.geometry);
+        state.configured_width = toplevel->current.width;
+        state.configured_height = toplevel->current.height;
+        state.maximized = toplevel->current.maximized;
+        state.fullscreen = toplevel->current.fullscreen;
     }
-    struct wlr_box geometry;
-    wlr_xdg_surface_get_geometry(toplevel->base, &geometry);
     napi_create_object(env, &result);
     napi_create_array_with_length(env, 4, &array);
-    int32_t g[] = {geometry.x, geometry.y, geometry.width, geometry.height};
+    int32_t g[] = {state.geometry.x, state.geometry.y, state.geometry.width, state.geometry.height};
     for (uint32_t i = 0; i < 4; i++) {
         napi_create_int32(env, g[i], &value);
         napi_set_element(env, array, i, value);
     }
     napi_set_named_property(env, result, "geometry", array);
     napi_create_array_with_length(env, 2, &array);
-    napi_create_int32(env, toplevel->current.width, &value);
+    napi_create_int32(env, state.configured_width, &value);
     napi_set_element(env, array, 0, value);
-    napi_create_int32(env, toplevel->current.height, &value);
+    napi_create_int32(env, state.configured_height, &value);
     napi_set_element(env, array, 1, value);
     napi_set_named_property(env, result, "configured", array);
-    napi_get_boolean(env, toplevel->current.maximized, &value);
+    napi_get_boolean(env, state.maximized, &value);
     napi_set_named_property(env, result, "maximized", value);
-    napi_get_boolean(env, toplevel->current.fullscreen, &value);
+    napi_get_boolean(env, state.fullscreen, &value);
     napi_set_named_property(env, result, "fullscreen", value);
     return result;
 }
@@ -965,13 +944,28 @@ windowSurfaces(napi_env env, napi_callback_info info) {
     if (core == NULL || !get_args(env, info, 1, argv)) {
         return undefined(env);
     }
-    struct wlr_xdg_toplevel *toplevel = toplevel_arg(env, core, argv[0]);
+    struct gsurf *gsurf = gsurf_from_sid(core, arg_u32(env, argv[0]));
     struct surfaces_iterator iterator = {.core = core, .env = env};
     napi_create_array(env, &iterator.array);
-    if (toplevel) {
-        wlr_xdg_surface_for_each_surface(toplevel->base, add_surface, &iterator);
+    if (gsurf && !x11_window_surfaces(gsurf, add_surface, &iterator) && gsurf->toplevel) {
+        wlr_xdg_surface_for_each_surface(gsurf->toplevel->base, add_surface, &iterator);
     }
     return iterator.array;
+}
+
+// setPosition(sid, x, y): where the window's surface is on the output (X11 apps are told, Wayland apps can't know)
+static napi_value
+setPosition(napi_env env, napi_callback_info info) {
+    napi_value argv[3];
+    struct core *core = core_or_throw(env);
+    if (core && get_args(env, info, 3, argv)) {
+        struct gsurf *gsurf = gsurf_from_sid(core, arg_u32(env, argv[0]));
+        if (gsurf && gsurf->xwin) {
+            x11_set_position(gsurf, arg_i32(env, argv[1]), arg_i32(env, argv[2]));
+            flush(core);
+        }
+    }
+    return undefined(env);
 }
 
 // sendFrameDone(sid, timeMs)
@@ -1079,6 +1073,7 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("close", closeToplevel),
             DECLARE_NAPI_METHOD("toplevelState", toplevelState),
             DECLARE_NAPI_METHOD("windowSurfaces", windowSurfaces),
+            DECLARE_NAPI_METHOD("setPosition", setPosition),
             DECLARE_NAPI_METHOD("sendFrameDone", sendFrameDone),
             DECLARE_NAPI_METHOD("readPixels", readPixels),
     };

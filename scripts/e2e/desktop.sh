@@ -48,24 +48,6 @@ start_gateway "$PORT" "$WORK/gateway.log"
 GATEWAY_PID="$STARTED_PID"
 start_driver
 
-# Click in the middle of an element (real pointer events). $1: a CSS selector.
-click_element() {
-  local center
-  center="$(pw_eval "() => { const r = document.querySelector('$1').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.y + r.height / 2) }" | tr -d '"')"
-  read -r CX CY <<<"$center"
-  pw mousemove "$CX" "$CY" >/dev/null
-  pw mousedown >/dev/null
-  pw mouseup >/dev/null
-}
-
-# Signing in with a real click: the page needs user activation for its history guard and leave confirmation.
-browser_login() {
-  wait_for "() => $(visible login-view) && !!document.querySelector('#password')" "the sign-in form"
-  pw_eval "() => { document.querySelector('#username').value = '$ME'; document.querySelector('#password').value = '$PASSWORD'; return true }" >/dev/null
-  click_element '#login-submit'
-  wait_for "() => $(visible sessions-view)" "the session list"
-}
-
 # Reload without waiting for the load (a "Leave site?" dialog may block it). $1: dialog-accept or dialog-dismiss
 reload_with_dialog() {
   pw_eval "() => { setTimeout(() => location.reload(), 100); return true }" >/dev/null
