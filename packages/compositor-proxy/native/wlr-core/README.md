@@ -151,7 +151,7 @@ windows.
 
 ## The migration
 
-ROADMAP.md, Core item 1, "Work plan: three waves". Wave 1 (this stack as the default, with the desktop shell, CI and
+ROADMAP.md, Core item 1, "Work plan: four waves". Wave 1 (this stack as the default, with the desktop shell, CI and
 tests) and wave 2 B (XWayland) are done.
 
 ## Packages
