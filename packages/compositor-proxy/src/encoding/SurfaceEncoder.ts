@@ -1,12 +1,19 @@
 /**
- * Per-surface encoding state machine (see "Encoding policy" in ROADMAP.md): fast mode streams the whole surface as
- * video, slow mode sends lossless PNG patches of the damaged areas. Native code is reached only through the injected
- * host, sink and pool, so this runs (and is tested) without it.
+ * Per-surface encoding state machine (see "Encoding policy" in ROADMAP.md). A surface is in the normal or the
+ * streaming priority class (relentless surfaces, see RelentlessMeter). Its content goes out as lossless PNG patches of
+ * the damaged areas, or, for streaming surfaces when a hardware video encoder is available, as H.264 video of the whole
+ * surface. Each surface has a few slots for items (patches or video frames) between capture and the socket. Native code
+ * is reached only through the injected host, sink and pool, so this runs (and is tested) without it.
  */
 import type { Patch } from '@gfld/scene-protocol'
 import { EncoderPool } from './EncoderPool.js'
-import { DamageMeter, EncodingMode, INITIAL_FAST_MS, MAX_PATCH_PIXELS, nextMode, planPatches } from './policy.js'
+import { MAX_PATCH_PIXELS, planPatches, RelentlessMeter, SurfaceClass } from './policy.js'
 import { area, clip, intersect, Rect } from './region.js'
+
+/** Items (patches or video frames) of one surface that may exist between capture and the socket. */
+export const SURFACE_SLOTS = 2
+/** Patches of normal surfaces encoding at once (on libuv's thread pool). */
+export const MAX_NORMAL_ENCODES = 4
 
 export type BufferInfo = {
   bufferId: number
@@ -25,9 +32,10 @@ export interface VideoEncoder {
 export interface EncodingSink {
   /** true if a viewer is attached; nothing is encoded without one */
   readonly active: boolean
-  sendFrame(surface: string, frame: Uint8Array): void
+  /** `done` must be called exactly once: when the frame was handed to the network (true) or dropped (false) */
+  sendFrame(surface: string, frame: Uint8Array, surfaceClass: SurfaceClass, done: (sent: boolean) => void): void
   /** `done` must be called exactly once: when the patch was handed to the network (true) or dropped (false) */
-  sendPatch(surface: string, patch: Patch, done: (sent: boolean) => void): void
+  sendPatch(surface: string, patch: Patch, surfaceClass: SurfaceClass, done: (sent: boolean) => void): void
   /** drop everything unsent of the surface, its video restarts with a key frame */
   requireKeyFrame(surface: string): void
   dropPatches(surface: string): void
@@ -63,6 +71,7 @@ type CapturedPatch = {
   surfaceSize: { width: number; height: number }
   serial: number
   epoch: number
+  surfaceClass: SurfaceClass
 }
 
 /** What the patch pump needs of a surface. */
@@ -70,26 +79,33 @@ export interface PatchSource {
   readonly key: string
   readonly destroyed: boolean
   readonly hasQueuedPatches: boolean
+  readonly hasFreeSlot: boolean
+  readonly surfaceClass: SurfaceClass
+  /** Takes a slot, which the pump gives back with `releaseSlot` once the patch is sent or dropped. */
   capturePatch(): CapturedPatch | undefined
-  /** false if results captured at this epoch are stale (mode switched, surface destroyed) */
+  releaseSlot(): void
+  /** false if results captured at this epoch are stale (class switched, surface destroyed) */
   isCurrent(epoch: number): boolean
 }
 
 export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements PatchSource {
-  private _mode: EncodingMode = 'fast'
-  private readonly meter: DamageMeter
-  private readonly createdAt: number
+  private readonly meter: RelentlessMeter
   /** patches queued but not captured yet: they will read the latest pixels when they are */
   private queued: Rect[] = []
-  /** bumped on every mode switch, results of encodings started before are dropped */
+  /** bumped whenever queued content is superseded (video start or stop), results of encodings started before are dropped */
   private epoch = 0
   private lease?: V
   /**
    * the buffer can't be read as pixels (e.g. an external-only dmabuf), only streamed as video, small ones too (the
-   * encoder pads them). An SHM format that neither supports shows nothing: its video encodings fail and are logged.
+   * encoder pads them). Without a video encoder it can't be shown at all.
    */
   private patchUnsupported = false
+  private unsupportedLogged = false
   private _destroyed = false
+  /** slots in use: items captured (or video encoding started) and not yet handed to the socket or dropped */
+  private slotsUsed = 0
+  /** the video needs a new frame (a key frame, or a delta of the latest content) as soon as a slot is free */
+  private videoWanted?: 'delta' | 'key'
   /** video encodings in flight, they still read their buffer */
   private readonly videoInFlight = new Set<Promise<void>>()
 
@@ -98,13 +114,12 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     private readonly host: SurfaceHost<V>,
     private readonly context: EncodingContext<V>,
   ) {
-    this.createdAt = context.now()
-    this.meter = new DamageMeter(this.createdAt)
+    this.meter = new RelentlessMeter(context.now())
     context.surfaces.add(this)
   }
 
-  get mode(): EncodingMode {
-    return this._mode
+  get surfaceClass(): SurfaceClass {
+    return this.meter.surfaceClass
   }
 
   get destroyed(): boolean {
@@ -113,6 +128,30 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
 
   get hasQueuedPatches(): boolean {
     return this.queued.length > 0
+  }
+
+  get hasFreeSlot(): boolean {
+    return this.slotsUsed < SURFACE_SLOTS
+  }
+
+  /** the surface streams video now */
+  get usesVideo(): boolean {
+    return this.lease !== undefined
+  }
+
+  /** Queued rectangles, captured or encoding items, or a video frame wanted: anything not handed to the socket yet. */
+  get hasUnsentWork(): boolean {
+    return this.queued.length > 0 || this.slotsUsed > 0 || this.videoWanted !== undefined
+  }
+
+  /** the surface is backlogged (see RelentlessMeter) */
+  get backlogged(): boolean {
+    return this.meter.backlogged
+  }
+
+  /** the share of the class period the surface spent backlogged, for tests and logging */
+  backlogFraction(): number {
+    return this.meter.fraction(this.context.now())
   }
 
   /**
@@ -138,35 +177,54 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       return resolved
     }
     const bounds = boundsOf(buffer)
-    const changed = area(clip(damage, bounds))
-    if (changed === 0) {
+    if (area(clip(damage, bounds)) === 0) {
       // nothing changed, nothing to send
       return resolved
-    }
-    const now = this.context.now()
-    this.meter.record(now, changed)
-    const switched = this.evaluate(now, buffer)
-    if (switched) {
-      // a switch sends the whole surface
-      return switched
     }
     if (!this.context.sink.active) {
       return resolved
     }
-    if (this._mode === 'fast' && this.usesVideo(buffer)) {
-      return this.sendVideo(buffer, false)
+    const now = this.context.now()
+    if (this.hasUnsentWork) {
+      // new damage while earlier damage hasn't gone out: backlogged (idempotent)
+      this.meter.markBackloggedStart(now)
     }
-    // slow mode, or a small surface (never video)
-    this.releaseLease()
+    const switched = this.evaluate(now, buffer)
+    if (switched) {
+      // a class switch that sends the whole surface covers this damage
+      return switched
+    }
+
+    if (this.videoEligible(buffer)) {
+      if (this.lease !== undefined) {
+        return this.requestVideo(false)
+      }
+      const started = this.startVideo()
+      if (started) {
+        return started
+      }
+    } else if (this.lease !== undefined) {
+      // no longer eligible (e.g. the surface became small): a crisp image of the whole surface replaces the video
+      this.stopVideo(buffer)
+      return resolved
+    }
+    if (this.patchUnsupported) {
+      this.logUnsupported()
+      return resolved
+    }
     this.queuePatches(damage, bounds)
     return resolved
   }
 
-  /** Re-evaluate the mode without a commit, so a surface that went quiet switches to crisp patches. */
+  /**
+   * Re-evaluate the class without a commit, so a surface that went quiet is demoted (and, with video, settles to a crisp
+   * image).
+   */
   tick(): void {
     const buffer = this.host.currentBuffer()
-    if (buffer && !this._destroyed && this._mode === 'fast') {
-      this.evaluate(this.context.now(), buffer)
+    if (buffer && !this._destroyed) {
+      this.updateBacklog()
+      void this.evaluate(this.context.now(), buffer)
     }
   }
 
@@ -179,19 +237,32 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     if (buffer === undefined || this._destroyed || !this.context.sink.active) {
       return resolved
     }
-    if (this._mode === 'fast' && this.usesVideo(buffer)) {
-      return this.sendVideo(buffer, true)
+    if (this.videoEligible(buffer)) {
+      if (this.lease !== undefined) {
+        return this.requestVideo(true)
+      }
+      const started = this.startVideo()
+      if (started) {
+        return started
+      }
+    }
+    if (this.patchUnsupported) {
+      this.logUnsupported()
+      return resolved
     }
     this.queued = []
     this.context.sink.dropPatches(this.key)
     this.queuePatches([boundsOf(buffer)], boundsOf(buffer))
+    this.updateBacklog()
     return resolved
   }
 
   /** The surface lost its buffer (null attach): nothing to read anymore. */
   bufferDetached(): void {
     this.queued = []
+    this.videoWanted = undefined
     this.context.sink.dropPatches(this.key)
+    this.updateBacklog()
   }
 
   destroy(): void {
@@ -201,15 +272,19 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this._destroyed = true
     this.epoch++
     this.queued = []
+    this.videoWanted = undefined
     this.releaseLease()
     this.context.surfaces.delete(this)
   }
 
   /**
-   * Take the next queued patch and read its pixels now. From here on its content is fixed, new damage over it is
-   * queued again. Called by the patch pump when there is room to send.
+   * Take the next queued patch and read its pixels now, using a slot. From here on its content is fixed, new damage
+   * over it is queued again. Called by the patch pump when there is room to encode.
    */
   capturePatch(): CapturedPatch | undefined {
+    if (!this.hasFreeSlot) {
+      return undefined
+    }
     while (this.queued.length) {
       const buffer = this.host.currentBuffer()
       if (buffer === undefined) {
@@ -222,99 +297,169 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       }
       const pixels = this.host.readPixels(rect)
       if (pixels === undefined) {
-        // can't read this buffer's pixels: stream it as video instead
+        // can't read this buffer's pixels: stream it as video if there is an encoder, else it can't be shown
         this.patchUnsupported = true
         this.queued = []
-        if (this._mode === 'slow') {
-          this.switchTo('fast', buffer)
-        } else {
-          this.sendVideo(buffer, true)
+        if (this.startVideo() === undefined) {
+          this.logUnsupported()
         }
+        this.updateBacklog()
         return undefined
       }
+      this.slotsUsed++
       return {
         rect,
         pixels,
         surfaceSize: { width: buffer.width, height: buffer.height },
         serial: buffer.contentSerial,
         epoch: this.epoch,
+        surfaceClass: this.surfaceClass,
       }
     }
     return undefined
+  }
+
+  /** An item was handed to the socket or dropped: its slot is free again. */
+  releaseSlot(): void {
+    if (this.slotsUsed > 0) {
+      this.slotsUsed--
+    }
+    if (this.queued.length && !this._destroyed) {
+      this.context.pump.schedule(this)
+    }
+    void this.pumpVideo()
+    this.updateBacklog()
   }
 
   isCurrent(epoch: number): boolean {
     return !this._destroyed && epoch === this.epoch
   }
 
-  private usesVideo(buffer: BufferInfo): boolean {
-    return this.patchUnsupported || !isSmall(buffer)
+  /** Whether the surface should be streamed as video now (an encoder exists and it's streaming, or it can't be read). */
+  private videoEligible(buffer: BufferInfo): boolean {
+    if (this.context.pool.size === 0) {
+      return false
+    }
+    return this.patchUnsupported || (this.surfaceClass === 'streaming' && !isSmall(buffer))
   }
 
-  /** Switch modes if the measure says so. Returns the switch's encoding (if it switched). */
+  private logUnsupported() {
+    if (!this.unsupportedLogged) {
+      this.unsupportedLogged = true
+      this.context.logger.error(
+        `The buffer of ${this.key} can't be read as pixels and there is no video encoder, so it isn't shown.`,
+      )
+    }
+  }
+
+  private updateBacklog() {
+    if (this.meter.backlogged && !this.hasUnsentWork) {
+      this.meter.markBackloggedEnd(this.context.now())
+    }
+  }
+
+  /**
+   * Switch classes if the measure says so. Returns the switch's encoding if it sent the surface's whole content (video
+   * start, crisp render); undefined if only the priority changed (or nothing).
+   */
   private evaluate(now: number, buffer: BufferInfo): Promise<void> | undefined {
-    if (this.patchUnsupported) {
+    const before = this.meter.surfaceClass
+    const after = this.meter.evaluate(now)
+    if (after === before) {
       return undefined
     }
-    const next = nextMode(this._mode, this.meter.pixelsPerSecond(now))
-    if (next === this._mode) {
+    if (after === 'streaming') {
+      // video only if an encoder is free; otherwise it stays on patches, with low priority
+      if (this.lease === undefined && this.videoEligible(buffer) && this.context.pool.available > 0) {
+        return this.startVideo()
+      }
       return undefined
     }
-    if (next === 'slow' && now - this.createdAt < INITIAL_FAST_MS) {
-      return undefined
-    }
-    if (next === 'fast' && this.usesVideo(buffer) && this.lease === undefined && this.context.pool.available === 0) {
-      // all video encoders are taken, stay on patches
-      return undefined
-    }
-    return this.switchTo(next, buffer)
-  }
-
-  private switchTo(mode: EncodingMode, buffer: BufferInfo): Promise<void> {
-    this._mode = mode
-    this.epoch++
-    this.queued = []
-    const sink = this.context.sink
-    if (mode === 'fast') {
-      // unsent patches are superseded by the video key frame
-      sink.dropPatches(this.key)
-      return sink.active ? this.sendVideo(buffer, true) : resolved
-    }
-    this.releaseLease()
-    // a crisp image of the whole surface replaces the video
-    if (sink.active) {
-      this.queuePatches([boundsOf(buffer)], boundsOf(buffer))
-    }
-    return resolved
-  }
-
-  private sendVideo(buffer: BufferInfo, keyFrame: boolean): Promise<void> {
-    if (!this.usesVideo(buffer)) {
-      this.releaseLease()
-      this.queuePatches([boundsOf(buffer)], boundsOf(buffer))
+    if (this.lease !== undefined && !this.patchUnsupported) {
+      this.stopVideo(buffer)
       return resolved
     }
+    return undefined
+  }
+
+  /**
+   * Start streaming video: unsent patches are superseded by the key frame. Undefined if there is no encoder to start
+   * it with.
+   */
+  private startVideo(): Promise<void> | undefined {
     if (this.lease === undefined) {
       this.lease = this.patchUnsupported ? this.context.pool.acquireAlways() : this.context.pool.acquire()
       if (this.lease === undefined) {
-        // all video encoders are taken
-        return this.switchTo('slow', buffer)
+        return undefined
       }
-      keyFrame = true
     }
-    const sink = this.context.sink
+    this.epoch++
+    this.queued = []
+    this.context.sink.dropPatches(this.key)
+    return this.requestVideo(true)
+  }
+
+  /** Stop the video: a crisp lossless image of the whole surface replaces it. */
+  private stopVideo(buffer: BufferInfo) {
+    this.releaseLease()
+    this.videoWanted = undefined
+    this.epoch++
+    this.queued = []
+    if (this.context.sink.active) {
+      this.queuePatches([boundsOf(buffer)], boundsOf(buffer))
+    }
+    this.updateBacklog()
+  }
+
+  private requestVideo(keyFrame: boolean): Promise<void> {
     if (keyFrame) {
-      sink.requireKeyFrame(this.key)
-      this.lease.requestKeyUnit()
+      this.videoWanted = 'key'
+      this.context.sink.requireKeyFrame(this.key)
+      this.lease?.requestKeyUnit()
+    } else {
+      this.videoWanted ??= 'delta'
     }
+    return this.pumpVideo()
+  }
+
+  /** Encode the video frame that is wanted, if a slot is free (else when one is: see releaseSlot). */
+  private pumpVideo(): Promise<void> {
+    const lease = this.lease
+    const sink = this.context.sink
+    if (this.videoWanted === undefined || lease === undefined || this._destroyed) {
+      return resolved
+    }
+    const buffer = this.host.currentBuffer()
+    if (!sink.active || buffer === undefined) {
+      this.videoWanted = undefined
+      return resolved
+    }
+    if (!this.hasFreeSlot) {
+      return resolved
+    }
+    this.videoWanted = undefined
+    this.slotsUsed++
     const epoch = this.epoch
-    const encoding: Promise<void> = this.host.encodeVideo(this.lease, buffer).then(
+    const surfaceClass = this.surfaceClass
+    let released = false
+    const release = () => {
+      if (!released) {
+        released = true
+        this.releaseSlot()
+      }
+    }
+    const encoding: Promise<void> = this.host.encodeVideo(lease, buffer).then(
       (frame) => {
         if (this.isCurrent(epoch) && sink.active) {
-          sink.sendFrame(this.key, frame)
+          sink.sendFrame(this.key, frame, surfaceClass, release)
+        } else {
+          release()
         }
       },
-      (error: Error) => this.context.logger.error(`Video encoding of ${this.key} failed: ${error.message}`),
+      (error: Error) => {
+        this.context.logger.error(`Video encoding of ${this.key} failed: ${error.message}`)
+        release()
+      },
     )
     this.videoInFlight.add(encoding)
     return encoding.finally(() => this.videoInFlight.delete(encoding))
@@ -336,13 +481,26 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   }
 }
 
+export type PngEncode = (rgba: Uint8Array, width: number, height: number) => Promise<Uint8Array>
+
+/** The pool of low priority workers that encodes streaming surfaces' patches (StreamingPngPool). */
+export interface StreamingEncodePool {
+  encode: PngEncode
+  /** whether another patch may be captured for it: a worker is free, or about to be */
+  readonly canAccept: boolean
+  /** set by the pump: called when `canAccept` may have changed */
+  onCapacity?: () => void
+}
+
 /**
- * Encodes queued patches when there is room to send them. Only a few are captured ahead of the network, so patches
- * wait in their surface's queue (where new damage merges with them) instead of in a send buffer.
+ * Encodes queued patches when there is room: a free slot in the surface, and an encoder free in the surface's class's
+ * pool. Patches wait in their surface's queue (where new damage merges into them) instead of in a send buffer.
  */
 export class PatchPump {
-  private readonly ready = new Set<PatchSource>()
-  private inFlight = 0
+  private readonly ready: Record<SurfaceClass, Set<PatchSource>> = { normal: new Set(), streaming: new Set() }
+  private normalEncodes = 0
+  private pumping = false
+  private again = false
   /**
    * Per surface, the last captured patch's send. Encodings finish in any order, but a surface's patches must be sent
    * in capture order: a newer patch can overlap an older one, and the older one must not be drawn over it.
@@ -351,77 +509,128 @@ export class PatchPump {
 
   constructor(
     private readonly sink: EncodingSink,
-    private readonly encodePng: (rgba: Uint8Array, width: number, height: number) => Promise<Uint8Array>,
+    private readonly encodeNormal: PngEncode,
+    private readonly streaming: StreamingEncodePool,
     private readonly logger: Logger,
-    private readonly maxInFlight = 3,
-  ) {}
+    private readonly maxNormalEncodes = MAX_NORMAL_ENCODES,
+  ) {
+    streaming.onCapacity = () => this.pump()
+  }
 
-  /** patches captured and not yet handed to the network */
-  get patchesInFlight(): number {
-    return this.inFlight
+  /** normal patches encoding right now */
+  get normalEncoding(): number {
+    return this.normalEncodes
   }
 
   schedule(surface: PatchSource): void {
-    this.ready.add(surface)
+    this.ready[surface.surfaceClass].add(surface)
     this.pump()
   }
 
   pump(): void {
-    while (this.inFlight < this.maxInFlight && this.sink.active) {
-      const next = this.ready.values().next()
+    if (this.pumping) {
+      // a pump is running up the stack (a synchronous callback): it goes round again
+      this.again = true
+      return
+    }
+    this.pumping = true
+    try {
+      do {
+        this.again = false
+        this.pumpClass('streaming')
+        this.pumpClass('normal')
+      } while (this.again)
+    } finally {
+      this.pumping = false
+    }
+  }
+
+  private hasCapacity(surfaceClass: SurfaceClass): boolean {
+    return surfaceClass === 'streaming' ? this.streaming.canAccept : this.normalEncodes < this.maxNormalEncodes
+  }
+
+  private pumpClass(surfaceClass: SurfaceClass) {
+    const set = this.ready[surfaceClass]
+    while (this.sink.active && this.hasCapacity(surfaceClass)) {
+      const next = set.values().next()
       if (next.done) {
         return
       }
       const surface = next.value
-      this.ready.delete(surface)
+      set.delete(surface)
       if (surface.destroyed || !surface.hasQueuedPatches) {
+        continue
+      }
+      if (surface.surfaceClass !== surfaceClass) {
+        // its class changed since it was scheduled
+        this.ready[surface.surfaceClass].add(surface)
+        this.again = true
+        continue
+      }
+      if (!surface.hasFreeSlot) {
+        // scheduled again when one of its items is sent
         continue
       }
       const captured = surface.capturePatch()
       if (surface.hasQueuedPatches) {
         // back of the line, for fairness between surfaces
-        this.ready.add(surface)
+        set.add(surface)
       }
       if (captured === undefined) {
         continue
       }
-      this.inFlight++
-      let finished = false
-      const done = () => {
-        if (!finished) {
-          finished = true
-          this.inFlight--
-          this.pump()
-        }
-      }
-      const encoding = this.encodePng(captured.pixels, captured.rect.width, captured.rect.height)
-      const previous = this.sendTails.get(surface) ?? resolved
-      const tail = previous
-        .then(() => encoding)
-        .then(
-          (png) => {
-            if (!surface.isCurrent(captured.epoch) || !this.sink.active) {
-              done()
-              return
-            }
-            this.sink.sendPatch(
-              surface.key,
-              { contentSerial: captured.serial, surfaceSize: captured.surfaceSize, rect: captured.rect, png },
-              done,
-            )
-          },
-          (error: Error) => {
-            this.logger.error(`Patch encoding of ${surface.key} failed: ${error.message}`)
-            done()
-          },
-        )
-      this.sendTails.set(surface, tail)
-      void tail.then(() => {
-        if (this.sendTails.get(surface) === tail) {
-          this.sendTails.delete(surface)
-        }
-      })
+      this.encode(surface, captured)
     }
+  }
+
+  private encode(surface: PatchSource, captured: ReturnType<PatchSource['capturePatch']> & object) {
+    const surfaceClass = captured.surfaceClass
+    let released = false
+    const done = () => {
+      if (!released) {
+        released = true
+        surface.releaseSlot()
+      }
+    }
+    let encoding: Promise<Uint8Array>
+    if (surfaceClass === 'normal') {
+      this.normalEncodes++
+      encoding = this.encodeNormal(captured.pixels, captured.rect.width, captured.rect.height)
+      const finished = () => {
+        this.normalEncodes--
+        this.pump()
+      }
+      encoding.then(finished, finished)
+    } else {
+      encoding = this.streaming.encode(captured.pixels, captured.rect.width, captured.rect.height)
+    }
+    const previous = this.sendTails.get(surface) ?? resolved
+    const tail = previous
+      .then(() => encoding)
+      .then(
+        (png) => {
+          if (!surface.isCurrent(captured.epoch) || !this.sink.active) {
+            done()
+            return
+          }
+          this.sink.sendPatch(
+            surface.key,
+            { contentSerial: captured.serial, surfaceSize: captured.surfaceSize, rect: captured.rect, png },
+            surfaceClass,
+            done,
+          )
+        },
+        (error: Error) => {
+          this.logger.error(`Patch encoding of ${surface.key} failed: ${error.message}`)
+          done()
+        },
+      )
+    this.sendTails.set(surface, tail)
+    void tail.then(() => {
+      if (this.sendTails.get(surface) === tail) {
+        this.sendTails.delete(surface)
+      }
+    })
   }
 }
 
@@ -434,14 +643,14 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
   constructor(
     readonly sink: EncodingSink,
     readonly pool: EncoderPool<V>,
-    encodePng: (rgba: Uint8Array, width: number, height: number) => Promise<Uint8Array>,
+    encoders: { normal: PngEncode; streaming: StreamingEncodePool },
     readonly logger: Logger,
     readonly now: () => number = () => performance.now(),
   ) {
-    this.pump = new PatchPump(sink, encodePng, logger)
+    this.pump = new PatchPump(sink, encoders.normal, encoders.streaming, logger)
   }
 
-  /** Re-evaluate fast surfaces regularly, a surface that stops committing must still settle to patches. */
+  /** Re-evaluate the surfaces' classes regularly, a surface that stops committing must still be demoted. */
   startTicking(intervalMs = 200): void {
     if (this.ticker === undefined) {
       this.ticker = setInterval(() => this.tick(), intervalMs)

@@ -1,85 +1,106 @@
 /**
  * The per-surface encoding policy (see "Encoding policy" in ROADMAP.md). Pure, no Node or native dependencies.
  *
- * A surface is either in fast mode (whole surface as H.264 video, damage only decides whether a frame is sent) or in
- * slow mode (lossless PNG patches of the damaged areas). Which one follows from how many pixels it changes per second.
+ * A surface has a priority class: normal, or streaming when it is relentless (it keeps sending new data before its old
+ * data has gone out). Whether a surface is sent as video or as PNG patches is decided separately, by the surface
+ * encoder (video only for streaming surfaces, with a hardware encoder, when the surface isn't small).
  */
 import { boundingBox, clip, disjoint, Rect, splitRect, subtract } from './region.js'
 
-export type EncodingMode = 'fast' | 'slow'
+export type SurfaceClass = 'normal' | 'streaming'
 
-/** Length of the sliding period the changed pixels per second are measured over. */
-export const MEASURE_PERIOD_MS = 1500
-/** Slow -> fast above this many changed pixels per second. */
-export const FAST_ABOVE_PIXELS_PER_SECOND = 1_500_000
-/** Fast -> slow below this many changed pixels per second. */
-export const SLOW_BELOW_PIXELS_PER_SECOND = 500_000
-/**
- * New surfaces start in fast mode and stay in it at least this long, so the first decision is based on some data
- * (their first frame alone is always ignored as the largest damage).
- */
-export const INITIAL_FAST_MS = 300
+/** The backlog fraction is measured over this sliding period. A surface younger than this can't be promoted. */
+export const CLASS_PERIOD_MS = 1500
+/** Normal -> streaming when the share of the period spent backlogged is at least this. */
+export const PROMOTE_FRACTION = 0.85
+/** Streaming -> normal once the fraction has stayed below this ... */
+export const DEMOTE_FRACTION = 0.4
+/** ... for this long without interruption. */
+export const DEMOTE_HOLD_MS = 2000
 /** Max pixels per PNG patch, larger areas are split. */
 export const MAX_PATCH_PIXELS = 64 * 1024
 /** A commit's damage in more pieces than this is sent as its bounding box instead (fewer, larger patches). */
 export const MAX_PATCH_RECTS = 32
 
 /**
- * Changed pixels per second of one surface over a sliding period. The single largest damage within the period is
- * ignored, so a one-off full repaint (a new window, an app switching to another view) doesn't make a surface look busy,
- * and every quiet surface can make an occasional large update.
+ * Measures how relentless a surface is: the share of the last period it spent backlogged (committing new damage while
+ * earlier damage hasn't gone out yet, see SurfaceEncoder), and decides its class from that. Times are in ms.
  */
-export class DamageMeter {
-  private samples: { time: number; pixels: number }[] = []
+export class RelentlessMeter {
+  /** finished backlogged intervals within (or just before) the period, oldest first */
+  private intervals: { start: number; end: number }[] = []
+  private backloggedSince?: number
+  private belowSince?: number
+  private _class: SurfaceClass = 'normal'
 
   /**
-   * @param startTime when the surface appeared: until a full period has passed, the rate is measured over the time
-   * since then instead (but at least INITIAL_FAST_MS), so a young surface isn't judged by mostly empty history.
+   * @param startTime when the surface appeared; it can't be promoted before one whole period has passed
    */
   constructor(
     private readonly startTime = -Infinity,
-    private readonly periodMs = MEASURE_PERIOD_MS,
+    private readonly periodMs = CLASS_PERIOD_MS,
   ) {}
 
-  record(time: number, pixels: number): void {
-    if (pixels > 0) {
-      this.samples.push({ time, pixels })
+  get surfaceClass(): SurfaceClass {
+    return this._class
+  }
+
+  get backlogged(): boolean {
+    return this.backloggedSince !== undefined
+  }
+
+  /** Idempotent: nothing changes if the surface is backlogged already. */
+  markBackloggedStart(now: number): void {
+    this.backloggedSince ??= now
+  }
+
+  /** Idempotent. */
+  markBackloggedEnd(now: number): void {
+    if (this.backloggedSince !== undefined) {
+      this.intervals.push({ start: this.backloggedSince, end: now })
+      this.backloggedSince = undefined
     }
   }
 
-  pixelsPerSecond(now: number): number {
-    const since = now - this.periodMs
-    this.samples = this.samples.filter((sample) => sample.time > since)
-    let sum = 0
-    let largest = 0
-    for (const { pixels } of this.samples) {
-      sum += pixels
-      largest = Math.max(largest, pixels)
+  /** The share (0 to 1) of the last period that was spent backlogged. */
+  fraction(now: number): number {
+    const from = now - this.periodMs
+    this.intervals = this.intervals.filter((interval) => interval.end > from)
+    let backlogged = 0
+    for (const { start, end } of this.intervals) {
+      backlogged += end - Math.max(start, from)
     }
-    const measuredMs = Math.min(this.periodMs, Math.max(INITIAL_FAST_MS, now - this.startTime))
-    return ((sum - largest) * 1000) / measuredMs
+    if (this.backloggedSince !== undefined) {
+      backlogged += now - Math.max(this.backloggedSince, from)
+    }
+    return Math.min(1, Math.max(0, backlogged / this.periodMs))
+  }
+
+  /**
+   * Decide the class at `now` (called on every commit and on a regular tick). Returns the (possibly new) class.
+   */
+  evaluate(now: number): SurfaceClass {
+    const fraction = this.fraction(now)
+    if (this._class === 'normal') {
+      if (now - this.startTime >= this.periodMs && fraction >= PROMOTE_FRACTION) {
+        this._class = 'streaming'
+        this.belowSince = undefined
+      }
+    } else if (fraction < DEMOTE_FRACTION) {
+      this.belowSince ??= now
+      if (now - this.belowSince >= DEMOTE_HOLD_MS) {
+        this._class = 'normal'
+        this.belowSince = undefined
+      }
+    } else {
+      this.belowSince = undefined
+    }
+    return this._class
   }
 }
 
 /**
- * The mode a surface should be in, with hysteresis between the two thresholds.
- */
-export function nextMode(
-  current: EncodingMode,
-  pixelsPerSecond: number,
-  thresholds = { fastAbove: FAST_ABOVE_PIXELS_PER_SECOND, slowBelow: SLOW_BELOW_PIXELS_PER_SECOND },
-): EncodingMode {
-  if (current === 'fast' && pixelsPerSecond < thresholds.slowBelow) {
-    return 'slow'
-  }
-  if (current === 'slow' && pixelsPerSecond > thresholds.fastAbove) {
-    return 'fast'
-  }
-  return current
-}
-
-/**
- * The patches to queue for new damage in slow mode.
+ * The patches to queue for new damage.
  *
  * `queued` are patches that are queued but whose pixels haven't been read yet: they will pick up the latest content
  * when they are encoded, so the parts of the damage they cover are left out (possibly all of it). Patches that already

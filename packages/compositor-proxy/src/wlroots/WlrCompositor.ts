@@ -5,14 +5,15 @@
  */
 import type * as WlrCoreAddon from '../addons/wlr-core-addon'
 import { createLogger } from '../Logger.js'
-import { ProcessingDuration, scheduleFrameCallback } from '../FramePacing.js'
+import { scheduleFrameCallback } from '../FramePacing.js'
 import { EncoderPool } from '../encoding/EncoderPool.js'
 import { EncodingContext, EncodingSink, SurfaceEncoder, SurfaceHost } from '../encoding/SurfaceEncoder.js'
 import { encodePng } from '../encoding/png.js'
+import { StreamingPngPool } from '../encoding/StreamingEncoder.js'
 import { Rect } from '../encoding/region.js'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
 import { ControlMessage } from '../viewer/ViewerTransport.js'
-import type { Patch, SceneRect, SceneSurface, SceneWindow } from '@gfld/scene-protocol'
+import type { SceneRect, SceneSurface, SceneWindow } from '@gfld/scene-protocol'
 import { EvDevKeyCode } from './keys.js'
 import { Apps } from './Apps.js'
 import { X11Windows } from './X11.js'
@@ -24,7 +25,8 @@ const logger = createLogger('wlroots')
 /** GFLD_WLR_TRACE=1: log wlroots events and viewer messages */
 const TRACE = process.env.GFLD_WLR_TRACE === '1'
 
-type H264Encoder = 'x264' | 'nvh264' | 'vaapih264'
+/** The hardware video encoders; without one (`undefined`) everything is sent as PNG patches. */
+type H264Encoder = 'nvh264' | 'vaapih264'
 
 /** The native core (native/wlr-core), injectable so the policy can be tested without wlroots. */
 export type WlrNative = Omit<typeof WlrCoreAddon, 'create'> & {
@@ -116,7 +118,6 @@ type Surface = {
   input?: SceneRect[]
   buffer?: { width: number; height: number; contentSerial: number }
   encoder?: SurfaceEncoder<WlrEncoder>
-  processing: ProcessingDuration
   frameScheduled: boolean
 }
 
@@ -138,8 +139,8 @@ type Window = {
 
 const inactiveSink: EncodingSink = {
   active: false,
-  sendFrame: () => undefined,
-  sendPatch: (_surface: string, _patch: Patch, done: (sent: boolean) => void) => done(false),
+  sendFrame: (_surface, _frame, _class, done) => done(false),
+  sendPatch: (_surface, _patch, _class, done) => done(false),
   requireKeyFrame: () => undefined,
   dropPatches: () => undefined,
 }
@@ -175,7 +176,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private constraint?: { sid: number; confined: boolean }
 
   constructor(
-    config: { h264Encoder: H264Encoder; videoStreams: number },
+    config: { h264Encoder?: H264Encoder; videoStreams: number },
     private readonly wlr: WlrNative,
     watchFd: FdWatcher,
     /** where files dropped from the user's computer are saved */
@@ -186,14 +187,22 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       get active() {
         return currentSink().active
       },
-      sendFrame: (surface, frame) => this.sink.sendFrame(surface, frame),
-      sendPatch: (surface, patch, done) => this.sink.sendPatch(surface, patch, done),
+      sendFrame: (surface, frame, surfaceClass, done) => this.sink.sendFrame(surface, frame, surfaceClass, done),
+      sendPatch: (surface, patch, surfaceClass, done) => this.sink.sendPatch(surface, patch, surfaceClass, done),
       requireKeyFrame: (surface) => this.sink.requireKeyFrame(surface),
       dropPatches: (surface) => this.sink.dropPatches(surface),
     }
-    const pool = new EncoderPool(() => new WlrEncoder(wlr, config.h264Encoder), config.videoStreams)
+    // without a hardware encoder the pool has size 0 and no video encoder is ever created; one that fails to create is
+    // reported once and the pool then behaves the same
+    const h264Encoder = config.h264Encoder
+    const pool = new EncoderPool<WlrEncoder>(
+      () => new WlrEncoder(wlr, h264Encoder!),
+      h264Encoder ? config.videoStreams : 0,
+      (error) => logger.error(`Video encoder ${h264Encoder} is unavailable (${error.message}), sending PNG patches only.`),
+    )
     pool.warm()
-    this.encoding = new EncodingContext(forwardingSink, pool, encodePng, logger)
+    const streamingPool = new StreamingPngPool(logger)
+    this.encoding = new EncodingContext(forwardingSink, pool, { normal: encodePng, streaming: streamingPool }, logger)
     this.encoding.startTicking()
 
     this.clipboard = new Clipboard((text) => this.wlr.setClipboardText(text))
@@ -261,7 +270,6 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
           mapped: false,
           width: 0,
           height: 0,
-          processing: new ProcessingDuration(),
           frameScheduled: false,
         })
         this.sids.set(key, sid)
@@ -446,7 +454,6 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     if (surface === undefined) {
       return
     }
-    const commitTimestamp = performance.now()
     surface.width = width
     surface.height = height
     surface.input = inputRegion(input, width, height)
@@ -468,19 +475,21 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
           height: bufferDamage[i + 3],
         })
       }
-      void this.encoderOf(surface)
-        .commit(damage)
-        .then(() => surface.processing.record(commitTimestamp))
+      void this.encoderOf(surface).commit(damage)
     }
 
     if (hasFrameCallbacks && !surface.frameScheduled) {
       surface.frameScheduled = true
-      scheduleFrameCallback(surface.processing.average, (time) => {
-        surface.frameScheduled = false
-        if (this.surfaces.get(sid) === surface) {
-          this.wlr.sendFrameDone(sid, time)
-        }
-      })
+      // held while the surface has no free slot: an app slows down to what can be sent
+      scheduleFrameCallback(
+        () => surface.encoder?.hasFreeSlot ?? true,
+        (time) => {
+          surface.frameScheduled = false
+          if (this.surfaces.get(sid) === surface) {
+            this.wlr.sendFrameDone(sid, time)
+          }
+        },
+      )
     }
     this.scheduleScene()
   }
@@ -1084,7 +1093,7 @@ function inputRegion(rects: Int32Array, width: number, height: number): SceneRec
 }
 
 /** Start the session's Wayland side on wlroots, with its app processes. */
-export function startWlrootsCompositor(config: { h264Encoder: H264Encoder; videoStreams?: number }): {
+export function startWlrootsCompositor(config: { h264Encoder?: H264Encoder; videoStreams?: number }): {
   viewerHost: ViewerHost
   compositor: WlrCompositor
   apps: Apps

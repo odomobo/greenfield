@@ -66,10 +66,16 @@ export class ViewerHost {
       get active() {
         return isAttached()
       },
-      sendFrame: (surfaceKey, frame) => this.transport?.send({ priority: 'frame', surface: surfaceKey, frame }),
-      sendPatch: (surfaceKey, patch, done) => {
+      sendFrame: (surfaceKey, frame, surfaceClass, done) => {
         if (this.transport) {
-          this.transport.send({ priority: 'patch', surface: surfaceKey, patch, done })
+          this.transport.send({ priority: 'frame', surface: surfaceKey, frame, surfaceClass, done })
+        } else {
+          done(false)
+        }
+      },
+      sendPatch: (surfaceKey, patch, surfaceClass, done) => {
+        if (this.transport) {
+          this.transport.send({ priority: 'patch', surface: surfaceKey, patch, surfaceClass, done })
         } else {
           done(false)
         }

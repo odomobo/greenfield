@@ -1,61 +1,171 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  DamageMeter,
-  FAST_ABOVE_PIXELS_PER_SECOND,
-  INITIAL_FAST_MS,
+  CLASS_PERIOD_MS,
+  DEMOTE_FRACTION,
+  DEMOTE_HOLD_MS,
   MAX_PATCH_PIXELS,
-  MEASURE_PERIOD_MS,
-  nextMode,
   planPatches,
-  SLOW_BELOW_PIXELS_PER_SECOND,
+  PROMOTE_FRACTION,
+  RelentlessMeter,
 } from '../policy.js'
 import { area, Rect } from '../region.js'
 
 const r = (x: number, y: number, width: number, height: number): Rect => ({ x, y, width, height })
 
-test('the single largest damage in the period is ignored', () => {
-  const meter = new DamageMeter()
-  meter.record(0, 2_000_000)
-  assert.equal(meter.pixelsPerSecond(100), 0, 'one full repaint alone is not busy')
-  meter.record(200, 1000)
-  meter.record(300, 1000)
-  // 2M ignored, 2000 px over the period
-  assert.equal(meter.pixelsPerSecond(400), (2000 * 1000) / MEASURE_PERIOD_MS)
-  // the others count: a few full repaints per period are busy
-  meter.record(500, 2_000_000)
-  meter.record(550, 2_000_000)
-  assert.ok(meter.pixelsPerSecond(600) > FAST_ABOVE_PIXELS_PER_SECOND)
-})
-
-test('damage older than the period is forgotten', () => {
-  const meter = new DamageMeter()
-  for (let t = 0; t < 1000; t += 16) {
-    meter.record(t, 500_000)
+/**
+ * Drives a meter like a surface would: a clock, backlogged intervals, and an evaluation every 50 ms (commits and the
+ * 200 ms tick).
+ */
+function clock(meter: RelentlessMeter, start = 0) {
+  let now = start
+  return {
+    get now() {
+      return now
+    },
+    /** advance by `ms`, evaluating every 50 ms; `backlogged` is whether the surface is backlogged throughout */
+    run(ms: number, backlogged: boolean) {
+      const end = now + ms
+      if (backlogged) {
+        meter.markBackloggedStart(now)
+      } else {
+        meter.markBackloggedEnd(now)
+      }
+      while (now < end) {
+        now = Math.min(end, now + 50)
+        meter.evaluate(now)
+      }
+    },
   }
-  assert.ok(meter.pixelsPerSecond(1000) > FAST_ABOVE_PIXELS_PER_SECOND)
-  assert.equal(meter.pixelsPerSecond(1000 + MEASURE_PERIOD_MS), 0)
+}
+
+test('the fraction is the share of the last period spent backlogged', () => {
+  const meter = new RelentlessMeter()
+  assert.equal(meter.fraction(1000), 0)
+  meter.markBackloggedStart(1000)
+  assert.equal(meter.fraction(1000 + CLASS_PERIOD_MS / 2), 0.5)
+  meter.markBackloggedEnd(1000 + CLASS_PERIOD_MS / 2)
+  assert.equal(meter.fraction(1000 + CLASS_PERIOD_MS), 0.5)
+  // it slides: half of the backlogged time is out of the period now
+  assert.equal(meter.fraction(1000 + CLASS_PERIOD_MS + CLASS_PERIOD_MS / 4), 0.25)
+  assert.equal(meter.fraction(1000 + 3 * CLASS_PERIOD_MS), 0)
 })
 
-test('a young surface is measured over its age, but at least INITIAL_FAST_MS', () => {
-  const meter = new DamageMeter(1000)
-  meter.record(1000, 100) // largest, ignored
-  meter.record(1050, 30)
-  meter.record(1100, 30)
-  assert.equal(meter.pixelsPerSecond(1100), (60 * 1000) / INITIAL_FAST_MS)
-  assert.equal(meter.pixelsPerSecond(1000 + 600), (60 * 1000) / 600)
-  assert.equal(meter.pixelsPerSecond(1000 + MEASURE_PERIOD_MS - 1), (60 * 1000) / (MEASURE_PERIOD_MS - 1))
-  // older than a period: measured over the period, 1000 and 1050 have dropped out, 2400 is the largest
-  meter.record(2400, 100)
-  assert.equal(meter.pixelsPerSecond(2560), (30 * 1000) / MEASURE_PERIOD_MS)
+test('start and end are idempotent', () => {
+  const meter = new RelentlessMeter()
+  meter.markBackloggedStart(0)
+  meter.markBackloggedStart(500)
+  meter.markBackloggedEnd(1000)
+  meter.markBackloggedEnd(1200)
+  assert.equal(meter.fraction(CLASS_PERIOD_MS), 1000 / CLASS_PERIOD_MS)
 })
 
-test('mode switches with hysteresis', () => {
-  const between = (FAST_ABOVE_PIXELS_PER_SECOND + SLOW_BELOW_PIXELS_PER_SECOND) / 2
-  assert.equal(nextMode('fast', between), 'fast')
-  assert.equal(nextMode('slow', between), 'slow')
-  assert.equal(nextMode('fast', SLOW_BELOW_PIXELS_PER_SECOND - 1), 'slow')
-  assert.equal(nextMode('slow', FAST_ABOVE_PIXELS_PER_SECOND + 1), 'fast')
+test('a one-off big repaint stays normal', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(5000, false)
+  // the repaint takes 300 ms to go out, no new commits meanwhile
+  time.run(300, false)
+  time.run(5000, false)
+  assert.equal(meter.surfaceClass, 'normal')
+})
+
+test('a surface that commits while its patches queue is promoted once a whole period has passed', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(CLASS_PERIOD_MS - 50, true)
+  assert.equal(meter.surfaceClass, 'normal', 'not before CLASS_PERIOD_MS of age, however backlogged')
+  time.run(50, true)
+  assert.equal(meter.surfaceClass, 'streaming')
+})
+
+test('promotion is within about a period for a surface backlogged from its first commit', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(100, false) // not backlogged until its second commit
+  time.run(CLASS_PERIOD_MS, true)
+  // backlogged for (period - 100) ms of the last period is only 0.93 of it: promoted
+  assert.equal(meter.surfaceClass, 'streaming')
+  assert.ok(meter.fraction(time.now) >= PROMOTE_FRACTION)
+})
+
+test('a throttled surface stays streaming: it is backlogged however slowly it is allowed to draw', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(3000, true)
+  assert.equal(meter.surfaceClass, 'streaming')
+  // drains for a moment between frames (10%), still far above the demotion threshold
+  for (let i = 0; i < 20; i++) {
+    time.run(450, true)
+    time.run(50, false)
+  }
+  assert.equal(meter.surfaceClass, 'streaming')
+})
+
+test('a needy surface that drains between its commits stays normal', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  // 60 commits a second, each takes about 5 ms to go out: backlogged a third of the time at most
+  for (let i = 0; i < 300; i++) {
+    time.run(5, true)
+    time.run(11, false)
+  }
+  assert.equal(meter.surfaceClass, 'normal')
+  assert.ok(meter.fraction(time.now) < PROMOTE_FRACTION)
+})
+
+test('a surface above the demotion fraction is not demoted, however long', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(2000, true)
+  assert.equal(meter.surfaceClass, 'streaming')
+  // backlogged 60% of the time: between the thresholds
+  for (let i = 0; i < 40; i++) {
+    time.run(450, true)
+    time.run(300, false)
+  }
+  assert.ok(meter.fraction(time.now) > DEMOTE_FRACTION)
+  assert.equal(meter.surfaceClass, 'streaming')
+})
+
+test('demotion needs DEMOTE_HOLD_MS below the fraction without interruption', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(2000, true)
+  assert.equal(meter.surfaceClass, 'streaming')
+  time.run(0, false)
+  // the fraction falls below DEMOTE_FRACTION after (1 - 0.4) of a period, then the hold starts
+  const below = CLASS_PERIOD_MS * (1 - DEMOTE_FRACTION)
+  // the hold has run for about half of DEMOTE_HOLD_MS
+  time.run(below + DEMOTE_HOLD_MS / 2, false)
+  assert.equal(meter.surfaceClass, 'streaming', 'still holding')
+  // an interruption: backlogged again long enough to lift the fraction over the threshold resets the hold
+  time.run(1000, true)
+  time.run(0, false)
+  // the backlog starts to slide out of the period 500 ms after it ended, and the fraction is below the threshold
+  // 400 ms later
+  time.run(900 + DEMOTE_HOLD_MS - 600, false)
+  assert.equal(meter.surfaceClass, 'streaming', 'the hold restarted')
+  time.run(800, false)
+  assert.equal(meter.surfaceClass, 'normal')
+})
+
+test('demotion takes DEMOTE_HOLD_MS after the fraction fell below the threshold', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(2000, true)
+  const end = time.now
+  time.run(0, false)
+  let demotedAt: number | undefined
+  while (time.now < end + 10_000 && demotedAt === undefined) {
+    time.run(50, false)
+    if (meter.surfaceClass === 'normal') {
+      demotedAt = time.now
+    }
+  }
+  assert.ok(demotedAt !== undefined)
+  const belowSince = end + CLASS_PERIOD_MS * (1 - DEMOTE_FRACTION)
+  assert.ok(demotedAt - belowSince >= DEMOTE_HOLD_MS && demotedAt - belowSince < DEMOTE_HOLD_MS + 100)
 })
 
 test('planPatches leaves out damage that a queued patch will pick up', () => {
