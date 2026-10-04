@@ -202,6 +202,12 @@ export class Renderer {
     return this.textures.has(surface)
   }
 
+  /** The size of a surface's content (the app's buffer, in pixels, whatever size the surface is drawn at). */
+  contentSize(surface: string): { width: number; height: number } | undefined {
+    const texture = this.textures.get(surface)
+    return texture && { width: texture.width, height: texture.height }
+  }
+
   /**
    * Upload a decoded frame as the new content of a surface.
    */

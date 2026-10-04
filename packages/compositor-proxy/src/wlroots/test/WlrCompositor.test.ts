@@ -30,6 +30,7 @@ class FakeCore {
   readonly clipboard: string[] = []
   /** startFileDrag, fileDragAccepted, dropFileDrag, cancelFileDrag and provideFiles calls */
   readonly fileDrag: string[] = []
+  readonly outputScales: number[] = []
   readonly toplevels = new Map<number, Toplevel>()
   readonly children = new Map<number, [number, number, number][]>()
 
@@ -42,6 +43,9 @@ class FakeCore {
     dispatch: () => undefined,
     setOutputSize: (width, height) => {
       this.outputSizes.push([width, height])
+    },
+    setOutputScale: (scale) => {
+      this.outputScales.push(scale)
     },
     pointerMotion: (sid, sx, sy) => {
       this.motions.push([sid, sx, sy])
@@ -295,6 +299,7 @@ test('maximizing configures the output size, and again when the output changes',
   assert.deepEqual(core.outputSizes[core.outputSizes.length - 1], [800, 600])
   assert.deepEqual(lastConfigure(1), { sid: 1, width: 800, height: 600, state: { maximized: true } })
   assert.equal(compositor.viewerScale, 2)
+  assert.equal(core.outputScales[core.outputScales.length - 1], 2)
 
   compositor.handleMessage({ type: 'window.maximize', window: '1/1', maximized: false })
   assert.deepEqual(lastConfigure(1), { sid: 1, width: 0, height: 0, state: { maximized: false } })
@@ -507,6 +512,40 @@ test('cursors: the app’s surface, a named shape, or hidden', () => {
     { type: 'cursor', kind: 'named', name: 'text' },
     { type: 'cursor', kind: 'hidden' },
   ])
+})
+
+test('HiDPI: the scene stays logical when an app commits a buffer at the viewer’s scale', async () => {
+  compositor.handleMessage({ type: 'output', width: 1000, height: 700, scale: 2 })
+  assert.equal(core.outputScales[core.outputScales.length - 1], 2)
+  core.newWindow(1, { width: 100, height: 80 })
+  // a 200x160 buffer at buffer scale 2: logical size 100x80
+  core.onEvent('surface-commit', 1, true, true, 200, 160, new Int32Array([0, 0, 200, 160]), 100, 80, new Int32Array([0, 0, 100, 80]), false)
+  await flush()
+  const surface = windowsOf(lastScene())[0].surfaces[0]
+  assert.deepEqual([surface.width, surface.height], [100, 80])
+  assert.equal(surface.input, undefined)
+})
+
+test('HiDPI: a cursor surface is sent with its logical size, again when it changes', () => {
+  core.newWindow(1)
+  core.onEvent('surface-new', 5, '1/5')
+  core.onEvent('cursor-surface', 5, 3, 4)
+  const cursors = () => sent.filter((message) => message.type === 'cursor')
+  // no commit yet: the size is unknown, the viewer falls back to the image's
+  assert.equal(cursors()[cursors().length - 1].size, undefined)
+  // a 48x48 image at scale 2
+  core.onEvent('surface-commit', 5, true, true, 48, 48, new Int32Array([0, 0, 48, 48]), 24, 24, new Int32Array(), false)
+  assert.deepEqual(cursors()[cursors().length - 1], {
+    type: 'cursor',
+    kind: 'surface',
+    surface: '1/5',
+    hotspot: { x: 3, y: 4 },
+    size: { width: 24, height: 24 },
+  })
+  // the same size again: nothing new
+  const count = cursors().length
+  core.onEvent('surface-commit', 5, true, true, 48, 48, new Int32Array([0, 0, 48, 48]), 24, 24, new Int32Array(), false)
+  assert.equal(cursors().length, count)
 })
 
 test('Wayland clients are reported with their process', () => {

@@ -221,10 +221,40 @@ Wave 3 D (polish):
   client with a token may do it: no focus-stealing prevention), xdg-output (one output at the origin, an
   `wlr_output_layout` that exists only for it).
 
+### HiDPI (output scale, `wp_fractional_scale_v1`)
+
+- **Logical vs buffer size.** The output's logical size is the viewer's CSS size; its scale is `ceil(viewer scale)` and
+  its mode is the logical size times that integer (what `wl_output` shows legacy clients: mode / scale = logical).
+  The exact scale (1.5, 1.25) only goes through `wp_fractional_scale_v1` (clients then need `wp_viewporter`: buffer size
+  = round(logical * scale), viewport destination = logical). `setOutputScale` also sets every surface's preferred buffer
+  scale. wlroots' `current.width/height` are already logical (buffer / scale, or the viewport destination), so the
+  commit report's logical size and the scene stay in CSS pixels, while `buffer->width/height` and the damage
+  (`buffer_damage`) are in buffer pixels: patches and video frames are the full-resolution buffer, and the viewer draws
+  that texture into the logical rectangle (no protocol field for the buffer size was needed).
+- **No output layout means no `wl_surface.enter`**: wlroots only enters surfaces into outputs through a scene or by hand.
+  Without an enter, GTK and Qt never learn the output's scale, so `handle_new_surface` calls `wlr_surface_send_enter`.
+  The scale is also stored for the surface before the client asks for its `wp_fractional_scale_v1` object
+  (`wlr_fractional_scale_v1_notify_scale` creates a placeholder, and the client's object gets the value when created).
+- **xdg-output** (`wlr_xdg_output_manager_v1` with a layout holding the output) is needed on a scaled output: without
+  it Xwayland sizes the X11 screen by the physical mode (2560x1520 at scale 2, so X11 apps think the screen is twice as
+  large as the viewer's desktop).
+- **X11 apps stay at 1x** (wlroots 0.17 Xwayland isn't started with `-hidpi`): their surfaces commit buffer scale 1, the
+  viewer upscales them (blurry at a ratio above 1, but correctly sized and positioned). Making them sharp needs
+  Xwayland's own scaling support, which isn't in wlroots 0.17.
+- **A ratio change from the browser**: the viewer sends `output` with the new scale. Its `matchMedia` change listener
+  doesn't fire under Playwright's `Emulation.setDeviceMetricsOverride`, so the viewer also compares the ratio on the
+  window's `resize` event (real browsers fire it for zoom and monitor changes). The e2e driver's `scale` command
+  emulates the change this way (CDP override, session kept open, then a `resize` event).
+- **Cursors**: a client cursor surface is rendered at the scale too (its image is larger than its logical size), so the
+  `cursor` message carries the surface's logical `size` (re-sent when a commit changes it) and the viewer draws the
+  image at that size. Hotspots are logical.
+- Checked: foot (native fractional scale + viewporter) at 1, 1.5 and 2 (`scripts/e2e/hidpi.sh`), xev/xfontsel at 2.
+  Unchecked: GTK, Qt and Chromium/Firefox on Wayland (legacy integer scale paths and `wl_surface.preferred_buffer_scale`).
+
 ## Not done yet (later waves of the migration)
 
-Clipboard images and files (only text crosses to the browser), drag and drop with X11 apps (untested), telling apps the output
-scale, GPU (dmabuf) buffers. Server-owned window state with sequence numbers (wave 2 A).
+Clipboard images and files (only text crosses to the browser), drag and drop with X11 apps (untested), sharp X11 apps
+on HiDPI (Xwayland stays 1x in wlroots 0.17), GPU (dmabuf) buffers (wave 4).
 
 X11 specifically, not done: X11 apps without their own decorations (xev, xterm) can be moved only with the window menu's
 Move (taskbar button or preview card), until the viewer has title bars of its own (ROADMAP.md, decorations); X11 apps started from a terminal

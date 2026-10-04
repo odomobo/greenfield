@@ -6,6 +6,21 @@ import type { SceneSurface, SceneWindow } from './protocol'
 export type Rect = { x: number; y: number; width: number; height: number }
 
 /**
+ * Where a client cursor image is drawn: its hotspot on the pointer, in output (CSS) pixels. The size is the surface's
+ * logical size when the server told it (an app rendering at the viewer's scale has an image larger than that), the
+ * size of the image otherwise.
+ */
+export function cursorRect(
+  pointer: { x: number; y: number },
+  hotspot: { x: number; y: number },
+  logicalSize: { width: number; height: number } | undefined,
+  imageSize: { width: number; height: number } | undefined,
+): Rect | undefined {
+  const size = logicalSize ?? imageSize
+  return size && { x: pointer.x - hotspot.x, y: pointer.y - hotspot.y, width: size.width, height: size.height }
+}
+
+/**
  * Whether a surface takes pointer input at a surface local point: inside the surface and inside its input region (if
  * it has one; without one the whole surface does).
  */

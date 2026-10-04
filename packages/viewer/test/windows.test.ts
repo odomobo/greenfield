@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import type { SceneSurface, SceneWindow } from '../src/protocol.js'
-import { acceptsInput, mapRect, rootWindow, stackChildrenAboveParents } from '../src/windows.js'
+import { acceptsInput, cursorRect, mapRect, rootWindow, stackChildrenAboveParents } from '../src/windows.js'
 
 function surface(input?: SceneSurface['input']): SceneSurface {
   return { id: 'c/1', x: 0, y: 0, width: 100, height: 80, input }
@@ -127,5 +127,17 @@ describe('mapRect', () => {
       width: 200,
       height: 100,
     })
+  })
+})
+
+describe('cursorRect', () => {
+  it('draws the image at its size, or at the logical size when it is larger (HiDPI)', () => {
+    const pointer = { x: 100, y: 50 }
+    const hotspot = { x: 4, y: 6 }
+    const image = { width: 24, height: 24 }
+    assert.deepEqual(cursorRect(pointer, hotspot, undefined, image), { x: 96, y: 44, width: 24, height: 24 })
+    const larger = { width: 48, height: 48 }
+    assert.deepEqual(cursorRect(pointer, hotspot, image, larger), { x: 96, y: 44, width: 24, height: 24 })
+    assert.equal(cursorRect(pointer, hotspot, undefined, undefined), undefined)
   })
 })
