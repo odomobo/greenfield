@@ -18,6 +18,8 @@ declare namespace wlrCore {
    *   toplevel-request-maximize(sid, maximized), toplevel-request-fullscreen(sid, fullscreen),
    *   toplevel-request-minimize(sid)
    * - cursor-surface(sid | 0, hotspotX, hotspotY), cursor-shape(name)
+   * - drag-start(iconSid | 0), drag-icon(iconSid | 0, x, y) (the icon's offset from the pointer), drag-end(): a drag of
+   *   a remote app (the seat's pointer drag)
    * - clipboard-text(text): an app set the clipboard selection (not one we set from the browser); its text
    * - x11-geometry(sid): an X11 override-redirect window (menu, tooltip) moved, the window it belongs to changed
    *

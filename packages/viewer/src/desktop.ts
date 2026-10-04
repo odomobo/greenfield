@@ -85,6 +85,8 @@ export class Desktop {
   private readonly decoders = new Map<string, SurfaceDecoder>()
   private readonly keyFrameRequested = new Set<string>()
   private cursor: Cursor = { kind: 'default' }
+  /** a drag and drop between remote apps is going on (the server says so), with its icon surface */
+  private drag?: { icon?: { surface: string; x: number; y: number } }
   private readonly animations = new Map<string, WindowAnimation>()
   /** geometry of windows before they were maximized, to animate back to */
   private readonly restoreRects = new Map<string, Rect>()
@@ -210,6 +212,13 @@ export class Desktop {
         hasContent: window.surfaces.every((surface) => this.renderer.hasContent(surface.id)),
       }
     })
+  }
+
+  /** The drag and drop going on between remote apps (and whether its icon has content). For tests. */
+  debugDrag(): { icon?: { surface: string; x: number; y: number; width: number; height: number } } | null {
+    const icon = this.drag?.icon
+    const size = icon && this.frameSizes.get(icon.surface)
+    return this.drag ? { icon: icon && size && { ...icon, ...size } } : null
   }
 
   /** The output size the viewer reports. For tests. */
@@ -552,6 +561,10 @@ export class Desktop {
       case 'clipboard':
         this.clipboard.remoteText(message.text)
         break
+      case 'drag':
+        this.drag = message.active ? { icon: message.icon } : undefined
+        this.scheduleRender()
+        break
       case 'cursor':
         this.cursor = message
         this.applyCursor()
@@ -703,7 +716,7 @@ export class Desktop {
     // also covers positions chosen by the server or client (e.g. dialogs) and windows coming back after a reattach
     this.keepWindowsVisible()
     // Content of surfaces that are gone. The cursor surface isn't part of any window.
-    const cursorSurface = this.cursor.kind === 'surface' ? this.cursor.surface : undefined
+    const cursorSurface = this.cursor.kind === 'surface' ? this.cursor.surface : this.drag?.icon?.surface
     for (const surface of [...this.decoders.keys()]) {
       if (!surfaces.has(surface) && surface !== cursorSurface && !this.isLiveSurface(surface)) {
         this.decoders.get(surface)?.close()
@@ -878,6 +891,16 @@ export class Desktop {
         })
       }
     }
+    const icon = this.drag?.icon
+    const iconSize = icon && this.cursorSize(icon.surface)
+    if (icon && iconSize) {
+      this.renderer.drawSurface(icon.surface, {
+        x: this.pointer.x + icon.x,
+        y: this.pointer.y + icon.y,
+        width: iconSize.width,
+        height: iconSize.height,
+      })
+    }
   }
 
   /**
@@ -952,7 +975,8 @@ export class Desktop {
   }
 
   private target(point: Point, time: number) {
-    const pick = this.grab ? this.grabTarget(point) : this.pick(point)
+    // (a drag and drop goes to whatever is under the pointer, not to the surface the press started on)
+    const pick = this.grab && !this.drag ? this.grabTarget(point) : this.pick(point)
     return {
       surface: pick?.surface ?? null,
       sx: pick?.sx,
@@ -971,7 +995,7 @@ export class Desktop {
 
     canvas.addEventListener('pointermove', (event) => {
       this.pointer = point(event)
-      if (this.cursor.kind === 'surface') {
+      if (this.cursor.kind === 'surface' || this.drag?.icon) {
         this.scheduleRender()
       }
       if (this.interaction) {

@@ -147,6 +147,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private active = 0
   private pageFocused = true
   private contentSerial = 0
+  /** a drag and drop between remote apps is going on; its icon surface */
+  private drag?: { icon?: { sid: number; x: number; y: number } }
   private output = { width: 1280, height: 720 }
   private lastSceneJSON = ''
   private sceneScheduled = false
@@ -343,6 +345,21 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       case 'cursor-shape':
         this.send?.({ type: 'cursor', kind: 'named', name: args[0] })
         break
+      case 'drag-start':
+        this.drag = { icon: args[0] ? { sid: args[0], x: 0, y: 0 } : undefined }
+        this.send?.({ type: 'cursor', kind: 'named', name: 'grabbing' })
+        this.sendDrag()
+        break
+      case 'drag-icon':
+        if (this.drag) {
+          this.drag.icon = args[0] ? { sid: args[0], x: args[1], y: args[2] } : undefined
+          this.sendDrag()
+        }
+        break
+      case 'drag-end':
+        this.drag = undefined
+        this.sendDrag()
+        break
       case 'clipboard-text':
         this.clipboard.remoteText(args[0])
         break
@@ -519,6 +536,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   attach(send: (message: ControlMessage) => void): void {
     this.send = send
     this.clipboard.attach(send)
+    if (this.drag) {
+      this.sendDrag()
+    }
     this.lastSceneJSON = ''
     this.sendSceneIfChanged()
     send({ type: 'cursor', kind: 'default' })
@@ -529,6 +549,15 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.clipboard.detach()
     this.wlr.releaseAllKeys()
     this.wlr.keyboardFocus(0)
+  }
+
+  private sendDrag() {
+    const icon = this.drag?.icon
+    this.send?.({
+      type: 'drag',
+      active: this.drag !== undefined,
+      icon: icon && { surface: this.keyOf(icon.sid), x: icon.x, y: icon.y },
+    })
   }
 
   private scheduleScene() {

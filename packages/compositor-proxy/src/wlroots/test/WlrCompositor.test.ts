@@ -528,3 +528,28 @@ test('an app clipboard text goes to the viewer; viewer text becomes the selectio
   compositor.handleMessage({ type: 'clipboard', text: 'x'.repeat(5 * 1024 * 1024) })
   assert.deepEqual(core.clipboard, ['from the browser'])
 })
+
+test('a drag of a remote app tells the viewer, with its icon and where the icon sits', async () => {
+  core.newWindow(1)
+  core.newWindow(2)
+  const drags = () => sent.filter((message) => message.type === 'drag')
+  core.onEvent('drag-start', 2)
+  assert.deepEqual(drags(), [{ type: 'drag', active: true, icon: { surface: '1/2', x: 0, y: 0 } }])
+  // the icon's surface offset changed
+  core.onEvent('drag-icon', 2, -4, -6)
+  assert.deepEqual(drags()[1], { type: 'drag', active: true, icon: { surface: '1/2', x: -4, y: -6 } })
+  // a viewer that attaches in the middle of the drag hears about it
+  const late: ControlMessage[] = []
+  compositor.attach((message) => late.push(message))
+  assert.deepEqual(late.filter((message) => message.type === 'drag'), [drags()[1]])
+  core.onEvent('drag-icon', 0, 0, 0)
+  core.onEvent('drag-end')
+  const lateDrags = () => late.filter((message) => message.type === 'drag')
+  assert.equal(lateDrags()[lateDrags().length - 1].active, false)
+  assert.equal(lateDrags()[lateDrags().length - 1].icon, undefined)
+  // a drag without an icon
+  core.onEvent('drag-start', 0)
+  assert.deepEqual(lateDrags().slice(-1), [
+    { type: 'drag', active: true, icon: undefined },
+  ])
+})

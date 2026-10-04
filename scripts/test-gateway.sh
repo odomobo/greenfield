@@ -7,6 +7,7 @@
 #   scripts/e2e/desktop.sh   the desktop in a headless browser: sign-in, Apps menu, taskbar, notifications, window
 #                            management, surviving the browser and reattaching, session list, logging out;
 #   scripts/e2e/clipboard.sh the clipboard between the browser and a remote app (foot), both ways;
+#   scripts/e2e/dnd.sh       drag and drop between remote apps (a small test client built with gcc);
 #   scripts/e2e/x11.sh       X11 apps (XWayland) in a headless browser: their windows, input, menus, closing.
 #
 # Each can also be run on its own (they take GATEWAY_PORT). They start the gateway with --dev-auth --dev-time-scale,
@@ -16,7 +17,7 @@
 #
 #   scripts/test-gateway.sh
 # The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it and the next one, desktop
-# and x11 the ones two and four after it, clipboard six).
+# and x11 the ones two and four after it, clipboard six, dnd eight).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
@@ -26,7 +27,7 @@ START="$EPOCHREALTIME"
 pids=()
 names=()
 i=0
-for part in auth desktop x11 clipboard; do
+for part in auth desktop x11 clipboard dnd; do
   port=$((BASE_PORT + i * 2))
   i=$((i + 1))
   # prefix every line with the script's name; the exit status is the script's, not sed's
@@ -52,6 +53,6 @@ done
 seconds=$(((${EPOCHREALTIME/./} - ${START/./}) / 10000))
 printf 'all end-to-end scripts took %d.%02d s\n' $((seconds / 100)) $((seconds % 100))
 if [ "$status" = 0 ]; then
-  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming, logging out, X11 apps and the clipboard"
+  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming, logging out, X11 apps, the clipboard and drag and drop"
 fi
 exit "$status"

@@ -599,6 +599,7 @@ create(napi_env env, napi_callback_info info) {
     wl_signal_add(&core->seat->events.request_set_primary_selection, &core->request_set_primary_selection);
 
     clipboard_init(core);
+    dnd_init(core);
 
     core->cursor_shape_manager = wlr_cursor_shape_manager_v1_create(core->display, 1);
     core->request_set_shape.notify = handle_request_set_shape;

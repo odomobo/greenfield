@@ -104,6 +104,14 @@ export type ServerMessage =
    * most 4 MB. The viewer writes it to the browser's clipboard. Text only for now.
    */
   | { type: 'clipboard'; text: string }
+  /**
+   * A drag and drop between remote apps is going on (an app started it with a button held) or ended. While it goes on
+   * the pointer messages must name the surface under the pointer, not the one the press started on (the implicit
+   * grab doesn't apply), and the viewer shows the icon, if there is one: the content of surface `icon.surface` (a
+   * surface that isn't part of any window, like a cursor surface) with its top left at the pointer plus (x, y).
+   * Sent again when the icon changes.
+   */
+  | { type: 'drag'; active: boolean; icon?: { surface: string; x: number; y: number } }
   /** The client asked to start an interactive move/resize (xdg_toplevel.move/resize) during the current button press. */
   | { type: 'interactive'; mode: 'move'; window: string }
   | { type: 'interactive'; mode: 'resize'; window: string; edges: number }
