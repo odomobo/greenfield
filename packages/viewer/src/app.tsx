@@ -178,7 +178,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
     }
 
     connection.onOpen = () => desktop.reset()
-    connection.onEnvelope = (envelope) => {
+    connection.onEnvelope = (envelope, applied) => {
       if (envelope.kind === 'control') {
         if (envelope.message.type.startsWith('shell.')) {
           shell.handleMessage(envelope.message)
@@ -186,9 +186,9 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
           desktop.handleMessage(envelope.message)
         }
       } else if (envelope.kind === 'frame') {
-        desktop.handleFrame(envelope.surface, envelope.frame)
+        desktop.handleFrame(envelope.surface, envelope.frame, applied)
       } else {
-        desktop.handlePatch(envelope.surface, envelope.patch)
+        desktop.handlePatch(envelope.surface, envelope.patch, applied)
       }
     }
     connection.onStateChange = (state) => {

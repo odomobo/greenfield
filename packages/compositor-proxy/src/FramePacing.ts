@@ -5,7 +5,8 @@ import { performance } from 'node:perf_hooks'
  *
  * A surface's frame callbacks are held while it has no free slot (it has as many items between capture and the socket
  * as it may), and released at the next tick of the frame clock once it has one. So an app slows down to what can be
- * sent. On top of that comes the time the viewer needs to decode a frame, and without a viewer apps are throttled.
+ * sent (the transport's congestion control and the viewer's backlog decide when items go out, see ROADMAP.md). Without
+ * a viewer apps are throttled.
  */
 
 /**
@@ -19,7 +20,7 @@ const DEFAULT_TICK_INTERVAL = 16.667
 
 type PendingCallback = {
   callback: (time: number) => void
-  /** ms left of the minimum wait (the viewer's decode time) */
+  /** ms left of the minimum wait (only without a pacing viewer) */
   frameCallbackDelay: number
   /** whether the surface has a free slot */
   ready: () => boolean
@@ -86,8 +87,6 @@ configureFramePipelineTicks(nextTickInterval)
 
 const viewerPacing = {
   attached: false,
-  /** ms the viewer needs to decode a frame */
-  decodeDuration: 0,
   lastFeedbackTimestamp: 0,
 }
 
@@ -99,9 +98,8 @@ export function setViewerAttached(attached: boolean): void {
   }
 }
 
-export function onViewerFeedback(refreshInterval: number, decodeDuration: number): void {
+export function onViewerFeedback(refreshInterval: number): void {
   viewerPacing.lastFeedbackTimestamp = performance.now()
-  viewerPacing.decodeDuration = decodeDuration
   if (refreshInterval > 0) {
     nextTickInterval = Math.floor(refreshInterval)
     if (Math.abs(tickInterval - nextTickInterval) > 500 && feedbackClockTimer) {
@@ -117,13 +115,9 @@ function viewerIsPacing(): boolean {
 }
 
 /**
- * Call back on a later tick of the frame clock, once the viewer's decoding of a frame would be done and `ready()` (the
- * surface has a free slot) is true; throttled without a pacing viewer. The callback gets the frame time (ms).
+ * Call back on a later tick of the frame clock once `ready()` (the surface has a free slot) is true; throttled without
+ * a pacing viewer. The callback gets the frame time (ms).
  */
 export function scheduleFrameCallback(ready: () => boolean, callback: (time: number) => void): void {
-  callbacks.schedule(
-    viewerIsPacing() ? Math.floor(viewerPacing.decodeDuration) : DETACHED_FRAME_CALLBACK_DELAY,
-    ready,
-    callback,
-  )
+  callbacks.schedule(viewerIsPacing() ? 0 : DETACHED_FRAME_CALLBACK_DELAY, ready, callback)
 }

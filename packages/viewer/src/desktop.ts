@@ -153,7 +153,6 @@ export class Desktop {
   private swallowRelease = false
 
   private renderScheduled = false
-  private readonly decodeDurations: number[] = []
   private lastFrameTimestamp = 0
   private refreshInterval = 16
 
@@ -845,17 +844,24 @@ export class Desktop {
     return decoder
   }
 
-  /** A whole-surface video frame. */
-  handleFrame(surface: string, data: Uint8Array): void {
-    const frame = parseEncodedFrame(data)
+  /**
+   * A whole-surface video frame. `applied` is called once it's decoded and uploaded, or failed (see the
+   * connection's acks).
+   */
+  handleFrame(surface: string, data: Uint8Array, applied: () => void = noop): void {
+    let frame: ReturnType<typeof parseEncodedFrame>
+    try {
+      frame = parseEncodedFrame(data)
+    } catch (e) {
+      applied()
+      throw e
+    }
     this.frameSizes.set(surface, frame.size)
-    const start = performance.now()
     this.decoderFor(surface)
       .decode(frame)
       .then(
         (decoded) => {
           this.videoFramesDecoded++
-          this.recordDecodeDuration(performance.now() - start)
           this.keyFrameRequested.delete(surface)
           this.renderer.upload(surface, decoded)
           this.scheduleRender()
@@ -865,17 +871,19 @@ export class Desktop {
           this.decodeFailed(surface, error)
         },
       )
+      .finally(applied)
   }
 
-  /** A lossless update of part of a surface, drawn over what it shows now (applied right away, in order). */
-  handlePatch(surface: string, patch: Patch): void {
+  /**
+   * A lossless update of part of a surface, drawn over what it shows now (applied right away, in order). `applied` is
+   * called once it's drawn, or failed (see the connection's acks).
+   */
+  handlePatch(surface: string, patch: Patch, applied: () => void = noop): void {
     this.frameSizes.set(surface, patch.surfaceSize)
-    const start = performance.now()
     this.decoderFor(surface)
       .decodePatch(patch)
       .then(
         (decoded) => {
-          this.recordDecodeDuration(performance.now() - start)
           this.keyFrameRequested.delete(surface)
           this.patchesApplied++
           this.renderer.patch(surface, decoded)
@@ -883,6 +891,7 @@ export class Desktop {
         },
         (error) => this.decodeFailed(surface, error),
       )
+      .finally(applied)
   }
 
   /** Ask the server for the whole surface again (once until something decodes). */
@@ -1705,13 +1714,6 @@ export class Desktop {
   // -------------------------------------------------------------------------------------------------------------------
   // pacing feedback
 
-  private recordDecodeDuration(duration: number) {
-    this.decodeDurations.push(duration)
-    if (this.decodeDurations.length > 30) {
-      this.decodeDurations.shift()
-    }
-  }
-
   private measureRefreshRate() {
     const tick = (timestamp: number) => {
       if (this.lastFrameTimestamp) {
@@ -1728,14 +1730,11 @@ export class Desktop {
   }
 
   private sendFeedback() {
-    const decodeDuration = this.decodeDurations.length
-      ? this.decodeDurations.reduce((a, b) => a + b, 0) / this.decodeDurations.length
-      : 0
-    const message: ViewerMessage = {
-      type: 'feedback',
-      refreshInterval: Math.round(this.refreshInterval),
-      decodeDuration: Math.round(decodeDuration),
-    }
+    const message: ViewerMessage = { type: 'feedback', refreshInterval: Math.round(this.refreshInterval) }
     this.connection.send(message)
   }
+}
+
+function noop() {
+  /* nothing to report */
 }

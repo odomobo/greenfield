@@ -13,6 +13,15 @@
  *
  * FILE payload (viewer -> server): u32le file id, then the next bytes of that file: files dragged from the user's
  * computer onto the desktop are uploaded in chunks, announced by a `file-drop` message (ids, names, sizes), see there.
+ * ACK payload (viewer -> server): u32le received, u32le backlogBytes, u32le largestPendingBytes, see `ViewerAck`.
+ *
+ * Data envelopes (FRAME and PATCH) are acknowledged for congestion control (see "Transport and congestion control" in
+ * ROADMAP.md): the viewer sends an ACK first thing when a data envelope arrives, before decoding it, so the server's
+ * round-trip times measure the network, not decoding. Data envelopes are numbered implicitly, in the order they're
+ * sent (TCP keeps it); `received` counts them. The ACK also reports the viewer's backlog (received, not yet applied):
+ * the server sends no data while `backlogBytes - largestPendingBytes > BACKLOG_HOLD_BYTES`, so after applying an item
+ * the viewer sends a fresh ACK (same `received`) whenever its last report was over that, or the server would wait
+ * forever. Control envelopes are never acknowledged.
  *
  * A surface is either streamed as video (FRAME, H.264) or updated with lossless PNG patches (PATCH) of its changed
  * areas, see the encoding policy in ROADMAP.md. Frames and patches of one surface arrive in order and are applied in
@@ -39,13 +48,30 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 10
+export const PROTOCOL_VERSION = 11
 
 export const enum EnvelopeKind {
   CONTROL = 1,
   FRAME = 2,
   PATCH = 3,
   FILE = 4,
+  ACK = 5,
+}
+
+/**
+ * The server holds data envelopes while the viewer's reported backlog, not counting its largest item, is over this
+ * (bytes). See ACK above.
+ */
+export const BACKLOG_HOLD_BYTES = 1024 * 1024
+
+/** What an ACK envelope reports. */
+export type ViewerAck = {
+  /** data envelopes (FRAME, PATCH) received on this connection so far, mod 2^32 */
+  received: number
+  /** bytes of data envelopes received but not yet applied (a patch drawn, a frame decoded; dropped counts as applied) */
+  backlogBytes: number
+  /** the size of the largest single envelope in that backlog, 0 if none */
+  largestPendingBytes: number
 }
 
 /** The session was taken over by another viewer. Don't reconnect automatically. */
@@ -276,8 +302,8 @@ export type ViewerMessage =
   | { type: 'window.maximize'; window: string; seq: number; maximized: boolean }
   | { type: 'window.minimize'; window: string; seq: number; minimized: boolean }
   | { type: 'window.close'; window: string }
-  /** frame pacing: how often the viewer refreshes and how long decoding takes (ms) */
-  | { type: 'feedback'; refreshInterval: number; decodeDuration: number }
+  /** frame pacing: how often the viewer refreshes (ms) */
+  | { type: 'feedback'; refreshInterval: number }
   /** the viewer can't decode this surface's stream, send a key frame */
   | { type: 'keyframe'; surface: string }
   | { type: 'shell.launch'; app: string }
@@ -347,17 +373,47 @@ export function decodeControl(data: Uint8Array): ControlMessage {
   return message
 }
 
+/** Encode a viewer -> server acknowledgement (see ACK above) as a binary envelope. */
+export function encodeAck(ack: ViewerAck): Uint8Array {
+  const envelope = new Uint8Array(2 + 12)
+  envelope[0] = PROTOCOL_VERSION
+  envelope[1] = EnvelopeKind.ACK
+  const view = new DataView(envelope.buffer)
+  view.setUint32(2, ack.received >>> 0, true)
+  view.setUint32(6, Math.min(ack.backlogBytes, 0xffffffff) >>> 0, true)
+  view.setUint32(10, Math.min(ack.largestPendingBytes, 0xffffffff) >>> 0, true)
+  return envelope
+}
+
 export type ViewerEnvelope =
   | { kind: 'control'; message: ControlMessage }
   | { kind: 'file'; id: number; data: Uint8Array }
+  | ({ kind: 'ack' } & ViewerAck)
 
-/** Decode any viewer -> server envelope (a control message, or a chunk of a file). Throws like decodeControl. */
+/** Decode any viewer -> server envelope (a control message, a chunk of a file, an ack). Throws like decodeControl. */
 export function decodeViewerEnvelope(data: Uint8Array): ViewerEnvelope {
   if (data.byteLength >= 6 && data[0] === PROTOCOL_VERSION && data[1] === EnvelopeKind.FILE) {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
     return { kind: 'file', id: view.getUint32(2, true), data: data.subarray(6) }
   }
+  if (data.byteLength >= 2 && data[0] === PROTOCOL_VERSION && data[1] === EnvelopeKind.ACK) {
+    if (data.byteLength !== 14) {
+      throw new Error(`ACK envelope of ${data.byteLength} bytes.`)
+    }
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+    return {
+      kind: 'ack',
+      received: view.getUint32(2, true),
+      backlogBytes: view.getUint32(6, true),
+      largestPendingBytes: view.getUint32(10, true),
+    }
+  }
   return { kind: 'control', message: decodeControl(data) }
+}
+
+/** True for a server -> viewer data envelope (FRAME or PATCH, the ones the viewer acknowledges). */
+export function isDataEnvelope(data: Uint8Array): boolean {
+  return data.byteLength >= 2 && (data[1] === EnvelopeKind.FRAME || data[1] === EnvelopeKind.PATCH)
 }
 
 /** A lossless update of a rectangle of a surface, see the PATCH envelope. */

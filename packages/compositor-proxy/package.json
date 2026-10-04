@@ -19,7 +19,7 @@
     "build:native": "yarn run mkdirp build && cmake -G Ninja -B./build -S./ && ninja -C ./build install",
     "build:typescript": "yarn run tsc",
     "build": "yarn run rimraf dist types && yarn build:native && yarn build:typescript",
-    "test": "node --test --test-force-exit dist/encoding/test/ dist/wlroots/test/",
+    "test": "node --test --test-force-exit dist/encoding/test/ dist/wlroots/test/ dist/viewer/test/",
     "watch": "yarn run build && yarn run tsc -w"
   },
   "dependencies": {

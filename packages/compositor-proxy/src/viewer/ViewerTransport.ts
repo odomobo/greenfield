@@ -1,9 +1,22 @@
 import { WebSocket } from 'ws'
 import { Socket } from 'node:net'
+import { performance } from 'node:perf_hooks'
 import { createLogger } from '../Logger.js'
 import type { SurfaceClass } from '../encoding/policy.js'
 import { setSocketSendBuffer, setTcpNotSentLowat } from '../socket-options.js'
-import { decodeViewerEnvelope, encodeControl, encodeFrame, encodePatch, isKeyFrame, Patch } from './protocol.js'
+import { CongestionController } from './congestion.js'
+
+/** What the transport needs of a congestion controller (tests pass one that never holds anything back). */
+export type Congestion = Pick<CongestionController, 'canSend' | 'nextSendTime' | 'onSend' | 'onAck' | 'setDataWaiting'>
+import {
+  decodeViewerEnvelope,
+  encodeControl,
+  encodeFrame,
+  encodePatch,
+  isKeyFrame,
+  Patch,
+  ViewerAck,
+} from './protocol.js'
 
 const logger = createLogger('viewer-transport')
 
@@ -36,9 +49,10 @@ export type OutgoingMessage =
  */
 export interface ViewerTransport {
   /**
-   * Queue a message. Control messages are always sent before pending frames and patches. Of those, the two priority
-   * classes share the link by byte-weighted deficit round-robin (normal 3 : streaming 1, work-conserving), surfaces
-   * of a class take turns, one item per visit. Video frames and patches of a surface are sent in order. A video key frame replaces everything unsent of its surface (it covers the whole surface),
+   * Queue a message. Control messages are always sent before pending frames and patches, never held back. Of those,
+   * the two priority classes share the link by byte-weighted deficit round-robin (normal 3 : streaming 1,
+   * work-conserving), surfaces of a class take turns, one item per visit, as fast as the congestion controller lets
+   * them go (see congestion.ts: pacing, in-flight limit, the viewer's backlog). Video frames and patches of a surface are sent in order. A video key frame replaces everything unsent of its surface (it covers the whole surface),
    * delta frames are chained behind it up to a small limit. Patches are never coalesced or dropped, except by a later
    * key frame or the calls below.
    */
@@ -60,6 +74,8 @@ export interface ViewerTransport {
   onMessage: (message: ControlMessage) => void
   /** The next bytes of an uploaded file (see the scene protocol's `file-drop`). */
   onFileChunk: (id: number, data: Uint8Array) => void
+  /** The viewer acknowledged data envelopes and reported its backlog (see the scene protocol's ACK). */
+  onAck: (ack: ViewerAck) => void
   onClose: (code: number, reason: string) => void
   /**
    * A frame for this surface had to be dropped and the following frames can't be decoded without a key frame.
@@ -72,8 +88,9 @@ export interface ViewerTransport {
 const TCP_NOTSENT_LOWAT_BYTES = 32 * 1024
 // Same idea when the viewer is relayed to us over a Unix socket (by the gateway): cap the kernel send buffer.
 const UNIX_SEND_BUFFER_BYTES = 32 * 1024
-// Don't hand a new frame to the socket while more than this is still buffered in user space.
-const FRAME_SEND_BUFFERED_LIMIT = 64 * 1024
+// A safety limit under the congestion controller: never hand a data item to the socket while more than this is still
+// buffered in user space (with the controller working, it shouldn't be reached).
+const SEND_BUFFERED_LIMIT = 256 * 1024
 // Deficit round-robin between the priority classes: each turn a class may send up to its quantum (plus what it carried
 // over) in bytes. Normal surfaces get 3 times the share of streaming ones, and the other class gets all of the link
 // when one has nothing waiting.
@@ -98,6 +115,12 @@ function sizeOf(entry: QueuedEntry): number {
   return entry.kind === 'frame' ? entry.frame.length : entry.envelope.length
 }
 
+/** The size of the envelope the item goes out as: what the congestion controller and the viewer's acks count. */
+function envelopeSizeOf(surface: string, entry: QueuedEntry): number {
+  // FRAME envelope: version, kind, u16 key length, key, frame (see the scene protocol)
+  return entry.kind === 'frame' ? 4 + Buffer.byteLength(surface) + entry.frame.length : entry.envelope.length
+}
+
 const otherClass = (surfaceClass: SurfaceClass): SurfaceClass => (surfaceClass === 'normal' ? 'streaming' : 'normal')
 
 export class WebSocketViewerTransport implements ViewerTransport {
@@ -105,6 +128,9 @@ export class WebSocketViewerTransport implements ViewerTransport {
     /* noop */
   }
   onFileChunk: (id: number, data: Uint8Array) => void = () => {
+    /* noop */
+  }
+  onAck: (ack: ViewerAck) => void = () => {
     /* noop */
   }
   onClose: (code: number, reason: string) => void = () => {
@@ -130,10 +156,20 @@ export class WebSocketViewerTransport implements ViewerTransport {
    */
   private readonly needsKeyFrame = new Set<string>()
   private readonly keyFrameSent = new Set<string>()
-  private framesInFlight = 0
+  private readonly congestion: Congestion
+  private readonly now: () => number
+  /** wakes the pump when the controller's pacing lets the next item go */
+  private pacingTimer?: NodeJS.Timeout
+  private pacingAt = Infinity
+  private safetyLimitLogged = false
   private _closed = false
 
-  constructor(private readonly ws: WebSocket) {
+  constructor(
+    private readonly ws: WebSocket,
+    options: { now?: () => number; congestion?: Congestion } = {},
+  ) {
+    this.now = options.now ?? (() => performance.now())
+    this.congestion = options.congestion ?? new CongestionController({ now: this.now() })
     ws.binaryType = 'nodebuffer'
     this.limitSocketBacklog()
     ws.on('message', (data: Buffer, isBinary: boolean) => {
@@ -151,12 +187,17 @@ export class WebSocketViewerTransport implements ViewerTransport {
       }
       if (envelope.kind === 'file') {
         this.onFileChunk(envelope.id, envelope.data)
+      } else if (envelope.kind === 'ack') {
+        this.congestion.onAck(envelope, this.now())
+        this.onAck(envelope)
+        this.pump()
       } else {
         this.onMessage(envelope.message)
       }
     })
     ws.on('close', (code, reason) => {
       this._closed = true
+      this.clearPacingTimer()
       this.dropAll()
       this.onClose(code, reason.toString())
     })
@@ -179,12 +220,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
     } else if (message.priority === 'frame') {
       this.queueFrame(message.surface, message.frame, message.surfaceClass, message.done)
     } else {
-      this.queuePatch(
-        message.surface,
-        encodePatch(message.surface, message.patch),
-        message.surfaceClass,
-        message.done,
-      )
+      this.queuePatch(message.surface, encodePatch(message.surface, message.patch), message.surfaceClass, message.done)
     }
     this.pump()
   }
@@ -194,6 +230,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
       return
     }
     this._closed = true
+    this.clearPacingTimer()
     this.dropAll()
     this.controlQueue.length = 0
     this.ws.close(code, reason)
@@ -293,9 +330,19 @@ export class WebSocketViewerTransport implements ViewerTransport {
   /**
    * The next data item to send, by deficit round-robin between the classes, weighted by bytes: on its turn a class adds
    * its quantum to its deficit and sends items while the next fits in the deficit. A class with nothing waiting loses
-   * its turn and its deficit, so the other class gets the whole link.
+   * its turn and its deficit, so the other class gets the whole link. If nothing is taken (nothing is waiting, or
+   * `allowed` refuses the next item by its envelope size), the round-robin state stays as it was: the transport asks
+   * again whenever the congestion controller might allow more, and those questions must not count as turns.
    */
-  private takeNext(): { surface: string; entry: QueuedEntry } | undefined {
+  private takeNext(allowed: (envelopeBytes: number) => boolean): { surface: string; entry: QueuedEntry } | undefined {
+    const saved = { turn: this.drrTurn, quantumGiven: this.drrQuantumGiven, ...this.drrDeficit }
+    const nothingTaken = () => {
+      this.drrTurn = saved.turn
+      this.drrQuantumGiven = saved.quantumGiven
+      this.drrDeficit.normal = saved.normal
+      this.drrDeficit.streaming = saved.streaming
+      return undefined
+    }
     // a deficit grows every turn, so even a huge item fits eventually
     for (let turns = 0; turns < 10_000; turns++) {
       const turn = this.drrTurn
@@ -305,7 +352,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
         this.drrQuantumGiven = false
         this.drrTurn = otherClass(turn)
         if (this.findHead(this.drrTurn) === undefined) {
-          return undefined
+          return nothingTaken()
         }
         continue
       }
@@ -315,6 +362,9 @@ export class WebSocketViewerTransport implements ViewerTransport {
       }
       const entry = head.chain[0]
       if (sizeOf(entry) <= this.drrDeficit[turn]) {
+        if (!allowed(envelopeSizeOf(head.surface, entry))) {
+          return nothingTaken()
+        }
         this.drrDeficit[turn] -= sizeOf(entry)
         head.chain.shift()
         // back of the line, for fairness between surfaces
@@ -327,7 +377,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
       this.drrQuantumGiven = false
       this.drrTurn = otherClass(turn)
     }
-    return undefined
+    return nothingTaken()
   }
 
   private requestKeyFrame(surface: string) {
@@ -343,38 +393,83 @@ export class WebSocketViewerTransport implements ViewerTransport {
       return
     }
 
-    // Control messages always go first, they are small. A burst of them (e.g. on attach) can fill the socket past
-    // FRAME_SEND_BUFFERED_LIMIT with no frame in flight, so once one is written, check again for frames to send.
+    // Control messages always go first, they are small, and the congestion controller never holds them back. A burst
+    // of them (e.g. on attach) can fill the socket past SEND_BUFFERED_LIMIT, so once one is written, check again for
+    // data to send.
     while (this.controlQueue.length) {
       this.ws.send(this.controlQueue.shift()!, { binary: true }, () => this.pump())
     }
 
-    // roughly one frame in flight
-    if (this.framesInFlight > 0 || this.ws.bufferedAmount > FRAME_SEND_BUFFERED_LIMIT) {
-      return
-    }
-    const next = this.takeNext()
-    if (next === undefined) {
-      return
-    }
-    const { surface, entry } = next
-    let data: Uint8Array
-    if (entry.kind === 'frame') {
-      if (isKeyFrame(entry.frame)) {
-        this.keyFrameSent.add(surface)
+    this.congestion.setDataWaiting(this.pendingFrames.size > 0)
+    for (;;) {
+      if (this.ws.bufferedAmount > SEND_BUFFERED_LIMIT) {
+        // a send's callback pumps again
+        if (!this.safetyLimitLogged && this.pendingFrames.size > 0) {
+          this.safetyLimitLogged = true
+          logger.info(`More than ${SEND_BUFFERED_LIMIT} bytes buffered for the viewer, holding data items.`)
+        }
+        break
       }
-      data = encodeFrame(surface, entry.frame)
-    } else {
-      data = entry.envelope
+      const now = this.now()
+      let refused: number | undefined
+      const next = this.takeNext((bytes) => {
+        if (this.congestion.canSend(bytes, now)) {
+          return true
+        }
+        refused = bytes
+        return false
+      })
+      if (next === undefined) {
+        if (refused !== undefined) {
+          // paced: wake up when it's due; waiting for an ack (or the viewer's backlog report): the ack pumps
+          this.schedulePacing(this.congestion.nextSendTime(refused, now), now)
+        }
+        break
+      }
+      const { surface, entry } = next
+      let data: Uint8Array
+      if (entry.kind === 'frame') {
+        if (isKeyFrame(entry.frame)) {
+          this.keyFrameSent.add(surface)
+        }
+        data = encodeFrame(surface, entry.frame)
+      } else {
+        data = entry.envelope
+      }
+      this.congestion.onSend(data.length, now)
+      // The callback fires once the data was handed to the kernel. With TCP_NOTSENT_LOWAT that means most of it has
+      // actually left; the slot it took is free from then on.
+      this.ws.send(data, { binary: true }, () => {
+        entry.done?.(true)
+        this.pump()
+      })
     }
-    this.framesInFlight++
-    // The callback fires once the data was handed to the kernel. With TCP_NOTSENT_LOWAT that means most of it has
-    // actually left, so the next frame (possibly a newer one for the same surface) is picked as late as possible.
-    this.ws.send(data, { binary: true }, () => {
-      this.framesInFlight--
-      entry.done?.(true)
-      this.pump()
-    })
+    this.congestion.setDataWaiting(this.pendingFrames.size > 0)
+  }
+
+  private schedulePacing(at: number, now: number) {
+    if (at === Infinity || at >= this.pacingAt) {
+      return
+    }
+    this.clearPacingTimer()
+    this.pacingAt = at
+    this.pacingTimer = setTimeout(
+      () => {
+        this.pacingTimer = undefined
+        this.pacingAt = Infinity
+        this.pump()
+      },
+      Math.max(1, Math.ceil(at - now)),
+    )
+    this.pacingTimer.unref?.()
+  }
+
+  private clearPacingTimer() {
+    if (this.pacingTimer !== undefined) {
+      clearTimeout(this.pacingTimer)
+      this.pacingTimer = undefined
+    }
+    this.pacingAt = Infinity
   }
 
   private limitSocketBacklog() {

@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
 import { decodeEnvelope, Patch } from '@gfld/scene-protocol'
 import type { SurfaceClass } from '../policy.js'
-import { WebSocketViewerTransport } from '../../viewer/ViewerTransport.js'
+import { Congestion, WebSocketViewerTransport } from '../../viewer/ViewerTransport.js'
 
 /** Just enough of a ws WebSocket: sends complete when the test says so. */
 class FakeWebSocket extends EventEmitter {
@@ -32,9 +32,23 @@ function patch(serial: number, bytes: number): Patch {
   }
 }
 
+/** A congestion controller that lets a data item go only while the fake socket has nothing unsent. */
+function oneAtATime(ws: { sent: unknown[] }): Congestion {
+  return {
+    canSend: () => ws.sent.length === 0,
+    // only a completed send (it pumps again) makes room
+    nextSendTime: () => Infinity,
+    onSend: () => undefined,
+    onAck: () => undefined,
+    setDataWaiting: () => undefined,
+  }
+}
+
 function setup() {
   const ws = new FakeWebSocket()
-  const transport = new WebSocketViewerTransport(ws as unknown as WebSocket)
+  // These tests are about the order of sending when the network is the bottleneck, not about congestion control: one
+  // data item at a time, the next once the socket took the last (the test's flush()).
+  const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, { congestion: oneAtATime(ws) })
   const queue = (surface: string, surfaceClass: SurfaceClass, serial: number, bytes: number) =>
     transport.send({ priority: 'patch', surface, surfaceClass, patch: patch(serial, bytes) })
   /** Let every pending send complete, in order, and say what was sent: [surface, serial, wire size]. */
@@ -143,9 +157,18 @@ test('within a class surfaces take turns, and a surface keeps its own order', ()
   const order = drain()
     .slice(1)
     .map(({ serial }) => serial)
-  assert.deepEqual(order.filter((serial) => serial < 20), [11, 12, 13])
-  assert.deepEqual(order.filter((serial) => serial >= 20 && serial < 30), [21, 22, 23])
-  assert.deepEqual(order.filter((serial) => serial >= 30), [31, 32, 33])
+  assert.deepEqual(
+    order.filter((serial) => serial < 20),
+    [11, 12, 13],
+  )
+  assert.deepEqual(
+    order.filter((serial) => serial >= 20 && serial < 30),
+    [21, 22, 23],
+  )
+  assert.deepEqual(
+    order.filter((serial) => serial >= 30),
+    [31, 32, 33],
+  )
   // a and b alternate while both have items
   assert.deepEqual(order.slice(0, 6), [11, 21, 12, 22, 13, 23])
 })
