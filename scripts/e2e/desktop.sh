@@ -502,6 +502,8 @@ check_drag_quiet() {
   [ "$(drag_configures)" = 0 ] || fail "the app was configured while dragging"
 }
 
+moves_sent() { echo "$(pw_eval "() => window.__viewerTest.movesSent()")"; }
+
 step "moving with a slow server: late scenes never pull the window back"
 read -r GX GY GW GH < <(shown_geometry)
 # every scene arrives 300 ms late; record where the window is shown while it's dragged right and settles
@@ -510,14 +512,19 @@ pw_eval "() => { window.__viewerTest.delayScenes(300); window.__shownX = []; cle
 pw mousemove $((GX + GW / 2)) $((CANVAS_Y + GY + 12)) >/dev/null
 pw mousedown >/dev/null
 wait_for "() => window.__viewerTest.interaction() === 'move'" "the move to start" 10
+MOVES0="$(moves_sent)"
 for i in 1 2 3 4; do
   pw mousemove $((GX + GW / 2 + 15 * i)) $((CANVAS_Y + GY + 12)) >/dev/null
 done
+# the window follows the pointer, but the server hears nothing until the drop
+wait_for "() => window.__viewerTest.windows()[0].shownGeometry.x === $((GX + 60))" "the window to follow the pointer" 10
+[ "$(moves_sent)" = "$MOVES0" ] || fail "the viewer sent window.move while dragging"
 pw mouseup >/dev/null
 wait_for "() => { const w = window.__viewerTest.windows()[0]; return w.x === w.shownX && w.y === w.shownY && w.shownGeometry.x === $((GX + 60)) }" \
   "the server to store the final position" 10
 MOVES="$(pw_eval "() => { clearInterval(window.__mover); window.__viewerTest.delayScenes(0); const xs = window.__shownX; return [xs.length, xs.every((x, i) => i === 0 || x >= xs[i - 1])].join(' ') }" | tr -d '"')"
 echo "    samples, never moved back: $MOVES"
+[ "$(moves_sent)" = "$((MOVES0 + 1))" ] || fail "the drop should send exactly one window.move ($MOVES0 -> $(moves_sent))"
 [ "${MOVES#* }" = true ] || fail "the window was pulled back by a late scene"
 
 step "resizing from the left edge: immediate, and the right edge stays put"
@@ -613,6 +620,7 @@ wait_geometry() {
 
 step "window menu, Move: follows the pointer, a click drops it"
 read -r OX OY OW OH < <(shown_geometry; echo)
+MOVES1="$(moves_sent)"
 click_element '.context-menu button[data-action=move]'
 wait_for "() => window.__viewerTest.interaction() === 'move'" "Move to start" 5
 # it follows the pointer from where the menu item was clicked
@@ -620,10 +628,12 @@ MX="$CX"; MY="$CY"
 pw mousemove $((MX + 100)) $((MY + 150)) >/dev/null
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((OX + 100)) && g.y === $((OY + 150)) }" "the window to follow the pointer" 5
 pw mousemove $((MX + 120)) $((MY + 160)) >/dev/null
+[ "$(moves_sent)" = "$MOVES1" ] || fail "Move sent a window.move before the drop"
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((OX + 120)) && g.y === $((OY + 160)) }" "the window to follow the pointer" 5
 pw mousedown >/dev/null
 pw mouseup >/dev/null
 wait_geometry "$((OX + 120)) $((OY + 160)) $OW $OH" "the window to be dropped"
+[ "$(moves_sent)" = "$((MOVES1 + 1))" ] || fail "the click should send exactly one window.move"
 pw mousemove $((MX + 200)) $((MY + 200)) >/dev/null
 [ "$(pw_eval "() => window.__viewerTest.windows()[0].shownGeometry.x")" = $((OX + 120)) ] || fail "the window kept following the pointer after the click"
 echo "    moved from $OX,$OY to $((OX + 120)),$((OY + 160)) and dropped"
@@ -634,8 +644,10 @@ taskbar_menu move
 wait_for "() => window.__viewerTest.interaction() === 'move'" "Move to start" 5
 pw mousemove $((CX + 40)) $((CY + 40)) >/dev/null
 wait_for "() => window.__viewerTest.windows()[0].shownGeometry.x === $((NX + 40))" "the window to follow the pointer" 5
+MOVES2="$(moves_sent)"
 pw press Escape >/dev/null
 wait_geometry "$NX $NY $OW $OH" "Escape to put the window back"
+[ "$(moves_sent)" = "$MOVES2" ] || fail "Escape in Move sent a window.move"
 taskbar_menu move
 wait_for "() => window.__viewerTest.interaction() === 'move'" "Move to start" 5
 pw press ArrowRight >/dev/null

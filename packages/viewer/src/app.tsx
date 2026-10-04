@@ -265,6 +265,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
         drag: () => desktop.debugDrag(),
         resizing: () => desktop.debugResizing(),
         resizesSent: () => desktop.debugResizesSent(),
+        movesSent: () => desktop.debugMovesSent(),
         animations: () => desktop.debugAnimations(),
         videoFrames: () => desktop.debugVideoFrames(),
         delayScenes: (ms: number) => {

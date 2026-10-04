@@ -46,7 +46,7 @@ type MenuInteraction = {
 }
 
 type Interaction =
-  | { mode: 'move'; window: string; startPointer: Point; startPosition: Point; lastSent: number; menu?: MenuInteraction }
+  | { mode: 'move'; window: string; startPointer: Point; startPosition: Point; menu?: MenuInteraction }
   /** startRect: the window geometry rect (output coordinates) when the resize started */
   | { mode: 'resize'; window: string; edges: number; startPointer: Point; startRect: Rect; menu?: MenuInteraction }
 
@@ -84,7 +84,6 @@ const EDGE_BOTTOM = 2
 const EDGE_LEFT = 4
 const EDGE_RIGHT = 8
 
-const MOVE_SEND_INTERVAL = 50
 /** How much of a window (geometry) must stay inside the output, so it can always be grabbed and moved back. */
 const MIN_VISIBLE = 80
 /** Give up waiting for a client to commit the final size of a resize after this long. */
@@ -306,6 +305,13 @@ export class Desktop {
 
   private resizesSent = 0
 
+  /** How many window.move messages were sent. For tests. */
+  debugMovesSent(): number {
+    return this.movesSent
+  }
+
+  private movesSent = 0
+
   /** For tests: hold every scene back this long (ms), in order, as if the server were slow. */
   debugSceneDelay = 0
 
@@ -390,7 +396,6 @@ export class Desktop {
       window: id,
       startPointer: this.pointer,
       startPosition: this.windowPosition(window),
-      lastSent: 0,
       menu: this.menuInteraction(),
     }
     this.canvas.style.cursor = 'move'
@@ -557,6 +562,8 @@ export class Desktop {
   private sendWindowChange(change: WindowChange) {
     if (change.type === 'window.resize') {
       this.resizesSent++
+    } else if (change.type === 'window.move') {
+      this.movesSent++
     }
     this.connection.send({ ...change, seq: this.sync.nextSeq(change.window) } as ViewerMessage)
   }
@@ -1552,8 +1559,7 @@ export class Desktop {
         window: window.id,
         startPointer: this.pressPointer,
         startPosition: this.windowPosition(window),
-        lastSent: 0,
-      }
+        }
       this.canvas.style.cursor = 'grabbing'
     } else {
       const startRect = this.shownGeometry(window)
@@ -1618,13 +1624,9 @@ export class Desktop {
       const window = this.windows.find((w) => w.id === interaction.window)
       const wanted = { x: interaction.startPosition.x + dx, y: interaction.startPosition.y + dy }
       const position = window ? this.keepVisible(window, wanted) : wanted
-      // shown where the pointer is right away, the server is told at most every MOVE_SEND_INTERVAL
+      // shown where the pointer is right away (held against scenes while dragging); the server is told the final
+      // position when the drag ends
       this.sync.setPosition(interaction.window, position)
-      const now = performance.now()
-      if (now - interaction.lastSent > MOVE_SEND_INTERVAL) {
-        interaction.lastSent = now
-        this.moveWindow(interaction.window, position)
-      }
       this.scheduleRender()
     } else {
       const rect = this.resizeRect(interaction)
@@ -1642,8 +1644,8 @@ export class Desktop {
     this.interaction = undefined
     if (interaction.mode === 'move') {
       const position = this.sync.position(interaction.window)
-      if (position) {
-        // the final position; the viewer shows it until the server's scene says it applied it
+      if (position && !interaction.menu?.cancelled) {
+        // the final position (Escape in Move: nothing is sent, the window never left where the server has it); the viewer shows it until the server's scene says it applied it
         this.moveWindow(interaction.window, position)
       }
       this.applyCursor()
