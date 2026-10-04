@@ -117,6 +117,8 @@ type Window = {
   /** position of the main surface's origin; a child window's is relative to its parent */
   x: number
   y: number
+  /** the last window change sequence number from the viewer applied to this window (scene protocol) */
+  seq: number
 }
 
 const inactiveSink: EncodingSink = {
@@ -253,7 +255,16 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         break
       }
       case 'toplevel-new':
-        this.windows.set(args[0], { sid: args[0], title: '', appId: '', placed: false, minimized: false, x: 0, y: 0 })
+        this.windows.set(args[0], {
+          sid: args[0],
+          title: '',
+          appId: '',
+          placed: false,
+          minimized: false,
+          x: 0,
+          y: 0,
+          seq: 0,
+        })
         break
       case 'toplevel-destroy': {
         const window = this.windows.get(args[0])
@@ -566,6 +577,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         fullscreen: state.fullscreen,
         minimized: this.rootOf(window).minimized,
         placed: window.placed,
+        seq: window.seq,
         x,
         y,
         geometry: { x: state.geometry[0], y: state.geometry[1], width: state.geometry[2], height: state.geometry[3] },
@@ -594,6 +606,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     if (TRACE && message.type !== 'pointer') {
       logger.info(`viewer ${JSON.stringify(message)}`)
     }
+    this.recordWindowChange(message)
     switch (message.type) {
       case 'hello':
       case 'output':
@@ -676,6 +689,24 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       }
       default:
         logger.info(`Unhandled viewer message: ${message.type}`)
+    }
+  }
+
+  /**
+   * A window change from the viewer: remember its sequence number, so the next scene tells the viewer the server has
+   * applied it (and every change before it), whether or not it changed anything (e.g. a move to where the window is,
+   * or a request the server corrected or ignored). Messages are applied in order, so the scene that carries this
+   * number reflects this change. See the scene protocol.
+   */
+  private recordWindowChange(message: ControlMessage) {
+    if (!message.type.startsWith('window.') || message.type === 'window.close') {
+      return
+    }
+    const window = this.windowOf(message.window)
+    const seq = Number(message.seq)
+    if (window && Number.isSafeInteger(seq) && seq > window.seq) {
+      window.seq = seq
+      this.scheduleScene()
     }
   }
 

@@ -403,6 +403,24 @@ resize_drag() {
   wait_for "() => !window.__viewerTest.resizing()" "the client to commit the final size" 10
 }
 
+step "moving with a slow server: late scenes never pull the window back"
+read -r GX GY GW GH < <(shown_geometry)
+# every scene arrives 300 ms late; record where the window is shown while it's dragged right and settles
+pw_eval "() => { window.__viewerTest.delayScenes(300); window.__shownX = []; clearInterval(window.__mover); window.__mover = setInterval(() => window.__shownX.push(window.__viewerTest.windows()[0].shownGeometry.x), 5); return true }" >/dev/null
+# foot's title bar
+pw mousemove $((GX + GW / 2)) $((CANVAS_Y + GY + 12)) >/dev/null
+pw mousedown >/dev/null
+wait_for "() => window.__viewerTest.interaction() === 'move'" "the move to start" 10
+for i in 1 2 3 4; do
+  pw mousemove $((GX + GW / 2 + 15 * i)) $((CANVAS_Y + GY + 12)) >/dev/null
+done
+pw mouseup >/dev/null
+wait_for "() => { const w = window.__viewerTest.windows()[0]; return w.x === w.shownX && w.y === w.shownY && w.shownGeometry.x === $((GX + 60)) }" \
+  "the server to store the final position" 10
+MOVES="$(pw_eval "() => { clearInterval(window.__mover); window.__viewerTest.delayScenes(0); const xs = window.__shownX; return [xs.length, xs.every((x, i) => i === 0 || x >= xs[i - 1])].join(' ') }" | tr -d '"')"
+echo "    samples, never moved back: $MOVES"
+[ "${MOVES#* }" = true ] || fail "the window was pulled back by a late scene"
+
 step "resizing from the left edge: immediate, and the right edge stays put"
 read -r GX GY GW GH < <(shown_geometry)
 RIGHT=$((GX + GW))

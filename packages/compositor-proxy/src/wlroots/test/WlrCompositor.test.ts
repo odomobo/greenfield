@@ -374,3 +374,57 @@ test('a reattached viewer gets the whole scene again', async () => {
   assert.equal(again.filter((message) => message.type === 'scene').length, 1)
   assert.equal(windowsOf(again[0]).length, 1)
 })
+
+test('scene windows echo the last window change the viewer sent, even one that changed nothing', async () => {
+  core.newWindow(1)
+  core.newWindow(2)
+  await flush()
+  assert.deepEqual(
+    windowsOf(lastScene()).map((window) => window.seq),
+    [0, 0],
+  )
+
+  compositor.handleMessage({ type: 'window.move', window: '1/1', seq: 1, x: 10, y: 20 })
+  await flush()
+  const first = () => windowsOf(lastScene()).find((window) => window.id === '1/1')
+  assert.deepEqual([first().seq, first().x, first().y], [1, 10, 20])
+
+  // a move to where the window already is: a scene is still sent, so the viewer knows it's applied
+  const count = scenes().length
+  compositor.handleMessage({ type: 'window.move', window: '1/1', seq: 2, x: 10, y: 20 })
+  await flush()
+  assert.equal(scenes().length, count + 1)
+  assert.equal(first().seq, 2)
+
+  // every kind of window change is numbered, per window
+  compositor.handleMessage({ type: 'window.resize', window: '1/1', seq: 3, width: 300, height: 200, done: true })
+  compositor.handleMessage({ type: 'window.maximize', window: '1/1', seq: 4, maximized: false })
+  compositor.handleMessage({ type: 'window.minimize', window: '1/2', seq: 1, minimized: true })
+  compositor.handleMessage({ type: 'window.activate', window: '1/2', seq: 2 })
+  await flush()
+  const seqs = Object.fromEntries(windowsOf(lastScene()).map((window) => [window.id, window.seq]))
+  assert.deepEqual(seqs, { '1/1': 4, '1/2': 2 })
+  assert.deepEqual([first().x, first().y], [10, 20])
+})
+
+test('window changes without a valid, newer sequence number are applied but don’t lower the echo', async () => {
+  core.newWindow(1)
+  compositor.handleMessage({ type: 'window.move', window: '1/1', seq: 5, x: 10, y: 20 })
+  compositor.handleMessage({ type: 'window.move', window: '1/1', seq: 3, x: 30, y: 40 })
+  compositor.handleMessage({ type: 'window.move', window: '1/1', seq: 'x', x: 50, y: 60 })
+  compositor.handleMessage({ type: 'window.move', window: '1/1', x: 70, y: 80 })
+  await flush()
+  const [window] = windowsOf(lastScene())
+  assert.deepEqual([window.seq, window.x, window.y], [5, 70, 80])
+})
+
+test('a server-initiated change is reported without touching the sequence number', async () => {
+  core.newWindow(1)
+  compositor.handleMessage({ type: 'window.move', window: '1/1', seq: 1, x: 10, y: 20 })
+  core.onEvent('toplevel-request-maximize', 1, true)
+  core.toplevels.get(1)!.geometry = [10, 5, 1280, 720]
+  core.commit(1, 1280, 720)
+  await flush()
+  const [window] = windowsOf(lastScene())
+  assert.deepEqual([window.seq, window.maximized, window.x, window.y], [1, true, -10, -5])
+})

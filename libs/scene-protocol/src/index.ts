@@ -15,13 +15,22 @@
  * areas, see the encoding policy in ROADMAP.md. Frames and patches of one surface arrive in order and are applied in
  * order: a patch draws over whatever the surface showed (including the last video frame), a video frame replaces it.
  *
+ * Window state (position, size, stacking, minimized, maximized) is the server's. The viewer changes it optimistically
+ * (a drag shows the window where the pointer is right away) and reconciles with sequence numbers: every window.* change
+ * it sends carries the next number for that window (`seq`, one counter per window, continuing from the window's `seq`
+ * in the scene), and every scene window carries the last number the server applied (`seq`). While the server's number
+ * is behind the last one sent, or while the window is being dragged, the viewer keeps showing its own state for that
+ * window; once the server caught up, the server's state is shown as is, including its corrections. A late scene that
+ * still reflects an older move can't pull a window back, and changes the server makes on its own (an app maximizing,
+ * a dialog following its parent) show whenever the viewer has nothing unconfirmed for that window.
+ *
  * Surfaces are identified by a key "<clientId>/<surfaceId>". Coordinates are in output (canvas CSS) pixels, at any
  * device pixel ratio: the viewer reports its scale (devicePixelRatio) but the output size stays in CSS pixels.
  *
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 4
+export const PROTOCOL_VERSION = 5
 
 export const enum EnvelopeKind {
   CONTROL = 1,
@@ -68,6 +77,11 @@ export type SceneWindow = {
   minimized: boolean
   /** false until the viewer decided where the window goes (send window.move) */
   placed: boolean
+  /**
+   * The last window change sequence number the server applied for this window (0: none), see the top of this file.
+   * Absent from the legacy compositor (until it's deleted): the viewer then waits for the state it asked for instead.
+   */
+  seq?: number
   /** position of the main surface's origin */
   x: number
   y: number
@@ -148,12 +162,13 @@ export type ViewerMessage =
   | { type: 'key'; code: string; pressed: boolean; capsLock: boolean; numLock: boolean; time: number }
   /** the viewer page gained/lost keyboard focus */
   | { type: 'focus'; focused: boolean }
-  | { type: 'window.move'; window: string; x: number; y: number }
-  | { type: 'window.activate'; window: string }
+  // window changes; seq: the window's next change sequence number, see the top of this file
+  | { type: 'window.move'; window: string; seq: number; x: number; y: number }
+  | { type: 'window.activate'; window: string; seq: number }
   /** width/height are window geometry sizes. done: the interactive resize ended. */
-  | { type: 'window.resize'; window: string; width: number; height: number; edges: number; done: boolean }
-  | { type: 'window.maximize'; window: string; maximized: boolean }
-  | { type: 'window.minimize'; window: string; minimized: boolean }
+  | { type: 'window.resize'; window: string; seq: number; width: number; height: number; edges: number; done: boolean }
+  | { type: 'window.maximize'; window: string; seq: number; maximized: boolean }
+  | { type: 'window.minimize'; window: string; seq: number; minimized: boolean }
   | { type: 'window.close'; window: string }
   /** frame pacing: how often the viewer refreshes and how long decoding takes (ms) */
   | { type: 'feedback'; refreshInterval: number; decodeDuration: number }
