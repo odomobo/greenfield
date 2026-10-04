@@ -46,8 +46,6 @@ https://en.wikipedia.org/wiki/File:Cosmic_%E2%80%98Winter%E2%80%99_Wonderland.jp
 
 Notes:::
 
-Improvement: get rid of CI code, which doesn't work right now
-
 Bug: when minimizing, then maximizing from there, when restoring, the animation pretends it's going to minimize but simply goes back to the normal size.
 
 Bug: gtk demo can't be maximized, minimized, restored
