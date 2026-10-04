@@ -137,117 +137,368 @@ Drawn by the browser in HTML/CSS.
 
 ## Encoding policy
 
-(Decided 2026-10-04, replacing the earlier fast/slow mode policy; Core items 2a and 2b implement it.)
+(Decided 2026-10-04, replacing the earlier fast/slow mode policy, which chose video by changed pixels per second.
+Core item 2a implements this section; 2b implements the next one.)
 
-Two separate questions: how a surface is **prioritized** (normal or streaming) and how it is **encoded** (PNG patches
-or video). Wayland has no rendering modes: every client attaches a buffer, damages what changed and commits, and
-paces itself by frame callbacks. So streaming is recognized from behavior, not declared.
+### Background: how Wayland clients render
 
-Priority classes:
+Wayland has no rendering modes. Every client does the same thing: attach a buffer, damage the rectangles that
+changed, optionally ask for a frame callback (`wl_surface.frame`: "tell me when to draw the next frame"), commit. The
+compositor's only lever is when it sends frame callbacks. Clients differ only in how they use this:
 
-- **Normal** (medium priority): every surface starts here, new windows included.
-- **Streaming** (low priority): a surface that is **relentless**, i.e. keeps sending new data before its old data has
-  gone out (a game, a video, a busy animation).
-- Control messages (scene, input, cursor, shell) are above both and always pre-empt them.
+- Event-driven apps (terminals, editors, most toolkit apps most of the time) draw when input or content changes, with
+  small accurate damage, and ask for a callback only while they have something to draw.
+- Animating apps (scrolling, transitions, a browser playing video) ask for a callback every frame, for a while.
+- Games with vsync (EGL swap interval 1, Vulkan FIFO) loop forever; `eglSwapBuffers` blocks until the previous
+  frame's callback arrives, so **we set their frame rate**. Their damage is the whole surface.
+- Games without vsync (swap interval 0, Vulkan MAILBOX/IMMEDIATE) commit as fast as they render and ignore
+  callbacks; the compositor just uses the newest buffer.
+- Video players commit at the video's rate.
 
-When a surface is relentless:
+Optional hints exist (`wp_content_type_v1`: none/photo/video/game; `wp_tearing_control_v1`), but most apps don't
+send them, so we go by behavior.
 
-- A surface is **backlogged** from the moment a commit arrives while damage from an earlier commit is still unsent,
-  until everything it has queued (including its encoded slots, below) has been sent.
-- The measure is the fraction of time it spent backlogged over a sliding period of about 1.5 s. Promote to streaming
-  above roughly 85%; demote once it stays below roughly 40% for about 2 s (hysteresis; all tunable).
-- This measures what the app asks for, not what it gets: a throttled game is still always backlogged, so it stays
-  streaming. A one-off big repaint (launch, a view switch) leaves a backlog but no new commits, so it doesn't count.
-  A needy surface that keeps draining its queue before its next damage stays normal: it isn't causing contention.
-- Replaces the old "ignore the single largest damage" rule and "new windows start in video".
+### Two separate questions: priority and encoding
 
-Encoding:
+A surface has a **priority class** and an **encoding**, decided separately:
 
-- **Without GPU acceleration on the server (the norm: mostly VPSes), everything is PNG patches**, streaming surfaces
-  included, best effort. No H.264 at all, not even x264.
-- **PNG patches**: only the damaged areas are sent, as lossless patches of at most ~64k pixels each (to tune); larger
-  areas are split. The viewer applies patches as soon as they arrive. A streaming surface's frame can therefore tear
-  across patches (accepted: holding patches back for whole frames would add latency).
-- **Video** (H.264 of the whole surface) only with GPU acceleration, hardware encoders only, and only for streaming
-  surfaces. Leaving streaming queues a full-surface PNG render so a crisp image replaces the video. GPU acceleration
-  is to be revisited later (wave 4 G, deferred).
-- Measured (2026-10-04, our encoder at deflate level 4, full 256×256 patches): ordinary UI about 10–30 KB (typically
-  ~15 KB), photo- or game-like content about 40–150 KB, noise ~256 KB. Most patches are far smaller (a keystroke, a
-  cursor blink: under 2 KB).
+- **Class**: *normal* (medium priority) or *streaming* (low priority). Control messages (scene, input, cursor, shell,
+  clipboard, audio later) are above both and always go first.
+- **Encoding**: *PNG patches*, or *video* (H.264 of the whole surface). Video is only possible with GPU acceleration
+  (below) and only used for streaming surfaces.
 
-Damage, newest content wins (already how it works):
+A surface's class and encoding are per surface (a window's subsurfaces and popups each have their own). The viewer
+doesn't need to know a surface's class; nothing about it is in the scene protocol.
 
-- A surface's queue holds rectangles, not pixels, oldest first. New damage overlapping a queued rectangle is removed
-  (the queued rectangle keeps its place and will read the latest pixels). Pixels are read only when a patch is
-  captured; once captured, its pixels are fixed and new damage over it is queued normally. So never queue a
-  not-yet-captured area twice, never skip an area whose captured pixels may be stale.
+### GPU acceleration and encoders
+
+- **Without GPU acceleration on the server (the norm: mostly VPSes), everything is sent as PNG patches**, streaming
+  surfaces included, best effort. No H.264 at all, not even x264.
+- With GPU acceleration, streaming surfaces (that aren't small, below) are sent as video by a hardware encoder
+  (`nvh264`, `vaapih264`). There is no x264 fallback.
+- The gateway option `--encoder <auto|none|nvh264|vaapih264>` (default `auto`, replacing today's default `x264`;
+  `x264` is no longer accepted). `auto`: at gateway start, use `vaapih264` if a render node (`/dev/dri/renderD*`)
+  can be opened and GStreamer has the `vaapih264enc` element, else `nvh264` if it has `nvh264enc` and an NVIDIA
+  device is present, else `none`. The gateway logs the choice. An explicit encoder that then fails to create (no
+  device, missing element) is logged once and the session continues as `none`.
+- `none` means no video encoder is ever created: the encoder pool has size 0 and the GStreamer video pipelines are
+  never built. The x264 code in `native/encoding/src/gst_frame_encoder.c` stays for now (unused; GPU acceleration is
+  to be revisited, see wave 4 G).
+- A buffer whose pixels can't be read (`readPixels` fails; today only an unsupported SHM format, as there are no GPU
+  buffers without the GLES2 renderer) is sent as video if an encoder exists, regardless of class. With `none` it
+  can't be shown: log once per surface and send nothing for it.
+- **Small surfaces** (at most `MAX_PATCH_PIXELS`, 64k pixels) are always patches, whatever their class: one patch of
+  the whole surface is cheap, and the video encoder would pad it anyway.
+
+### Classes: when a surface is "relentless"
+
+Every surface starts **normal**, new windows included (starting low would make every new window load slowly behind
+any running game).
+
+A surface is promoted to **streaming** when it is *relentless*: it keeps sending new data before its old data has
+gone out. Defined precisely:
+
+- A surface has **unsent work** when any of these exist: queued (not yet captured) patch rectangles, items in its
+  slots (captured, being encoded, or encoded and waiting to be sent; see below), or a video frame being encoded or
+  waiting in the transport. "Sent" means handed to the socket by the scheduler.
+- The surface becomes **backlogged** when a commit with non-empty damage arrives while it has unsent work from an
+  earlier commit. It stays backlogged until it has no unsent work at all. (Commits while already backlogged change
+  nothing: the rule is idempotent.)
+- The **backlog fraction** is the share of the last `CLASS_PERIOD_MS` = 1500 ms the surface spent backlogged. For a
+  surface younger than that, it's measured over its age instead, and no promotion happens before it is
+  `CLASS_MIN_AGE_MS` = 500 ms old.
+- **Promote** to streaming when the fraction is at least `PROMOTE_FRACTION` = 0.85.
+- **Demote** to normal once the fraction has stayed below `DEMOTE_FRACTION` = 0.40 for `DEMOTE_HOLD_MS` = 2000 ms
+  without interruption.
+- Evaluated on every commit and on a 200 ms tick (the existing `EncodingContext.startTicking`), so a surface that
+  goes quiet is demoted without committing.
+
+Why this works:
+
+- It measures what the app asks for, not what it gets: a throttled game is still always backlogged (each frame
+  callback we grant brings a commit while the previous frame's patches are still queued), so it stays streaming.
+- A one-off big repaint (launch, a view switch) leaves a backlog but brings no new commits while it drains, so it
+  doesn't count.
+- A needy surface that keeps draining its work before its next damage stays normal: it isn't causing contention, and
+  if the link and CPU keep up, nothing waits and priorities don't matter.
+- It replaces the old rules "ignore the single largest damage" and "new windows start in video".
+
+Changing class:
+
+- Normal → streaming with video: drop the surface's queued and unsent patches, start its video with a key frame
+  (as the switch to fast mode does today).
+- Streaming with video → normal: release the encoder and queue a full-surface patch render so a crisp lossless image
+  replaces the video (as the switch to slow mode does today).
+- Without video, a class change changes only the priority. Nothing is dropped or re-sent.
+- If the encoder pool is empty, a promoted surface stays on patches (still streaming class).
+
+### PNG patches and damage
+
+- Only the damaged areas are sent, as lossless PNG patches of at most `MAX_PATCH_PIXELS` = 64k pixels; larger areas
+  are split (`planPatches`). A commit's damage in more than `MAX_PATCH_RECTS` = 32 pieces is sent as its bounding box.
+  PNG: row filtering in JavaScript, deflate level 4 on libuv's thread pool (`png.ts`).
+- The viewer applies patches as soon as they arrive. A streaming surface's frame can therefore tear across patches;
+  accepted, as holding patches back until a whole frame is there would add latency.
+- **Newest content wins** (already how it works): a surface's queue holds rectangles, not pixels, oldest first. New
+  damage overlapping a queued rectangle is removed (the queued rectangle keeps its place and reads the latest pixels
+  when captured). Pixels are read only when a patch is captured; from then on they're fixed and new damage over them
+  is queued normally. Never queue a not-yet-captured area twice, never skip an area whose captured pixels may be stale.
+  A surface's patches are sent in capture order (a newer patch may overlap an older one).
 - Use `wl_surface.damage`, skip empty damage, release app buffers as early as possible.
+- Patch sizes measured 2026-10-04 (our encoder, full 256×256 patches): ordinary UI about 10–30 KB (typically ~15 KB),
+  photo- or game-like content about 40–150 KB, noise ~256 KB. Most patches are far smaller (a keystroke, a cursor
+  blink: under 2 KB).
 
-Per-surface sources and the scheduler:
+### Per-surface slots
 
-- Each surface is a source with at most 2 slots: one item encoded and ready to send, one being encoded (an item is a
-  patch, or a whole video frame). A slot is filled (pixels captured) only when it frees up, so damage keeps merging
-  while the surface waits. Because a surface only encodes into free slots, CPU time follows the send schedule: no
-  process priorities needed.
-- **Frame callbacks follow the slots**: a surface whose slots are both full gets its next frame callback only when one
-  frees, so an app (a game rendering on the CPU with llvmpipe) slows down to what we can send instead of rendering
-  frames that would be merged away.
-- **Scheduler**: control messages first, always. Then a deficit round-robin over the sources' ready items, weighted by
-  bytes, with a quota per class of about 3 (normal) to 1 (streaming), tunable. Within a class, round-robin between
-  surfaces. With equal-sized patches it behaves like a per-message round-robin; byte weighting keeps it fair once
-  video frames of different sizes are in the mix. Normal surfaces are clearly preferred but never starve streaming
-  ones, and a class with nothing to send leaves the whole link to the other. The transport's queue uses the same
-  classes.
+Each surface is a source with at most **2 slots** (`SURFACE_SLOTS` = 2). An item is one patch or one video frame.
 
-Other rules:
+- A slot is taken when an item is captured (patch: pixels read; video: encoding started) and freed when the item is
+  handed to the socket, or dropped.
+- A surface may capture only while it has a free slot. So at most two of its items exist between capture and the
+  socket; everything else waits as queued rectangles, where new damage merges into it.
+- Because a surface only encodes into free slots, its CPU use follows the send schedule: a low-priority surface
+  encodes only as fast as it's allowed to send. No process priorities are needed.
 
-- A small pool of warm video encoders (server) when video exists; if it's full, a streaming surface stays on patches.
-  The browser uses software decode for now (no hard decoder limits).
-- Rejected: one tiled "atlas" video stream for all windows (too much trouble for the benefit).
+### Encode scheduling
+
+PNG compression runs on libuv's thread pool (4 threads by default). The number of patches being encoded at once,
+across all surfaces, is limited to `MAX_CONCURRENT_ENCODES` = 4, so a streaming surface's encodes can't fill the thread
+pool's queue ahead of a normal surface's. When an encode finishes (or a slot frees), the next surface allowed to capture
+is chosen by the same class rule as sending: normal surfaces first, but every 4th capture goes to a streaming surface
+if one is waiting (3:1), round-robin between surfaces within a class. Counting captures, not bytes, is fine here:
+patches are similar in work. Video encodes happen on the GPU (hardware encoders) and are not counted.
+
+### Send scheduling
+
+The transport (`ViewerTransport`) decides what goes out next whenever it may send (in 2a: today's rule, at most one
+data message handed to the socket at a time and `bufferedAmount` under 64 KB; in 2b: when the congestion controller
+allows it):
+
+1. Control messages first, always, all of them.
+2. Data items (patches and video frames) by **deficit round-robin between the two classes, weighted by bytes**:
+   - Each class keeps a deficit counter (bytes). When a class's turn comes, it adds its quantum: normal
+     `3 × DRR_QUANTUM`, streaming `1 × DRR_QUANTUM`, with `DRR_QUANTUM` = 16 KB. It then sends items while the next
+     item's size is at most its deficit, subtracting each item's size. Then the other class's turn.
+   - A class with nothing waiting gets its deficit reset to 0 and its turn skipped: the other class gets the whole
+     link (work-conserving).
+   - Within a class, round-robin between surfaces, one item per surface per visit. A surface's items go out in order.
+   - With equal-sized patches this behaves like a 3:1 per-message round-robin; byte weighting keeps it fair once
+     video frames of very different sizes are mixed in. Normal surfaces are clearly preferred but never starve
+     streaming ones.
+3. Video frame rules stay as today: a key frame replaces everything unsent of its surface, at most 3 unsent delta
+   frames per surface before resyncing with a key frame.
+
+### Frame callbacks
+
+- A surface's frame callbacks are held while both of its slots are taken; they're released at the next tick of the
+  frame clock (`FramePacing.ts`, at the viewer's refresh rate) once a slot is free. So an app slows down to what we
+  can send (a game rendering on the CPU with llvmpipe doesn't render frames that would only be merged away), and a
+  vsync game runs at exactly the rate it's given.
+- This replaces the delay by the server's average processing time (`ProcessingDuration`). The viewer's decode-time
+  part stays until 2b replaces the viewer feedback with acks.
+- Without an attached viewer, callbacks stay throttled to about 1 per second, as today.
+
+### Other rules
+
+- The encoder pool (warm hardware video encoders, `videoStreams`, default 4) caps the number of surfaces streamed as
+  video; when it's empty, streaming surfaces stay on patches.
+- The browser uses software decode for now (no hard decoder limits).
+- Rejected: one tiled "atlas" video stream for all windows (too much trouble for the benefit); process priorities
+  (nice levels) for streaming work (not needed: slots and the encode scheduler do it inside one process); holding a
+  streaming surface's patches back for whole frames (latency).
 
 ## Transport and congestion control
 
 (Decided 2026-10-04; Core item 2b.)
 
-The goal: never let more than about 20 ms of data queue anywhere between the server and the screen, on any link
-speed and latency, without starving throughput on fast high-latency links. TCP's own backpressure already keeps the
-queues bounded (one item in flight, `TCP_NOTSENT_LOWAT` 32 KB on direct TCP, a 32 KB send buffer to the gateway, the
-gateway's relay uses `pipe()` and sets `TCP_NOTSENT_LOWAT` on the browser socket), but bounded in bytes, not time, and
-the kernel's usual congestion control (cubic) fills router buffers at the bottleneck (bufferbloat).
+### The problem
 
-- **Our own BBRv3-style congestion controller in the session process**, on top of whatever TCP the kernel runs (QUIC
-  stacks do the same in user space). Pacing our sends at the measured bottleneck rate keeps TCP from ever filling the
-  network's queues, so the distro's congestion control doesn't matter.
-  - Model: bottleneck bandwidth (max delivery rate over the last couple of probe cycles), base delay (min round-trip
-    time over ~10 s), in-flight limit about bandwidth × base delay, pacing rate from them.
-  - Delivery-rate samples come from viewer acks; samples taken while we had nothing to send (app-limited, which is
-    most of the time on a desktop) may only raise the bandwidth estimate.
-  - States as in BBRv3 (IETF draft-ietf-ccwg-bbr; check its constants when implementing): Startup, Drain, ProbeBW's
-    gentle cycle (DOWN, CRUISE, REFILL, UP at +25% every ~2–3 s), ProbeRTT the v3 way (half the window for ~200 ms,
-    at most every ~5 s, skipped when an idle moment already showed the base delay). Gentle probing was the reason for
-    choosing v3: v1's ProbeRTT drops to 4 packets and stalls a saturating stream for ~200 ms every 10 s.
-  - We can't see packet loss or ECN, which v2/v3 use to bound data in flight. Instead a **delay bound**: when
-    round-trip times rise more than ~20 ms above the base delay, lower the in-flight limit, as v3 does on loss.
-  - At least 2 non-control items may always be in flight, so a single large item never stalls the link.
-  - Control messages bypass the controller (they're tiny) and are never held back.
-- **Acks on arrival**: the viewer acknowledges each data message when it arrives (not after applying it), so samples
-  measure the network, not decoding. Round-trip times are measured on the server only (send time to ack), no clock
-  sync. These acks replace the viewer's current decode-time feedback.
-- **Viewer backlog hold**: the browser's WebSocket API has no backpressure (it reads everything and queues message
-  events), so the viewer's own backlog is invisible to TCP. Each ack carries the bytes received but not yet applied.
-  The server holds non-control items while that is more than 1 MB, not counting the largest item. The report is half
-  a round trip old, so the real backlog can briefly exceed it (fine for a safety net; it only triggers if the browser
-  decodes slower than the server encodes, which should be rare). The viewer must also report when its backlog drops
-  back under the threshold, or the server would wait forever.
-- Not designed for very slow links: at least a lower-end broadband connection is expected, latency may be high.
-- Tested against a simulated link (bottleneck bandwidth, base delay, buffer size) on a virtual clock, so the tests run
-  in seconds; WSL can't shape real traffic without root.
+The goal: never let more than about 20 ms of data queue anywhere between the server and the screen in steady
+state, on any link speed and latency, without starving throughput on fast high-latency links.
+
+What exists today: TCP's own backpressure keeps every queue bounded, so nothing runs away or disconnects. The
+transport hands one data message at a time to the socket; `TCP_NOTSENT_LOWAT` is 32 KB on direct TCP; the session's
+Unix socket to the gateway has a 32 KB send buffer; the gateway relays with `pipe()` (backpressure) and sets
+`TCP_NOTSENT_LOWAT` on the browser's socket (`gateway/src/web.ts`). But those bounds are in bytes, not time
+(about 150 KB in all: ~120 ms at 10 Mbit/s), and the kernel's usual congestion control (cubic) keeps filling the
+router buffer at the bottleneck until packets drop (bufferbloat: often hundreds of milliseconds). A reverse proxy in
+front of the gateway would add its own buffer. And the browser's WebSocket API has no backpressure at all: the
+browser reads everything off the socket and queues it as message events, so a viewer that decodes too slowly builds
+an unbounded queue in the page.
+
+Not designed for very slow links: at least a lower-end broadband connection is expected; latency may be high.
+
+### Our own BBRv3-style controller
+
+A congestion controller in the session process, on top of whatever TCP the kernel runs (QUIC stacks do the same in
+user space). If we pace our sends at the measured bottleneck rate and keep the kernel's unsent queue small
+(`TCP_NOTSENT_LOWAT`), TCP never has more data than the path can carry, so the network's queues stay short whatever
+the kernel's congestion control is, and through any relay or proxy (the gateway, nginx), since everything is measured
+end to end.
+
+It follows BBRv3 as specified in the IETF draft draft-ietf-ccwg-bbr (revision 06, July 2026; the constants below are
+from it), adapted to messages instead of packets, with one substitution: we can't see packet loss or ECN, so a
+**delay signal** takes the place of loss (below). Code: a pure TypeScript module with an injected clock and no I/O
+(e.g. `packages/compositor-proxy/src/viewer/congestion.ts`), one instance per viewer connection (a new connection
+starts from scratch).
+
+Units: bytes and milliseconds. "Item" = one data envelope (PATCH or FRAME). Control messages (CONTROL envelopes) are
+never counted, paced or held: they're tiny and always go first.
+
+**Per-item send records.** For every data item sent, the controller records: its size, send time, `delivered` (total
+bytes acked so far) and `delivered_time` at send, `first_send_time` of the current send burst, and whether the
+connection was app-limited when it was sent. As in the draft's delivery-rate sampling (section 4.1).
+
+**Acks and samples.** Acks are cumulative (below). For each newly acked item, in order:
+
+- `delivered += size`, `delivered_time = now`.
+- RTT sample: `now − send_time`.
+- Delivery-rate sample (computed for the last item newly acked by this ack): `send_elapsed = send_time −
+  first_send_time`, `ack_elapsed = delivered_time − P.delivered_time`, rate = `(delivered − P.delivered) /
+  max(send_elapsed, ack_elapsed)` (the `max` prevents overestimation from ack compression). A sample is app-limited if
+  its item was sent while app-limited.
+
+**Rounds.** A round ends when an ack covers the item that was the last one sent when the round started
+(`next_round_delivered`, as in the draft). Round counting drives Startup, REFILL, ProbeRTT and the filters.
+
+**Model.**
+
+- `max_bw`: windowed max of delivery-rate samples over the last `MaxBwFilterLen` = 2 ProbeBW cycles. App-limited
+  samples are used only if they're higher than the current estimate (they may raise it, never lower it): a desktop is
+  app-limited most of the time, and idleness must not look like a slow link.
+- `min_rtt`: min of RTT samples over `MinRTTFilterLen` = 10 s, with the draft's two-level update
+  (`probe_rtt_min_delay` over `ProbeRTTInterval` = 5 s; `min_rtt` takes it when lower or when 10 s expired).
+  An idle moment's samples (nothing queued) refresh it naturally.
+- `bdp = max_bw × min_rtt`.
+- `extra_acked`: the draft's ack-aggregation estimate, windowed max over `ExtraAckedFilterLen` = 10 rounds; added to
+  the in-flight limit. This matters for us: the browser's event loop delivers acks in bursts.
+- Short-term bounds `bw_shortterm` and `inflight_shortterm`, long-term bound `inflight_longterm`, all unset
+  (infinite) at the start, adapted by the delay signal as the draft adapts them by loss.
+
+**Pacing.** `pacing_rate = pacing_gain × bw × (1 − 1%)` (`PacingMarginPercent` 1%), where `bw = min(max_bw,
+bw_shortterm)`. Before the first RTT sample: `pacing_rate = StartupPacingGain × initial window / 1 ms`, i.e.
+effectively unpaced for the initial window. An item may be handed to the socket no earlier than `last_send_time +
+last_item_size / pacing_rate`. A timer (millisecond resolution is enough) wakes the transport when the next item is
+due.
+
+**In-flight limit.** `inflight` = bytes sent and not yet acked. `max_inflight = cwnd_gain × bdp + extra_acked`, then
+bounded by `inflight_shortterm` and `inflight_longterm` per state as in the draft's table (section 5.6). An item may be
+sent only if `inflight + size ≤ max_inflight` **or fewer than `MIN_ITEMS_IN_FLIGHT` = 2 items are in flight**, so a
+single large item never stalls the link. Initial window before any estimate: 64 KB (`INITIAL_WINDOW`), with the same
+2-item floor.
+
+**States and gains** (from the draft):
+
+| State | Pacing gain | Cwnd gain | Exit |
+|---|---|---|---|
+| Startup | 2.77 (4·ln 2) | 2 | Full pipe: 3 non-app-limited rounds in a row with delivery rate growth under 25%; or a delay signal (below) |
+| Drain | 0.5 | 2 | `inflight ≤ bdp` → ProbeBW_DOWN |
+| ProbeBW_DOWN | 0.90 | 2 | Time to probe (→ REFILL), or `inflight ≤ (1 − 0.15) × inflight_longterm` (headroom 0.15) and `inflight ≤ bdp` → CRUISE |
+| ProbeBW_CRUISE | 1.0 | 2 | Time to probe → REFILL |
+| ProbeBW_REFILL | 1.0 | 2 | After one round → UP (short-term bounds reset to unset on entry) |
+| ProbeBW_UP | 1.25 | 2.25 | Delivery rate plateau (full-pipe check), or a delay signal → DOWN |
+| ProbeRTT | 1.0 | 0.5 | After `ProbeRTTDuration` = 200 ms with `inflight ≤ 0.5 × bdp` and at least one round → ProbeBW_DOWN (or Startup if the pipe was never full) |
+
+- **Time to probe**: `T_probe = min(T_bbr, T_reno)`, `T_bbr` uniformly random in 2–3 s per cycle, `T_reno` = min(BDP
+  in items, 62 or 63 picked at random) rounds, as in the draft (`PickProbeWait`, `IsRenoCoexistenceProbeTime`).
+- **UP growth**: when `inflight_longterm` is set and limits sending, it grows by 1, 2, 4, 8, ... × `PROBE_UNIT`
+  (16 KB, standing in for the draft's packet size) per round (`probe_up_cnt` doubling), as in the draft.
+- **ProbeRTT**: entered when `probe_rtt_min_delay` hasn't been refreshed for 5 s and we're not restarting from idle;
+  halves the in-flight limit (BBRv3's gentle probe, chosen over v1's 4-packet drop, which stalls a saturating stream
+  for ~200 ms every 10 s). While in it, delivery-rate samples are marked app-limited. Skipped naturally on a mostly
+  idle desktop: idle moments refresh `probe_rtt_min_delay`.
+- **App-limited**: the connection is app-limited when the transport has no data item ready while the controller would
+  allow sending. Mark it until the items in flight at that moment are acked (`app_limited = delivered + inflight`), as
+  in the draft.
+- **Restart from idle**: when sending resumes after `inflight` reached 0, pace at `bw` (pacing gain 1) without
+  bursting, and don't enter ProbeRTT on that ack (`idle_restart`).
+
+**Delay signal (instead of loss).**
+
+- `DELAY_THRESHOLD_MS` = 20 ms: an RTT sample is "high" if it exceeds `min_rtt + 20 ms`.
+- A round is **too high** if more than half of its RTT samples (at least 4 samples) are high. That is the analogue of
+  the draft's loss rate over `LossThresh` (2%) per round: robust to single jittery samples.
+- Reactions, mirroring the draft's loss reactions:
+  - Startup: exit to Drain (the pipe is full), setting `inflight_longterm = max(bdp, inflight at the signal)`.
+  - ProbeBW_UP: set `inflight_longterm = max(bdp, Beta × inflight at the signal)` with `Beta` = 0.7, mark the probe
+    as having gone too high (`prev_probe_too_high`: the next UP is precautionary and stops at `inflight_longterm`),
+    go to DOWN.
+  - DOWN, CRUISE, REFILL, ProbeRTT: `bw_shortterm = max(latest delivery rate, Beta × bw_shortterm)` and
+    `inflight_shortterm = max(latest inflight, Beta × inflight_shortterm)`, once per too-high round. REFILL resets
+    both short-term bounds to unset on entry, as in the draft.
+- Accepted consequence: a ProbeBW_UP at 1.25× for one round adds up to about 0.25 × RTT of queue before the signal
+  can come back (75 ms on a 300 ms link), every 2–3 s while a stream saturates the link; DOWN drains it. Steady state
+  (CRUISE) stays within the 20 ms target.
+
+### Acks and the viewer backlog
+
+- New viewer → server envelope **ACK** (`EnvelopeKind.ACK` = 5), binary: `u32le received`, `u32le backlogBytes`,
+  `u32le largestPendingBytes`. Scene protocol version bumps (11, or the next free number).
+  - `received`: cumulative count of data envelopes (PATCH and FRAME) received on this connection (mod 2³²; the
+    server compares with wraparound). TCP keeps order, so data envelopes are numbered implicitly in send order; no
+    sequence numbers are added to PATCH or FRAME.
+  - `backlogBytes`: bytes of data envelopes received but not yet applied. Applied: a patch drawn into the surface; a
+    video frame decoded (its `VideoFrame` output delivered). Dropped items count as applied.
+  - `largestPendingBytes`: the size of the largest single item in that backlog (0 if none).
+- **When the viewer acks**: first thing in the WebSocket message handler for every data envelope, before any decoding,
+  so RTT samples measure the network, not decoding. Also, after applying an item, if the last ACK it sent reported
+  `backlogBytes − largestPendingBytes > BACKLOG_HOLD_BYTES`, it sends a fresh ACK (same `received`) so the server
+  learns the backlog went down. Without this the server, holding, would wait forever.
+- **Backlog hold**: the server sends no data items while the latest reported `backlogBytes − largestPendingBytes >
+  BACKLOG_HOLD_BYTES` = 1 MB (constant in the scene protocol package, shared by both sides). Excluding the largest
+  item keeps one big frame from tripping it. The report is half a round trip old, so the real backlog can briefly
+  exceed the threshold by bandwidth × one-way delay; fine for a safety net, it only triggers if the browser decodes
+  slower than the server encodes, which should be rare. While holding, the connection counts as app-limited.
+- RTT is measured on the server only (send time to ack receipt): no clock sync.
+- The acks replace the `feedback` message's `decodeDuration` (removed); `refreshInterval` stays for the frame clock.
+  Frame callbacks then depend only on the slots (see [Frame callbacks](#frame-callbacks)).
+
+### Transport integration
+
+- The send scheduler (see [Send scheduling](#send-scheduling)) asks the controller before handing a data item to the
+  socket: allowed by the backlog hold, the in-flight limit (or the 2-item floor) and the pacing time. If not, the item
+  stays in its surface's slot, the surface's frame callbacks stay held, and its damage keeps merging in its queue.
+- The old gate (one data message at a time, `bufferedAmount ≤ 64 KB`) is replaced by the controller's, but a local
+  safety limit stays: never hand a data item to the socket while `ws.bufferedAmount` is over 256 KB (should never
+  happen with the controller working; log once if it does). The kernel buffer settings stay.
+- The controller is told when the transport has nothing to send (app-limited) and when it has data waiting.
+
+### Testing
+
+- Unit tests against a **simulated link** on a virtual clock (no real sockets, no sleeps; each scenario runs in well
+  under a second of real time): a bottleneck with configurable bandwidth, propagation delay each way and buffer
+  (bytes; unbounded models bufferbloat), optional jitter and ack batching (acks released every 16 ms, like a browser
+  frame), and a viewer that acks on arrival and applies items at a configurable rate. Sources: saturating (always has
+  an item), constant-rate, sporadic desktop bursts. Scenarios and assertions (after a warm-up of 2 s unless noted):
+  1. 20 Mbit/s, 40 ms RTT, saturating: throughput ≥ 85% of the link; CRUISE queueing delay ≤ 20 ms; no sample over
+     40 ms after warm-up except during UP.
+  2. 100 Mbit/s, 300 ms RTT, saturating: throughput ≥ 80%; queueing delay peaks ≤ 0.3 × RTT (UP probes), ≤ 20 ms in
+     CRUISE.
+  3. Bandwidth drops 50 → 10 Mbit/s mid-stream: queueing delay back under 25 ms within 1 s.
+  4. Bandwidth rises 10 → 50 Mbit/s: throughput ≥ 80% of the new rate within 6 s.
+  5. Base RTT rises 40 → 120 ms (route change): throughput ≥ 80% again within 12 s, no lasting collapse.
+  6. Steady growth: a source sending constantly 5% faster than the link for 60 s: queueing delay never exceeds 30 ms
+     after warm-up, no drift of `min_rtt` above the true base by more than 5 ms.
+  7. Sporadic desktop traffic (bursts of 1–30 patches with idle gaps): `max_bw` not lowered by idle periods; no
+     ProbeRTT while idle moments refresh `min_rtt`.
+  8. Jitter ±5 ms and 16 ms ack batching on 20 Mbit/s, 40 ms: throughput ≥ 80%, no repeated false delay signals.
+  9. Slow viewer (applies at half the link rate): data stops while the reported backlog (minus the largest item) is
+     over 1 MB, resumes after the viewer's fresh ACK, never deadlocks.
+  10. Control messages are never delayed by the controller or the hold.
+  11. 2-item floor: a single item larger than the in-flight limit is still sent.
+- `scripts/test-gateway.sh` must still pass (the e2e link is local, so the controller should simply stay out of the
+  way: check that no e2e step got slower).
+
+### Rejected and deferred
+
 - Rejected: a second WebSocket for latency pings (it waits in the same bottleneck queue as the data, so it measures
   base plus queue unless the router queues per connection); a fixed in-flight cap in items or bytes (latency then
-  depends on link speed, and a 300 ms link is starved); hand-rolled delay estimation with ad-hoc fixes for base-delay
-  drift (whack-a-mole; BBR's model covers it).
+  depends on link speed, and a 300 ms link is starved: 64 KB per round trip is ~1.7 Mbit/s); hand-rolled delay
+  estimation with ad-hoc fixes for base-delay drift (whack-a-mole; BBR's model covers it); acks after applying
+  (they'd measure decoding, not the network; the backlog report covers decoding).
 - **On the table for later: kernel BBR** (`net.ipv4.tcp_congestion_control=bbr` system-wide, or per socket by the
-  gateway when `bbr` is in `tcp_allowed_congestion_control`; Ubuntu kernels ship `tcp_bbr`). Not used for now to keep
+  gateway when `bbr` is in `tcp_allowed_congestion_control`; Ubuntu kernels ship `tcp_bbr`). Not used for now, to keep
   installation simple. It would complement our controller, not replace it, and would belong in the install script.
 
 ## Audio (playback only)
@@ -419,24 +670,60 @@ the kernel's usual congestion control (cubic) fills router buffers at the bottle
      `git submodule update --init`.
    - Must still pass `scripts/test-gateway.sh` and the unit tests; GPU (dmabuf) buffers stay untested without
      hardware.
-2a. **Streaming class, scheduler and PNG-only without GPU acceleration** (see [Encoding policy](#encoding-policy)).
-    Sonnet. Works without 2b.
-    - Without GPU acceleration on the server, everything is PNG patches: no video, no x264. Video only with GPU
-      acceleration and hardware encoders, for streaming surfaces.
-    - Normal and streaming priority classes; every surface starts normal; promotion by the "relentless" measure
-      (time backlogged with new commits arriving, ~1.5 s period, hysteresis), not by damage rate.
-    - Per-surface sources with 2 slots (one ready, one encoding), replacing `PatchPump`'s single round-robin; frame
-      callbacks follow the slots.
-    - Scheduler: control first, then byte-weighted deficit round-robin between the classes (about 3:1, tunable),
-      round-robin between surfaces within a class, in the patch pipeline and in `ViewerTransport`.
-2b. **Our own congestion control** (see [Transport and congestion control](#transport-and-congestion-control)). Opus
-    fork (subtle: bugs show up as random latency spikes).
-    - BBRv3-style controller in the session process with a delay bound instead of loss/ECN, at least 2 non-control
-      items in flight, control messages exempt.
-    - Viewer acks on arrival (replacing the decode-time feedback), carrying the viewer's backlog in bytes; the server
-      holds non-control items above 1 MB of backlog (not counting the largest item); the viewer reports when it drops
-      back under.
-    - Unit tests against a simulated link on a virtual clock.
+2a. **Streaming class, scheduler and PNG-only without GPU acceleration.** The spec is
+    [Encoding policy](#encoding-policy); this lists the work. Sonnet, own branch and worktree. Works without 2b. No
+    scene protocol change.
+    - Gateway: `--encoder <auto|none|nvh264|vaapih264>`, default `auto`, `x264` removed (`config.ts`, `ipc.ts`,
+      `monitor.ts`, `session-process.ts`, docs and `--help`). Detection in the gateway at start, logged. The session
+      gets `none` or a hardware encoder; with `none`, `startWlrootsCompositor` makes an encoder pool of size 0 and
+      never creates a `WlrEncoder`. A hardware encoder that fails to create is logged once and treated as `none`.
+    - `encoding/policy.ts`: remove `DamageMeter`, `nextMode`, `EncodingMode`, `FAST_ABOVE_...`, `SLOW_BELOW_...`,
+      `INITIAL_FAST_MS`; add the relentless measure (a pure class: `markBackloggedStart(now)`,
+      `markBackloggedEnd(now)`, `fraction(now)`, plus the promote/demote decision with its constants), keeping
+      `planPatches` and the patch constants.
+    - `encoding/SurfaceEncoder.ts`: class (`'normal' | 'streaming'`) instead of mode; video only when streaming, an
+      encoder is available and the surface isn't small (or its pixels can't be read). Track unsent work and the
+      backlogged state as defined in the spec. Class changes as specified (with video: drop patches + key frame /
+      crisp full render; without: priority only). `refresh()` (viewer attached, key frame needed) unchanged in
+      effect.
+    - Replace `PatchPump`'s single round-robin set with per-surface slots (`SURFACE_SLOTS` = 2) and the encode
+      scheduler (`MAX_CONCURRENT_ENCODES` = 4, 3:1 normal to streaming by capture count, round-robin within a class).
+      Keep capture-order sending per surface (`sendTails`) and the epoch check for stale results.
+    - `viewer/ViewerTransport.ts`: `OutgoingMessage` for patches and frames carries the class (`'normal' |
+      'streaming'`); replace the single `pendingFrames` round-robin with the byte-weighted deficit round-robin between
+      the classes (`DRR_QUANTUM` = 16 KB, quanta 3:1), round-robin between surfaces within a class. Control first as
+      today; key frame and delta frame rules as today. The send gate stays as today (one data message at a time,
+      `bufferedAmount` ≤ 64 KB). A patch's `done(true)` (slot freed) when it's handed to the socket, as today.
+    - Frame callbacks (`WlrCompositor.ts`, `FramePacing.ts`): held while both slots are taken, released at the next
+      frame-clock tick once one is free; remove the `ProcessingDuration` delay; keep the viewer decode-time delay and
+      the detached throttle.
+    - All constants named and grouped at the top of their files, so they're easy to tune.
+    - Unit tests: the measure (a one-off big repaint stays normal; a surface committing every frame callback while
+      its patches queue is promoted within ~1.5 s; a throttled one stays streaming; a needy one that drains between
+      commits stays normal; demotion after 2 s below 0.40; nothing before 500 ms of age); the encode scheduler (3:1,
+      no starvation, at most 4 encodes, slots respected); the send scheduler (byte-weighted 3:1 with mixed sizes,
+      work-conserving when one class is empty, per-surface order kept, control first); frame callbacks held and
+      released by slots; `none` never creates a video encoder; `auto` detection with mocked probes.
+    - `scripts/test-gateway.sh` passes (WSL has no render node, so it runs `none`: e2e checks that expect video
+      must be changed to expect patches; the viewer's video decoding then has no e2e coverage on this machine, so
+      keep its unit tests). If cheap, an e2e check that a client committing full damage on every frame
+      callback keeps an interactive window (foot) responsive: foot's keystroke reaches the screen within the usual
+      wait while the busy client runs.
+    - Report: CPU use and the busy client's frame rate with and without a busy client, by hand, not asserted.
+2b. **Our own congestion control.** The spec is
+    [Transport and congestion control](#transport-and-congestion-control); this lists the work. Opus fork (subtle:
+    bugs show up as random latency spikes), own branch and worktree, after 2a is merged (it plugs into 2a's send
+    scheduler).
+    - The controller as a pure module with an injected clock (`viewer/congestion.ts` or similar), following the
+      draft's pseudocode closely (keep the draft's names in comments so it can be checked against it).
+    - Scene protocol: `EnvelopeKind.ACK`, `BACKLOG_HOLD_BYTES`, `feedback` loses `decodeDuration`; version bump.
+    - Viewer: ack on arrival for every data envelope, track backlog bytes and the largest pending item, fresh ACK
+      after applying while the last report was over the hold threshold.
+    - Transport: the controller and the backlog hold gate data items; pacing timer; the 256 KB local safety limit;
+      app-limited notifications.
+    - Frame callbacks: drop the decode-time delay (slots only).
+    - The simulated-link test harness and the scenarios listed in the spec; `scripts/test-gateway.sh` passes.
+    - Report: how the scenarios came out (numbers), anything in the draft that didn't map cleanly onto messages.
 3. **Viewer: one DOM element per window instead of one WebGL canvas.** Each window becomes a positioned element with
    its own canvas, stacked in DOM order, so the browser does stacking, clipping, hit-testing, occlusion and window
    moves/animations (CSS transforms), and window decorations and shadows can be HTML/CSS that stacks with its window.
