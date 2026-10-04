@@ -274,21 +274,26 @@ Other rules:
      - Build: wlroots 0.17 needs `werror=false` (assert-only variables with `b_ndebug`); its Wayland and X11 backends
        can't be disabled in 0.17, so the addon also links libwayland-client (harmless).
      - The encoder owns `frame_buffer.user_data` (its reference count); the held buffer travels alongside it.
-   - **Steps** (the fork's estimate: 2-3 weeks of human-paced work, likely hours per step for an agent; lines are back
-     of the envelope):
+   - **Work plan: three waves.** Within a wave, tasks run in parallel, each on its own branch and worktree; a wave
+     starts once the previous one is merged and tested. At most about three branches at once: wave 2 and 3 tasks all
+     add to `wlr_core.c` and `WlrCompositor.ts`, so more means painful merges (and each branch needs hands-on testing).
+     Agents: Sonnet subagents by default; an Opus fork only for the tricky tasks (marked), as opposed to wiring
+     straightforward code together. Lines are back of the envelope; the prototype's estimate was 2-3 weeks of
+     human-paced work in total, likely a few days of wall-clock time with agents.
 
-     | Step | Estimate | Lines added |
-     |---|---|---|
-     | 1. Swap the core: wlroots build becomes the default (CI gets meson); the session process on `WlrCompositor` with the desktop shell (launching, client PIDs from `wl_client_get_credentials`); fullscreen, popup unconstraining, key repeat, keyboard layout from the locale, Caps/Num Lock sync; cheap globals (viewporter, presentation time, xdg-activation, single-pixel buffer, idle inhibit); unit tests for `WlrCompositor` with the addon mocked; the e2e test on it. Then delete the old stack (below). | ~1 week | 1.5-2.5k |
-     | 2. HiDPI, server side: output scale and `wp_fractional_scale_v1` from the viewer's reported scale. | 1 day | 100-200 |
-     | 3. XWayland: `wlr_xwayland` with its window manager; X11 windows (including override-redirect menus and tooltips) become scene windows. | 2-3 days | 400-700 |
-     | 4. Clipboard with the browser: a server-side data source for text from the browser (on Ctrl+V), the selection read through a pipe and sent to the viewer; primary selection the same way. X11/Wayland sync comes with `wlr_xwayland`. | ~2 days | 500-700 |
-     | 5. Drag and drop: between remote apps via wlroots' seat drags, with the drag icon shown by the viewer; then local files into remote apps (uploaded, offered as `text/uri-list`). | 2-3 days | 600-900 |
-     | 6. GPU buffers: linux-dmabuf with the GLES2 renderer, dmabuf readback for patches and import for video, ported from `native/encoding/src/pixels.c`. Needs hardware to verify. | 1-2 days | 200-400 |
+     | Wave | Task | Agent | Lines added |
+     |---|---|---|---|
+     | 1 | **Make wlroots the default**: the session process on `WlrCompositor`; the desktop shell on it (Apps menu, launching, notifications; client PIDs from `wl_client_get_credentials`); CI and build docs get meson and the XWayland packages; unit tests for `WlrCompositor` with the addon mocked; `scripts/test-gateway.sh` passes on it. Everything else builds on this. | Fork (tricky: session lifecycle, the prototype's gotchas) | ~1k |
+     | 2 | **A. Window-state sync**: the server owns window state; sequence-number reconciliation (above) in the viewer, the scene protocol and `WlrCompositor`. | Fork (tricky: ordering and races) | 300-500 |
+     | 2 | **B. XWayland**: `wlr_xwayland` with its window manager; X11 windows (including override-redirect menus and tooltips) become scene windows. | Fork (tricky: X11 quirks) | 400-700 |
+     | 2 | **C. Delete the old stack**: the libwayland fork and its addons (~33k lines), `packages/compositor` (~9.4k), `@gfld/compositor-wasm`, `@gfld/xtsb` (~14k), generated protocol code (~6k), the proxy's interceptors and generators (~1-2k), the old session process; docs and build scripts updated. Only removes what nothing else uses. | Sonnet | ~0 (60k+ deleted) |
+     | 3 | **D. Polish**: fullscreen, popups kept on screen, key repeat, keyboard layout from the locale, Caps/Num Lock sync; cheap globals (viewporter, presentation time, xdg-activation, single-pixel buffer, idle inhibit). | Sonnet | 500-800 |
+     | 3 | **E. Clipboard with the browser, then drag and drop** (in that order, one agent: drag and drop reuses the clipboard's data plumbing). Clipboard: a server-side data source for text from the browser (on Ctrl+V), the selection read through a pipe and sent to the viewer, primary selection the same way; X11/Wayland sync comes with `wlr_xwayland`. Drag and drop: between remote apps via wlroots' seat drags with the drag icon shown by the viewer, then local files into remote apps (uploaded, offered as `text/uri-list`). | Sonnet | 1.1-1.6k |
+     | 3 | **F. HiDPI, server side**: output scale and `wp_fractional_scale_v1` from the viewer's reported scale. | Sonnet | 100-200 |
+     | any time from 2 | **G. GPU buffers**: linux-dmabuf with the GLES2 renderer, dmabuf readback for patches and import for video, ported from `native/encoding/src/pixels.c`. Can't be verified here; may wait for hardware. | Sonnet | 200-400 |
 
-     Step 1 alone gives today's features on wlroots. In total about 3.5-5.5k lines added and 60k+ deleted (much of it
-     generated or vendored): the libwayland fork and its addons (~33k), `@gfld/xtsb` (~14k), `packages/compositor`
-     (~9.4k), generated protocol code (~6k), the proxy's interceptors and generators (~1-2k).
+     Wave 1 alone gives today's features on wlroots. In total about 3.5-5.5k lines added and 60k+ deleted (much of
+     the deleted code is generated or vendored).
    - **Packages**: the build needs `meson` (and ninja). XWayland needs `xwayland`, `libxcb-composite0-dev`,
      `libxcb-ewmh-dev`, `libxcb-icccm4-dev`, `libxcb-render0-dev`, `libxcb-res0-dev`, `libxcb-xfixes0-dev`.
      `libxcb-errors-dev` (nicer X11 error messages, optional) isn't packaged for Ubuntu 24.04. Add them to the CI
