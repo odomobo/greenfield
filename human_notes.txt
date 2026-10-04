@@ -62,8 +62,6 @@ Bug: windows can appear in different places under the icon. They should be left-
 
 Bug: can't use right-click menu on app icons, because they disappear when mouse moves off of app thumbnail itself (app menu doesn't keep itself visible).
 
-Bug: resizing causes apps to crash
-
 Bug: move from the right-click menu isn't actually useful (we can't use it to move a window left or up).
 
 Improvement: video playback is decent, but still uses a lot of cpu
