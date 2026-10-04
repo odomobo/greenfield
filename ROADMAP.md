@@ -385,9 +385,11 @@ Other rules:
      the windows it covered, and covers others; the same goes for the minimize, restore and maximize animations and
      for windows following a dragged parent. If the server held back damage for regions it thinks are hidden, the
      viewer would show stale content there (or nothing, for a surface never sent). Likely approach: the viewer tells
-     the server when an interaction or animation starts and ends; while one runs, the windows involved neither occlude
-     nor are considered occluded (everything they could reveal is sent as usual), and when it ends the server
-     recomputes with the final layout and sends the damage accumulated in regions that became visible. Cases to
+     the server when an interaction or animation starts and ends. On start, the server recomputes visibility with the
+     windows involved occluding nothing (and not considered occluded themselves), and immediately sends the damage
+     accumulated in every region that is no longer guaranteed hidden: the drag may uncover any of it from the very
+     first frame (a window moved or shrunk away from what it covered). While it runs, those regions get updates as
+     usual. On end, the server recomputes with the final layout, and regions hidden again start accumulating. Cases to
      check: drags, resizes (stretched content), the window menu's Move/Size, animations, dialogs moving with their
      parent, a viewport shrink moving windows, stacking changes from a click, a second viewer taking over mid-drag.
      Probably a fork, not a Sonnet task.
