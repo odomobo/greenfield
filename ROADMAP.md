@@ -379,8 +379,18 @@ Other rules:
      and resumes with a key frame.
    - Fully hidden surfaces get throttled frame callbacks, so the app idles.
    - Taskbar hover previews may show a slightly stale image of a hidden window (accepted).
-   - The viewer's own state can briefly run ahead of the server's (a drag, an animation); at worst a region updates a
-     few milliseconds late.
+   - **The viewer's layout runs ahead of the server's, for long stretches** (tricky, needs care to cover every case):
+     moves and resizes are only sent when the drag ends, so during a drag the server's positions and sizes are stale,
+     and its idea of what covers what is wrong. A window being dragged (or stretched while resizing) reveals parts of
+     the windows it covered, and covers others; the same goes for the minimize, restore and maximize animations and
+     for windows following a dragged parent. If the server held back damage for regions it thinks are hidden, the
+     viewer would show stale content there (or nothing, for a surface never sent). Likely approach: the viewer tells
+     the server when an interaction or animation starts and ends; while one runs, the windows involved neither occlude
+     nor are considered occluded (everything they could reveal is sent as usual), and when it ends the server
+     recomputes with the final layout and sends the damage accumulated in regions that became visible. Cases to
+     check: drags, resizes (stretched content), the window menu's Move/Size, animations, dialogs moving with their
+     parent, a viewport shrink moving windows, stacking changes from a click, a second viewer taking over mid-drag.
+     Probably a fork, not a Sonnet task.
 7. **Text input methods (IME)** for Chinese, Japanese, Korean and other composed input, and dead keys and compose:
    the browser's composition events (on a hidden input element) mapped to `text-input-v3` (wlroots provides it), so
    the app shows the pre-edit text and receives the committed text.
