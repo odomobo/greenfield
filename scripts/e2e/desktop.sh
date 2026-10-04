@@ -11,7 +11,9 @@
 #      token stops working; closes the browser, signs in again, finds the session listed, opens it by clicking its
 #      row and checks the same window comes back with the earlier output, with foot still running, still pinned, and
 #      the notification still in the history;
-#   2. window management in the viewer: a resize follows the pointer immediately (without waiting for the server),
+#   2. window management in the viewer: the taskbar's preview cards (title and close only, right-click opens the window
+#      menu), the window menu's Move (pointer, click, Escape, arrow keys) and Size, fullscreen (foot, bound to F11)
+#      covering the page above the taskbar and back, the cheap globals advertised; a resize follows the pointer immediately (without waiting for the server),
 #      resizing from the left/top edge keeps the right/bottom edge in place, and shrinking the viewport moves a window
 #      back into view;
 #   3. Disconnect (in the Apps menu's session menu) goes back to the session list without signing in again; renaming
@@ -33,7 +35,7 @@ cat >"$WORK/data/applications/test-foot.desktop" <<EOF
 Type=Application
 Name=Test Terminal
 GenericName=Terminal
-Exec=env WAYLAND_DEBUG=1 foot --app-id=test-foot
+Exec=env WAYLAND_DEBUG=1 foot --app-id=test-foot -o key-bindings.fullscreen=F11
 Icon=foot
 Categories=System;TerminalEmulator;
 EOF
@@ -509,6 +511,103 @@ read -r GX2 GY2 GW2 GH2 < <(shown_geometry)
 echo "    settled at $GX2,$GY2 ${GW2}x${GH2}"
 [ $((GY2 + GH2)) = "$BOTTOM" ] || fail "bottom edge moved from $BOTTOM to $((GY2 + GH2)) after the resize"
 [ $((GX2 + GW2)) = "$RIGHT" ] || fail "right edge moved during the top edge resize"
+
+step "taskbar preview cards: the title and a close button only; right-clicking a card opens the window menu"
+read -r CARD_X CARD_Y < <(pw_eval "() => { const r = document.querySelector('$TASKBAR_BUTTON').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.bottom - 4) }" | tr -d '"'; echo)
+pw mousemove "$CARD_X" "$CARD_Y" >/dev/null
+wait_for "() => !!document.querySelector('#window-preview .preview-card')" "the window preview" 10
+[ "$(pw_eval "() => [...document.querySelectorAll('#window-preview .preview-card button')].map((b) => b.dataset.action).join(',')")" = '"close"' ] ||
+  fail "the preview card has controls besides close"
+# right click on a card: the window menu, with Move and Size
+read -r PX PY < <(pw_eval "() => { const r = document.querySelector('#window-preview .preview-image').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.y + r.height / 2) }" | tr -d '"'; echo)
+pw mousemove "$PX" "$PY" >/dev/null
+pw mousedown right >/dev/null
+pw mouseup right >/dev/null
+wait_for "() => [...document.querySelectorAll('.context-menu button')].map((b) => b.dataset.action).join(',') === 'minimize,maximize,move,size,close'" "the window menu from the card" 5
+echo "    ok"
+
+# foot's geometry as shown, "x y width height", once nothing is going on anymore
+# $1: x y w h, $2: what
+wait_geometry() {
+  wait_for "() => { const w = window.__viewerTest.windows()[0]; const g = w.shownGeometry; return [g.x, g.y, g.width, g.height].join(' ') === '$1' && !window.__viewerTest.interaction() && w.x === w.shownX && w.y === w.shownY }" "$2" 10
+}
+
+step "window menu, Move: follows the pointer, a click drops it"
+read -r OX OY OW OH < <(shown_geometry; echo)
+click_element '.context-menu button[data-action=move]'
+wait_for "() => window.__viewerTest.interaction() === 'move'" "Move to start" 5
+# it follows the pointer from where the menu item was clicked
+MX="$CX"; MY="$CY"
+pw mousemove $((MX + 100)) $((MY + 150)) >/dev/null
+wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((OX + 100)) && g.y === $((OY + 150)) }" "the window to follow the pointer" 5
+pw mousemove $((MX + 120)) $((MY + 160)) >/dev/null
+wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((OX + 120)) && g.y === $((OY + 160)) }" "the window to follow the pointer" 5
+pw mousedown >/dev/null
+pw mouseup >/dev/null
+wait_geometry "$((OX + 120)) $((OY + 160)) $OW $OH" "the window to be dropped"
+pw mousemove $((MX + 200)) $((MY + 200)) >/dev/null
+[ "$(pw_eval "() => window.__viewerTest.windows()[0].shownGeometry.x")" = $((OX + 120)) ] || fail "the window kept following the pointer after the click"
+echo "    moved from $OX,$OY to $((OX + 120)),$((OY + 160)) and dropped"
+
+step "window menu, Move: Escape puts the window back, arrow keys nudge it"
+NX=$((OX + 120)); NY=$((OY + 160))
+taskbar_menu move
+wait_for "() => window.__viewerTest.interaction() === 'move'" "Move to start" 5
+pw mousemove $((CX + 40)) $((CY + 40)) >/dev/null
+wait_for "() => window.__viewerTest.windows()[0].shownGeometry.x === $((NX + 40))" "the window to follow the pointer" 5
+pw press Escape >/dev/null
+wait_geometry "$NX $NY $OW $OH" "Escape to put the window back"
+taskbar_menu move
+wait_for "() => window.__viewerTest.interaction() === 'move'" "Move to start" 5
+pw press ArrowRight >/dev/null
+pw press ArrowRight >/dev/null
+pw press ArrowDown >/dev/null
+wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((NX + 20)) && g.y === $((NY + 10)) }" "the arrow keys to nudge the window" 5
+pw press Enter >/dev/null
+wait_geometry "$((NX + 20)) $((NY + 10)) $OW $OH" "Enter to finish the move"
+echo "    ok"
+
+step "window menu, Size: arrow keys pick and move edges, Escape cancels"
+read -r SX SY SW SH < <(shown_geometry; echo)
+taskbar_menu size
+wait_for "() => window.__viewerTest.interaction() === 'resize'" "Size to start" 5
+# the first arrow key picks the right edge, a vertical one then adds the bottom edge
+pw press ArrowRight >/dev/null
+pw press ArrowRight >/dev/null
+pw press ArrowDown >/dev/null
+wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $SX && g.y === $SY && g.width === $((SW + 20)) && g.height === $((SH + 10)) }" "the arrow keys to size the window" 5
+pw press Enter >/dev/null
+wait_for "() => !window.__viewerTest.interaction() && !window.__viewerTest.resizing()" "the size to be applied" 10
+read -r X2 Y2 W2 H2 < <(shown_geometry; echo)
+echo "    $SW x $SH -> $W2 x $H2 (asked for $((SW + 20)) x $((SH + 10)))"
+[ "$X2" = "$SX" ] && [ "$Y2" = "$SY" ] || fail "the window's top left moved while its right and bottom edges were sized"
+[ "$W2" -ge $((SW + 4)) ] && [ "$H2" -ge $((SH + 2)) ] || fail "the window didn't grow"
+taskbar_menu size
+wait_for "() => window.__viewerTest.interaction() === 'resize'" "Size to start" 5
+pw press ArrowLeft >/dev/null
+pw press ArrowLeft >/dev/null
+wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((X2 - 20)) && g.width === $((W2 + 20)) }" "the left edge to move" 5
+pw press Escape >/dev/null
+wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return !window.__viewerTest.interaction() && !window.__viewerTest.resizing() && [g.x, g.y, g.width, g.height].join(' ') === '$X2 $Y2 $W2 $H2' }" "Escape to cancel the size" 10
+echo "    ok"
+
+step "fullscreen: the window covers the output above the taskbar, and goes back"
+read -r FX FY FW FH < <(shown_geometry; echo)
+# the key the test app binds to fullscreen
+pw press F11 >/dev/null
+wait_for "() => document.getElementById('desktop-view').classList.contains('fullscreen') && window.__viewerTest.windows()[0].fullscreen" "foot to go fullscreen" 10
+wait_for "() => { const o = window.__viewerTest.output(); const g = window.__viewerTest.windows()[0].shownGeometry; return o.width === window.innerWidth && o.height === window.innerHeight && g.x === 0 && g.y === 0 && g.width === o.width && g.height === o.height }" "the window to cover the whole page" 10
+wait_for "() => document.getElementById('taskbar').getBoundingClientRect().bottom <= 0" "the taskbar to go out of view" 5
+pw press F11 >/dev/null
+wait_for "() => !document.getElementById('desktop-view').classList.contains('fullscreen') && !window.__viewerTest.windows()[0].fullscreen" "foot to leave fullscreen" 10
+wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return [g.x, g.y, g.width, g.height].join(' ') === '$FX $FY $FW $FH' && document.getElementById('taskbar').getBoundingClientRect().bottom > 0 }" "the window to be restored" 10
+echo "    ok"
+
+step "the cheap globals are advertised (foot's Wayland log lists them)"
+for global in wp_viewporter wp_presentation xdg_activation_v1 wp_single_pixel_buffer_manager_v1 zwp_idle_inhibit_manager_v1 zxdg_output_manager_v1; do
+  grep -aq "wl_registry@[0-9]*.global([0-9]*, \"$global\"" "$WORK/gateway.log" || fail "the compositor doesn't advertise $global"
+done
+echo "    ok"
 
 step "shrinking the viewport moves the window back into view"
 read -r GX GY GW GH < <(shown_geometry)

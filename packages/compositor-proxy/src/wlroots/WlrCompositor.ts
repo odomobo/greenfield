@@ -16,6 +16,7 @@ import type { Patch, SceneRect, SceneSurface, SceneWindow } from '@gfld/scene-pr
 import { EvDevKeyCode } from './keys.js'
 import { Apps } from './Apps.js'
 import { X11Windows } from './X11.js'
+import { KeyboardConfig, systemKeyboardConfig } from './keyboard-config.js'
 
 const logger = createLogger('wlroots')
 /** GFLD_WLR_TRACE=1: log wlroots events and viewer messages */
@@ -29,6 +30,7 @@ export type WlrNative = Omit<typeof WlrCoreAddon, 'create'> & {
     onEvent: WlrCoreAddon.EventHandler,
     width: number,
     height: number,
+    keyboard?: KeyboardConfig,
   ): { socket: string; fd: number; x11Display?: string }
 }
 
@@ -140,6 +142,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private readonly surfaces = new Map<number, Surface>()
   private readonly sids = new Map<string, number>()
   private readonly windows = new Map<number, Window>()
+  /** where each Wayland window was last said to be shown (popupOrigin) */
+  private readonly shownAt = new Map<number, { x: number; y: number }>()
   /** window sids, bottom to top */
   private stack: number[] = []
   private active = 0
@@ -176,6 +180,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       (type, ...args) => this.onEvent(type, args),
       this.output.width,
       this.output.height,
+      systemKeyboardConfig(),
     )
     this.waylandDisplay = socket
     this.x11Display = x11Display
@@ -280,6 +285,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         const window = this.windows.get(args[0])
         this.windows.delete(args[0])
         this.x11.removed(args[0])
+        this.shownAt.delete(args[0])
         this.stack = this.stack.filter((sid) => sid !== args[0])
         if (window && this.active === window.sid) {
           this.activateNext(window)
@@ -315,9 +321,17 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         this.setMaximized(args[0], args[1])
         break
       case 'toplevel-request-fullscreen':
-        // not part of the prototype: answer with the current state, as xdg-shell requires
-        this.wlr.configure(args[0], -1, -1, {})
+        this.setFullscreen(args[0], Boolean(args[1]))
         break
+      case 'toplevel-request-activate': {
+        // xdg-activation: an app asks for its window to be shown and focused, like a click on it
+        const window = this.windows.get(args[0])
+        if (window && this.surfaces.get(args[0])?.mapped) {
+          this.setMinimized(this.rootOf(window), false)
+          this.activate(window.sid)
+        }
+        break
+      }
       case 'toplevel-request-minimize': {
         const window = this.windows.get(args[0])
         if (window) {
@@ -449,6 +463,15 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   }
 
   /** Absolute position of a window's main surface. */
+  /** Tells the core where a Wayland window's surface is shown (it keeps popups inside the output), when it changed. */
+  private popupOrigin(sid: number, x: number, y: number) {
+    const known = this.shownAt.get(sid)
+    if (known?.x !== x || known?.y !== y) {
+      this.shownAt.set(sid, { x, y })
+      this.wlr.setPosition(sid, x, y)
+    }
+  }
+
   private positionOf(window: Window): { x: number; y: number } {
     const parent = window.parent === undefined ? undefined : this.windows.get(window.parent)
     if (parent === undefined) {
@@ -497,6 +520,15 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       this.activate(0)
     }
     this.scheduleScene()
+  }
+
+  /** The window covers the output (the viewer shows it above its taskbar), or goes back to its own size. */
+  private setFullscreen(sid: number, fullscreen: boolean) {
+    if (fullscreen) {
+      this.wlr.configure(sid, this.output.width, this.output.height, { fullscreen: true })
+    } else {
+      this.wlr.configure(sid, 0, 0, { fullscreen: false })
+    }
   }
 
   private setMaximized(sid: number, maximized: boolean) {
@@ -582,6 +614,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       const { x, y } =
         state.maximized || state.fullscreen ? { x: -state.geometry[0], y: -state.geometry[1] } : this.positionOf(window)
       this.x11.shownAt(window.sid, x, y)
+      if (!this.x11.has(window.sid)) {
+        this.popupOrigin(window.sid, x, y)
+      }
       const parent = window.parent === undefined ? undefined : this.surfaces.get(window.parent)
       windows.push({
         id: surface.key,
@@ -757,8 +792,12 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.output = { width, height }
     this.wlr.setOutputSize(width, height)
     for (const window of this.windows.values()) {
-      if (this.wlr.toplevelState(window.sid)?.maximized) {
+      const state = this.wlr.toplevelState(window.sid)
+      if (state?.maximized) {
         this.setMaximized(window.sid, true)
+      }
+      if (state?.fullscreen) {
+        this.setFullscreen(window.sid, true)
       }
     }
   }

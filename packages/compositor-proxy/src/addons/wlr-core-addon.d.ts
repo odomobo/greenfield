@@ -16,7 +16,7 @@ declare namespace wlrCore {
    * - toplevel-new(sid, x11): x11 is true for an X11 window (XWayland), toplevel-destroy(sid), toplevel-title(sid, title), toplevel-app-id(sid, appId),
    *   toplevel-parent(sid, parentSid | 0), toplevel-request-move(sid), toplevel-request-resize(sid, edges),
    *   toplevel-request-maximize(sid, maximized), toplevel-request-fullscreen(sid, fullscreen),
-   *   toplevel-request-minimize(sid)
+   *   toplevel-request-minimize(sid), toplevel-request-activate(sid) (xdg-activation)
    * - cursor-surface(sid | 0, hotspotX, hotspotY), cursor-shape(name)
    * - x11-geometry(sid): an X11 override-redirect window (menu, tooltip) moved, the window it belongs to changed
    *
@@ -34,6 +34,7 @@ declare namespace wlrCore {
     onEvent: EventHandler,
     width: number,
     height: number,
+    keyboard?: { model?: string; layout?: string; variant?: string; options?: string },
   ): { socket: string; fd: number; x11Display?: string }
 
   export function dispatch(): void
@@ -86,7 +87,7 @@ declare namespace wlrCore {
   /** The toplevel's mapped surfaces (its own, subsurfaces, popups) bottom to top: [sid, x, y] relative to it. */
   export function windowSurfaces(sid: number): [number, number, number][]
 
-  /** Where the toplevel's surface is on the output. X11 apps are told (no-op for Wayland toplevels). */
+  /** Where the toplevel's surface is on the output. X11 apps are told; for Wayland toplevels the core keeps their popups inside the output. */
   export function setPosition(sid: number, x: number, y: number): void
 
   export function sendFrameDone(sid: number, timeMs: number): void

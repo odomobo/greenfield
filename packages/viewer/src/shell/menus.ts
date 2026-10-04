@@ -15,6 +15,18 @@ export function windowMenuItems(window: ShellWindow, desktop: Desktop): MenuItem
     window.maximized
       ? { label: 'Restore down', action: () => desktop.setMaximized(window.id, false), testId: 'unmaximize' }
       : { label: 'Maximize', action: () => desktop.setMaximized(window.id, true), testId: 'maximize' },
+    {
+      label: 'Move',
+      action: () => desktop.startMenuMove(window.id),
+      disabled: !desktop.canMoveOrSize(window.id),
+      testId: 'move',
+    },
+    {
+      label: 'Size',
+      action: () => desktop.startMenuSize(window.id),
+      disabled: !desktop.canMoveOrSize(window.id),
+      testId: 'size',
+    },
     { label: 'Close window', action: () => desktop.closeWindow(window.id), testId: 'close' },
   ]
 }

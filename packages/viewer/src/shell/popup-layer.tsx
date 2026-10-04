@@ -75,6 +75,7 @@ function ContextMenu({ entry }: { entry: ContextPopup }) {
             type="button"
             role="menuitem"
             className={item.danger ? 'danger' : undefined}
+            disabled={item.disabled}
             data-action={item.testId}
             onClick={() => {
               // close this menu and what it was opened from

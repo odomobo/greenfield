@@ -34,6 +34,10 @@ struct core {
     struct xkb_keymap *mods_keymap;
     uint32_t mod_ctrl, mod_shift, mod_alt, mod_meta, mod_altgr, mod_caps, mod_num;
     struct wlr_cursor_shape_manager_v1 *cursor_shape_manager;
+    struct wlr_presentation *presentation;
+    uint64_t presentation_seq;
+    struct wlr_xdg_activation_v1 *xdg_activation;
+    struct wl_listener request_activate;
     const char *socket;
     /* XWayland, NULL if it's disabled or couldn't be set up */
     struct x11 *x11;
@@ -86,6 +90,9 @@ struct gsurf {
 
     /* the X11 window this is the surface of (XWayland), NULL if none */
     struct xwin *xwin;
+
+    /* where the scene shows a toplevel's surface on the output (setPosition); popups are kept inside the output */
+    int32_t pos_x, pos_y;
 };
 
 /* A configure from JavaScript: a size (negative: unchanged) and states (-1: unchanged, 0, 1). */

@@ -25,12 +25,15 @@ class FakeCore {
   readonly frameDone: number[] = []
   readonly closed: number[] = []
   readonly outputSizes: [number, number][] = []
+  readonly positions: [number, number, number][] = []
+  readonly keyboardConfigs: unknown[] = []
   readonly toplevels = new Map<number, Toplevel>()
   readonly children = new Map<number, [number, number, number][]>()
 
   readonly native: WlrNative = {
-    create: (onEvent, _width, _height) => {
+    create: (onEvent, _width, _height, keyboard) => {
       this.onEvent = onEvent
+      this.keyboardConfigs.push(keyboard)
       return { socket: 'wayland-test', fd: 99 }
     },
     dispatch: () => undefined,
@@ -65,6 +68,9 @@ class FakeCore {
         if (state.maximized !== undefined) {
           toplevel.maximized = state.maximized
         }
+        if (state.fullscreen !== undefined) {
+          toplevel.fullscreen = state.fullscreen
+        }
         if (width > 0 && height > 0) {
           toplevel.configured = [width, height]
         }
@@ -75,7 +81,9 @@ class FakeCore {
     },
     toplevelState: (sid) => this.toplevels.get(sid),
     windowSurfaces: (sid) => this.children.get(sid) ?? [[sid, 0, 0]],
-    setPosition: () => undefined,
+    setPosition: (sid, x, y) => {
+      this.positions.push([sid, x, y])
+    },
     sendFrameDone: (sid) => {
       this.frameDone.push(sid)
     },
@@ -270,6 +278,55 @@ test('maximizing configures the output size, and again when the output changes',
 
   compositor.handleMessage({ type: 'window.maximize', window: '1/1', maximized: false })
   assert.deepEqual(lastConfigure(1), { sid: 1, width: 0, height: 0, state: { maximized: false } })
+})
+
+test('fullscreen covers the output, shows in the scene and goes back; a new output size is followed', async () => {
+  compositor.handleMessage({ type: 'output', width: 1000, height: 700 })
+  core.newWindow(1)
+  core.onEvent('toplevel-request-fullscreen', 1, true)
+  assert.deepEqual(lastConfigure(1), { sid: 1, width: 1000, height: 700, state: { fullscreen: true } })
+  await flush()
+  assert.equal(windowsOf(lastScene())[0].fullscreen, true)
+
+  compositor.handleMessage({ type: 'output', width: 800, height: 600 })
+  assert.deepEqual(lastConfigure(1), { sid: 1, width: 800, height: 600, state: { fullscreen: true } })
+
+  core.onEvent('toplevel-request-fullscreen', 1, false)
+  assert.deepEqual(lastConfigure(1), { sid: 1, width: 0, height: 0, state: { fullscreen: false } })
+  core.commit(1, 400, 300)
+  await flush()
+  assert.equal(windowsOf(lastScene())[0].fullscreen, false)
+})
+
+test('an activation request raises, restores and focuses the window', async () => {
+  core.newWindow(1)
+  core.newWindow(2)
+  compositor.handleMessage({ type: 'window.minimize', window: '1/1', minimized: true })
+  await flush()
+  assert.equal(lastScene().focus, '1/2')
+  core.onEvent('toplevel-request-activate', 1)
+  await flush()
+  const windows = windowsOf(lastScene())
+  assert.equal(lastScene().focus, '1/1')
+  assert.equal(windows.find((window) => window.id === '1/1').minimized, false)
+  assert.equal(windows[windows.length - 1].id, '1/1')
+  core.onEvent('toplevel-request-activate', 99)
+})
+
+test('the core is told where windows are shown, so it keeps popups inside the output', async () => {
+  core.newWindow(1)
+  compositor.handleMessage({ type: 'window.move', window: '1/1', x: 100, y: 50 })
+  await flush()
+  assert.deepEqual(core.positions[core.positions.length - 1], [1, 100, 50])
+  const count = core.positions.length
+  compositor.handleMessage({ type: 'window.move', window: '1/1', x: 100, y: 50 })
+  await flush()
+  assert.equal(core.positions.length, count)
+})
+
+test('the keyboard configuration is passed to the core', () => {
+  assert.equal(core.keyboardConfigs.length, 1)
+  assert.equal(typeof core.keyboardConfigs[0], 'object')
 })
 
 test('viewer resizes and closes go to the toplevel', () => {

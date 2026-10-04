@@ -27,7 +27,14 @@
 #include <wlr/types/wlr_cursor_shape_v1.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_presentation_time.h>
+#include <wlr/types/wlr_single_pixel_buffer_v1.h>
+#include <wlr/types/wlr_viewporter.h>
+#include <wlr/types/wlr_xdg_activation_v1.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_seat.h>
@@ -402,11 +409,54 @@ handle_set_parent(struct wl_listener *listener, void *data) {
     emit(gsurf->core, "toplevel-parent", 2, args);
 }
 
+/*
+ * Keep a new popup (menu, tooltip) inside the output: wlroots flips and slides it as its positioner allows. The
+ * constraint box is the output in the root toplevel's surface coordinates, so the scene's position of the toplevel
+ * (setPosition) is needed; the popup's parent chain leads to it.
+ */
+static void
+unconstrain_popup(struct core *core, struct wlr_xdg_popup *popup) {
+    struct wlr_xdg_surface *root = popup->base;
+    while (root != NULL && root->role == WLR_XDG_SURFACE_ROLE_POPUP) {
+        if (root->popup->parent == NULL) {
+            return;
+        }
+        root = wlr_xdg_surface_try_from_wlr_surface(root->popup->parent);
+    }
+    struct gsurf *gsurf = root ? gsurf_from_surface(core, root->surface) : NULL;
+    if (gsurf == NULL || core->output == NULL) {
+        return;
+    }
+    struct wlr_box box = {.x = -gsurf->pos_x, .y = -gsurf->pos_y, .width = core->output->width,
+                          .height = core->output->height};
+    wlr_xdg_popup_unconstrain_from_box(popup, &box);
+}
+
+// An app asks for its window to be activated (xdg-activation-v1): reported like a click on the window.
+static void
+handle_request_activate(struct wl_listener *listener, void *data) {
+    struct core *core = wl_container_of(listener, core, request_activate);
+    struct wlr_xdg_activation_v1_request_activate_event *event = data;
+    struct wlr_surface *root = wlr_surface_get_root_surface(event->surface);
+    struct wlr_xdg_surface *xdg = wlr_xdg_surface_try_from_wlr_surface(root);
+    while (xdg != NULL && xdg->role == WLR_XDG_SURFACE_ROLE_POPUP && xdg->popup->parent != NULL) {
+        xdg = wlr_xdg_surface_try_from_wlr_surface(xdg->popup->parent);
+    }
+    struct gsurf *gsurf = gsurf_from_surface(core, xdg ? xdg->surface : root);
+    if (gsurf != NULL && (gsurf->toplevel != NULL || gsurf->xwin != NULL)) {
+        napi_value args[] = {u32(core, gsurf->sid)};
+        emit(core, "toplevel-request-activate", 1, args);
+    }
+}
+
 static void
 handle_new_xdg_surface(struct wl_listener *listener, void *data) {
     struct core *core = wl_container_of(listener, core, new_xdg_surface);
     struct wlr_xdg_surface *xdg_surface = data;
     struct gsurf *gsurf = gsurf_from_surface(core, xdg_surface->surface);
+    if (gsurf != NULL && xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP) {
+        unconstrain_popup(core, xdg_surface->popup);
+    }
     if (gsurf == NULL || xdg_surface->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
         // popups are part of their toplevel's surface tree (see windowSurfaces)
         return;
@@ -534,11 +584,50 @@ set_output_size(struct core *core, int32_t width, int32_t height) {
     return ok;
 }
 
-// create(onEvent, width, height) -> { socket, fd }
+static char *
+string_property(napi_env env, napi_value object, const char *name) {
+    napi_value value;
+    size_t length = 0;
+    if (napi_get_named_property(env, object, name, &value) != napi_ok ||
+        napi_get_value_string_utf8(env, value, NULL, 0, &length) != napi_ok || length == 0) {
+        return NULL;
+    }
+    char *string = calloc(length + 1, 1);
+    napi_get_value_string_utf8(env, value, string, length + 1, &length);
+    return string;
+}
+
+/*
+ * The keymap of the viewer's keyboard: the names JavaScript read from the system's keyboard configuration (a missing
+ * one is xkbcommon's default, which honors XKB_DEFAULT_*), or the default if they don't compile (a layout this
+ * machine doesn't have).
+ */
+static struct xkb_keymap *
+keymap_from_config(struct xkb_context *context, napi_value config, napi_env env) {
+    struct xkb_keymap *keymap = NULL;
+    if (config != NULL) {
+        napi_valuetype type;
+        if (napi_typeof(env, config, &type) == napi_ok && type == napi_object) {
+            char *model = string_property(env, config, "model");
+            char *layout = string_property(env, config, "layout");
+            char *variant = string_property(env, config, "variant");
+            char *options = string_property(env, config, "options");
+            struct xkb_rule_names names = {.model = model, .layout = layout, .variant = variant, .options = options};
+            keymap = xkb_keymap_new_from_names(context, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+            free(model);
+            free(layout);
+            free(variant);
+            free(options);
+        }
+    }
+    return keymap ? keymap : xkb_keymap_new_from_names(context, NULL, XKB_KEYMAP_COMPILE_NO_FLAGS);
+}
+
+// create(onEvent, width, height, keyboard?: { model, layout, variant, options }) -> { socket, fd }
 static napi_value
 create(napi_env env, napi_callback_info info) {
-    size_t argc = 3;
-    napi_value argv[3], result, value;
+    size_t argc = 4;
+    napi_value argv[4], result, value;
     int32_t width, height;
     NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
     NAPI_CALL(env, napi_get_value_int32(env, argv[1], &width))
@@ -574,9 +663,21 @@ create(napi_env env, napi_callback_info info) {
     wlr_subcompositor_create(core->display);
     wlr_data_device_manager_create(core->display);
     wlr_primary_selection_v1_device_manager_create(core->display);
+    // cheap globals (wave 3 D); none of them needs a renderer
+    wlr_viewporter_create(core->display);
+    wlr_single_pixel_buffer_manager_v1_create(core->display);
+    wlr_idle_inhibit_v1_create(core->display);
+    core->presentation = wlr_presentation_create(core->display, core->backend);
+    core->xdg_activation = wlr_xdg_activation_v1_create(core->display);
+    core->request_activate.notify = handle_request_activate;
+    wl_signal_add(&core->xdg_activation->events.request_activate, &core->request_activate);
 
     core->output = wlr_headless_add_output(core->backend, (unsigned int) width, (unsigned int) height);
     wlr_output_create_global(core->output);
+    // xdg-output wants an output layout; the one output is at the origin
+    struct wlr_output_layout *layout = wlr_output_layout_create();
+    wlr_output_layout_add(layout, core->output, 0, 0);
+    wlr_xdg_output_manager_v1_create(core->display, layout);
 
     core->xdg_shell = wlr_xdg_shell_create(core->display, 3);
     core->new_xdg_surface.notify = handle_new_xdg_surface;
@@ -600,8 +701,10 @@ create(napi_env env, napi_callback_info info) {
     // The viewer's keys come in as evdev codes; the keymap is ours (default rules, XKB_DEFAULT_* override).
     wlr_keyboard_init(&core->keyboard, &keyboard_impl, "greenfield-viewer-keyboard");
     struct xkb_context *xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    struct xkb_keymap *keymap = xkb_keymap_new_from_names(xkb_context, NULL, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    struct xkb_keymap *keymap = keymap_from_config(xkb_context, argc > 3 ? argv[3] : NULL, env);
     wlr_keyboard_set_keymap(&core->keyboard, keymap);
+    // clients repeat keys themselves (the viewer drops the browser's repeats)
+    wlr_keyboard_set_repeat_info(&core->keyboard, 25, 600);
     xkb_keymap_unref(keymap);
     xkb_context_unref(xkb_context);
     core->keyboard_key.notify = handle_keyboard_key;
@@ -1176,15 +1279,20 @@ windowSurfaces(napi_env env, napi_callback_info info) {
     return iterator.array;
 }
 
-// setPosition(sid, x, y): where the window's surface is on the output (X11 apps are told, Wayland apps can't know)
+// setPosition(sid, x, y): where the window's surface is on the output (X11 apps are told, Wayland apps can't know; the
+// core keeps popups inside the output with it)
 static napi_value
 setPosition(napi_env env, napi_callback_info info) {
     napi_value argv[3];
     struct core *core = core_or_throw(env);
     if (core && get_args(env, info, 3, argv)) {
         struct gsurf *gsurf = gsurf_from_sid(core, arg_u32(env, argv[0]));
+        if (gsurf) {
+            gsurf->pos_x = arg_i32(env, argv[1]);
+            gsurf->pos_y = arg_i32(env, argv[2]);
+        }
         if (gsurf && gsurf->xwin) {
-            x11_set_position(gsurf, arg_i32(env, argv[1]), arg_i32(env, argv[2]));
+            x11_set_position(gsurf, gsurf->pos_x, gsurf->pos_y);
             flush(core);
         }
     }
@@ -1202,6 +1310,17 @@ sendFrameDone(napi_env env, napi_callback_info info) {
             uint32_t ms = arg_u32(env, argv[1]);
             struct timespec when = {.tv_sec = ms / 1000, .tv_nsec = (long) (ms % 1000) * 1000000};
             wlr_surface_send_frame_done(gsurf->surface, &when);
+            // presentation-time: the frame counts as shown now (NULL: the client asked for no feedback)
+            struct wlr_presentation_feedback *feedback = wlr_presentation_surface_sampled(core->presentation, gsurf->surface);
+            if (feedback) {
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                struct wlr_presentation_event event = {.output = core->output, .tv_sec = (uint64_t) now.tv_sec,
+                                                       .tv_nsec = (uint32_t) now.tv_nsec, .refresh = 16666667,
+                                                       .seq = ++core->presentation_seq, .flags = 0};
+                wlr_presentation_feedback_send_presented(feedback, &event);
+                wlr_presentation_feedback_destroy(feedback);
+            }
             flush(core);
         }
     }
