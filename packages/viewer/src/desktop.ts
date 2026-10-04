@@ -3,6 +3,7 @@ import { KeyFrameNeeded, SurfaceDecoder } from './decoder'
 import { Rect, Renderer } from './gl/renderer'
 import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
 import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
+import { modifiersOf } from './modifiers'
 import { acceptsInput, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
 import { WindowSync } from './window-sync'
 
@@ -966,7 +967,12 @@ export class Desktop {
         this.continueInteraction()
         return
       }
-      this.connection.send({ type: 'pointer', buttons: event.buttons, ...this.target(this.pointer, event.timeStamp) })
+      this.connection.send({
+        type: 'pointer',
+        buttons: event.buttons,
+        modifiers: modifiersOf(event),
+        ...this.target(this.pointer, event.timeStamp),
+      })
     })
 
     canvas.addEventListener('pointerdown', (event) => {
@@ -986,6 +992,7 @@ export class Desktop {
         button: event.button,
         pressed: true,
         buttons: event.buttons,
+        modifiers: modifiersOf(event),
         ...this.target(this.pointer, event.timeStamp),
       })
       event.preventDefault()
@@ -1014,6 +1021,7 @@ export class Desktop {
         button: event.button,
         pressed: false,
         buttons: event.buttons,
+        modifiers: modifiersOf(event),
         ...this.target(this.pointer, event.timeStamp),
       })
       this.buttons = event.buttons
@@ -1041,6 +1049,7 @@ export class Desktop {
           deltaX: event.deltaX,
           deltaY: event.deltaY,
           deltaMode: event.deltaMode,
+          modifiers: modifiersOf(event),
           ...this.target(this.pointer, event.timeStamp),
         })
       },
@@ -1058,8 +1067,7 @@ export class Desktop {
         type: 'key',
         code: event.code,
         pressed,
-        capsLock: event.getModifierState('CapsLock'),
-        numLock: event.getModifierState('NumLock'),
+        modifiers: modifiersOf(event),
         time: Math.round(event.timeStamp),
       })
     }
@@ -1067,6 +1075,15 @@ export class Desktop {
     canvas.addEventListener('keyup', (event) => key(event, false))
     canvas.addEventListener('focus', () => this.connection.send({ type: 'focus', focused: true }))
     canvas.addEventListener('blur', () => this.connection.send({ type: 'focus', focused: false }))
+    // A hidden page (another tab, a minimized browser) gets no key events either, even if the canvas keeps focus: the
+    // server releases the held keys when told the focus is gone.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        this.connection.send({ type: 'focus', focused: false })
+      } else if (document.activeElement === canvas) {
+        this.connection.send({ type: 'focus', focused: true })
+      }
+    })
   }
 
   private startInteraction(message: Extract<ServerMessage, { type: 'interactive' }>) {

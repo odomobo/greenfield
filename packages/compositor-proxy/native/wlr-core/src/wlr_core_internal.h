@@ -30,6 +30,9 @@ struct core {
     struct wlr_xdg_shell *xdg_shell;
     struct wlr_seat *seat;
     struct wlr_keyboard keyboard;
+    /* the xkb masks of the viewer's modifiers (see sync_modifiers), for this keymap */
+    struct xkb_keymap *mods_keymap;
+    uint32_t mod_ctrl, mod_shift, mod_alt, mod_meta, mod_altgr, mod_caps, mod_num;
     struct wlr_cursor_shape_manager_v1 *cursor_shape_manager;
     const char *socket;
     /* XWayland, NULL if it's disabled or couldn't be set up */

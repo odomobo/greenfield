@@ -359,6 +359,87 @@ if (reattached > typed / 4) {
 }
 EOF
 
+step "modifiers follow the browser: one Ctrl press, and no Ctrl stuck by a key-up the page didn't see"
+# foot's keyboard events (its WAYLAND_DEBUG log) after line $1 of the gateway log, one per line: "key <evdev code>
+# <1 pressed, 0 released>" or "mods <depressed> <locked>" (in the default keymap Ctrl is depressed 4; KEY_LEFTCTRL 29)
+keyboard_since() {
+  tail -n +"$(($1 + 1))" "$WORK/gateway.log" | grep -ao 'wl_keyboard@[0-9]*\.\(key\|modifiers\)([0-9, ]*)' |
+    sed -E 's/.*\.key\([0-9]+, [0-9]+, ([0-9]+), ([0-9]+)\)/key \1 \2/; s/.*\.modifiers\([0-9]+, ([0-9]+), [0-9]+, ([0-9]+), [0-9]+\)/mods \1 \2/'
+}
+# $2: a JavaScript expression over ev (the events since line $1) and idx(event, from) / count(event)
+keyboard_check() {
+  keyboard_since "$1" | node -e "
+    const ev = require('fs').readFileSync(0, 'utf8').trim().split('\n')
+    const idx = (e, from = 0) => ev.indexOf(e, from)
+    const count = (e) => ev.filter((x) => x === e).length
+    const modsBefore = (i) => ev.slice(0, i).filter((e) => e.startsWith('mods')).pop()
+    process.exit(($2) ? 0 : 1)"
+}
+expect_keyboard() {
+  local start="$1" what="$2" check="$3" i
+  for i in $(seq 1 50); do
+    keyboard_check "$start" "$check" && return 0
+    sleep 0.1
+  done
+  fail "$what (foot got: $(keyboard_since "$start" | paste -sd, -))"
+}
+log_end() { wc -l <"$WORK/gateway.log"; }
+focus_foot() {
+  pw mousemove $((TX + TW / 2)) $((TY + TH / 2)) >/dev/null
+  pw mousedown >/dev/null
+  pw mouseup >/dev/null
+}
+blur_page() { pw_eval "() => { document.activeElement.blur(); return true }" >/dev/null; }
+
+# Ctrl+U, Ctrl+U: one Ctrl press, one modifier change each way
+START="$(log_end)"
+focus_foot
+pw keydown Control >/dev/null
+pw press u >/dev/null
+pw press u >/dev/null
+pw keyup Control >/dev/null
+expect_keyboard "$START" "Ctrl+U twice wasn't one Ctrl press" \
+  "count('key 29 1') === 1 && count('key 29 0') === 1 && count('mods 4 0') === 1 && count('key 22 1') === 2 &&
+   idx('key 29 1') < idx('mods 4 0') && idx('mods 4 0') < idx('key 22 1') && ev.lastIndexOf('key 22 0') < idx('key 29 0') &&
+   ev[ev.length - 1] === 'mods 0 0'"
+echo "    Ctrl+U twice: one Ctrl press"
+
+# Ctrl released while the page had no focus: released when the focus went, typing afterwards is plain
+START="$(log_end)"
+focus_foot
+pw keydown Control >/dev/null
+expect_keyboard "$START" "foot didn't get the Ctrl press" "idx('key 29 1') >= 0"
+blur_page
+pw keyup Control >/dev/null
+focus_foot
+pw press x >/dev/null
+expect_keyboard "$START" "Ctrl stuck after the page lost focus" \
+  "idx('key 45 1') >= 0 && count('key 29 0') === 1 && idx('key 29 0') < idx('key 45 1') && modsBefore(idx('key 45 1')) === 'mods 0 0'"
+echo "    Ctrl released while the page had no focus: released"
+
+# Ctrl released without the page seeing it, focus kept: the next key's modifier state (none) releases it
+START="$(log_end)"
+focus_foot
+pw keydown Control >/dev/null
+expect_keyboard "$START" "foot didn't get the Ctrl press" "idx('key 29 1') >= 0"
+pw_eval "() => { for (const type of ['keydown', 'keyup']) document.activeElement.dispatchEvent(new KeyboardEvent(type, { code: 'KeyY', key: 'y', bubbles: true, cancelable: true })); return true }" >/dev/null
+pw keyup Control >/dev/null
+expect_keyboard "$START" "Ctrl stuck after a key-up the page didn't see" \
+  "idx('key 21 1') >= 0 && count('key 29 0') === 1 && idx('key 29 0') < idx('key 21 1') && modsBefore(idx('key 21 1')) === 'mods 0 0'"
+echo "    Ctrl released without the page seeing it: released before the next key"
+
+# Ctrl pressed while the page had no focus: held (no key press made up), Ctrl+U works, then released with the key
+START="$(log_end)"
+blur_page
+pw keydown Control >/dev/null
+focus_foot
+pw press u >/dev/null
+pw keyup Control >/dev/null
+expect_keyboard "$START" "Ctrl pressed while the page had no focus isn't held" \
+  "count('key 29 1') === 0 && count('key 29 0') === 0 && idx('mods 4 0') >= 0 && idx('mods 4 0') < idx('key 22 1') &&
+   modsBefore(idx('key 22 1')) === 'mods 4 0' && ev[ev.length - 1] === 'mods 0 0'"
+echo "    Ctrl pressed while the page had no focus: held, then released"
+
 # --- window management ---
 
 # foot's window geometry as shown: "x y width height" (output coordinates)

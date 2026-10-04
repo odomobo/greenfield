@@ -18,6 +18,8 @@ class FakeCore {
   readonly configures: Configure[] = []
   readonly focus: number[] = []
   readonly keys: [number, boolean][] = []
+  /** key, syncModifiers, releaseAllKeys and keyboardFocus calls, in order */
+  readonly keyboard: string[] = []
   readonly buttons: [number, boolean][] = []
   readonly motions: [number, number, number][] = []
   readonly frameDone: number[] = []
@@ -44,9 +46,17 @@ class FakeCore {
     pointerAxis: () => undefined,
     key: (code, pressed) => {
       this.keys.push([code, pressed])
+      this.keyboard.push(`key ${code} ${pressed}`)
+    },
+    syncModifiers: (modifiers, eventCode) => {
+      this.keyboard.push(`sync ${modifiers} ${eventCode}`)
+    },
+    releaseAllKeys: () => {
+      this.keyboard.push('release all')
     },
     keyboardFocus: (sid) => {
       this.focus.push(sid)
+      this.keyboard.push(`focus ${sid}`)
     },
     configure: (sid, width, height, state) => {
       this.configures.push({ sid, width, height, state })
@@ -307,6 +317,73 @@ test('input: pointer over a surface, buttons and keys as Linux codes, page focus
   compositor.handleMessage({ type: 'pointer', surface: 'nothing', sx: 1, sy: 2 })
   assert.deepEqual(core.motions[core.motions.length - 1], [0, 1, 2])
   assert.deepEqual(sent[sent.length - 1], { type: 'cursor', kind: 'default' })
+})
+
+const NO_MODIFIERS = {
+  ctrl: false,
+  shift: false,
+  alt: false,
+  meta: false,
+  altGr: false,
+  capsLock: false,
+  numLock: false,
+}
+
+test('modifiers: the browser state is synced before every input event, as bits', () => {
+  core.newWindow(1)
+  core.keyboard.length = 0
+  const ctrl = { ...NO_MODIFIERS, ctrl: true }
+  compositor.handleMessage({ type: 'key', code: 'ControlLeft', pressed: true, modifiers: ctrl })
+  compositor.handleMessage({ type: 'key', code: 'KeyC', pressed: true, modifiers: ctrl })
+  compositor.handleMessage({ type: 'key', code: 'KeyC', pressed: false, modifiers: ctrl })
+  compositor.handleMessage({ type: 'key', code: 'ControlLeft', pressed: false, modifiers: NO_MODIFIERS })
+  assert.deepEqual(core.keyboard, [
+    'sync 1 29',
+    'key 29 true',
+    'sync 1 46',
+    'key 46 true',
+    'sync 1 46',
+    'key 46 false',
+    'sync 0 29',
+    'key 29 false',
+  ])
+
+  core.keyboard.length = 0
+  const all = { ctrl: true, shift: true, alt: true, meta: true, altGr: true, capsLock: true, numLock: true }
+  compositor.handleMessage({ type: 'pointer', surface: '1/1', sx: 1, sy: 1, modifiers: all })
+  compositor.handleMessage({ type: 'button', surface: '1/1', sx: 1, sy: 1, button: 0, pressed: true, modifiers: ctrl })
+  compositor.handleMessage({ type: 'axis', surface: '1/1', sx: 1, sy: 1, deltaY: 3, deltaMode: 0, modifiers: ctrl })
+  // an unknown key still syncs the modifiers; one without modifiers (an older viewer) syncs nothing
+  compositor.handleMessage({ type: 'key', code: 'NotAKey', pressed: true, modifiers: ctrl })
+  compositor.handleMessage({ type: 'key', code: '30', pressed: true, modifiers: ctrl })
+  compositor.handleMessage({ type: 'key', code: 'toString', pressed: true, modifiers: ctrl })
+  compositor.handleMessage({ type: 'key', code: 'KeyA', pressed: true })
+  compositor.handleMessage({ type: 'pointer', surface: '1/1', sx: 1, sy: 1, modifiers: 'ctrl' })
+  assert.deepEqual(core.keyboard, [
+    'sync 127 0',
+    'sync 1 0',
+    'sync 1 0',
+    'sync 1 0',
+    'sync 1 0',
+    'sync 1 0',
+    'key 30 true',
+  ])
+})
+
+test('modifiers: losing page focus, or the viewer, releases every key before the app loses keyboard focus', () => {
+  core.newWindow(1)
+  compositor.handleMessage({ type: 'focus', focused: true })
+  core.keyboard.length = 0
+  compositor.handleMessage({ type: 'focus', focused: false })
+  assert.deepEqual(core.keyboard, ['release all', 'focus 0'])
+
+  core.keyboard.length = 0
+  compositor.handleMessage({ type: 'focus', focused: true })
+  assert.deepEqual(core.keyboard, ['focus 1'])
+
+  core.keyboard.length = 0
+  compositor.detach()
+  assert.deepEqual(core.keyboard, ['release all', 'focus 0'])
 })
 
 test('the input region is sent unless it is the whole surface, and as a box when it has many rectangles', async () => {

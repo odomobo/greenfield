@@ -757,19 +757,242 @@ pointerAxis(napi_env env, napi_callback_info info) {
     return undefined(env);
 }
 
+/*
+ * The keyboard. The viewer's browser knows the real modifier state (getModifierState() on every event); the server
+ * only sees the key events that reach the viewer's page: a key released while the page didn't have focus never comes.
+ * So the viewer sends its modifier state with every input event, and before the event the server's xkb state is made
+ * to agree with it (sync_modifiers): modifier keys the viewer doesn't hold anymore are released for real (the app sees
+ * a key release, and the modifiers change with it); modifiers the viewer holds without a key we saw pressed are set
+ * in the modifier mask only (no key press is made up). Nothing changes when they already agree, which is the normal
+ * case: Ctrl+A, Ctrl+B, Ctrl+C stays one Ctrl press. Keys that aren't modifiers are released when the viewer's page
+ * loses focus or the viewer goes (releaseAllKeys): the browser can't tell which of them are still held.
+ */
+
+/* The viewer's modifier bits (the scene protocol's Modifiers, as WlrCompositor packs them). */
+enum {
+    VIEWER_CTRL = 1 << 0,
+    VIEWER_SHIFT = 1 << 1,
+    VIEWER_ALT = 1 << 2,
+    VIEWER_META = 1 << 3,
+    VIEWER_ALTGR = 1 << 4,
+    VIEWER_CAPS = 1 << 5,
+    VIEWER_NUM = 1 << 6,
+};
+#define VIEWER_HELD (VIEWER_CTRL | VIEWER_SHIFT | VIEWER_ALT | VIEWER_META | VIEWER_ALTGR)
+
+/* The keys that are those modifiers, by evdev code (where the key is, whatever the server's keymap does with it). */
+static const struct {
+    uint32_t code;
+    uint32_t viewer;
+} modifier_keys[] = {
+        {29, VIEWER_CTRL},                // KEY_LEFTCTRL
+        {97, VIEWER_CTRL},                // KEY_RIGHTCTRL
+        {42, VIEWER_SHIFT},               // KEY_LEFTSHIFT
+        {54, VIEWER_SHIFT},               // KEY_RIGHTSHIFT
+        {56, VIEWER_ALT},                 // KEY_LEFTALT
+        {100, VIEWER_ALT | VIEWER_ALTGR}, // KEY_RIGHTALT: Alt or AltGr, depending on the viewer's layout
+        {125, VIEWER_META},               // KEY_LEFTMETA
+        {126, VIEWER_META},               // KEY_RIGHTMETA
+        {58, VIEWER_CAPS},                // KEY_CAPSLOCK
+        {69, VIEWER_NUM},                 // KEY_NUMLOCK
+};
+
+static uint32_t
+viewer_modifier_of_key(uint32_t code) {
+    for (size_t i = 0; i < sizeof(modifier_keys) / sizeof(modifier_keys[0]); i++) {
+        if (modifier_keys[i].code == code) {
+            return modifier_keys[i].viewer;
+        }
+    }
+    return 0;
+}
+
+static uint32_t
+now_msec(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint32_t) (now.tv_sec * 1000 + now.tv_nsec / 1000000);
+}
+
+static uint32_t
+mod_mask(struct xkb_keymap *keymap, const char *name) {
+    xkb_mod_index_t index = xkb_keymap_mod_get_index(keymap, name);
+    return index == XKB_MOD_INVALID ? 0 : 1u << index;
+}
+
+/* The modifiers these keys (evdev codes) set when held together, in this keymap. */
+static uint32_t
+mods_of_keys(struct xkb_keymap *keymap, const uint32_t *codes, size_t count) {
+    if (count == 0) {
+        return 0;
+    }
+    struct xkb_state *state = xkb_state_new(keymap);
+    if (state == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < count; i++) {
+        xkb_state_update_key(state, codes[i] + 8, XKB_KEY_DOWN);
+    }
+    uint32_t mods = xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED);
+    xkb_state_unref(state);
+    return mods;
+}
+
+static void
+update_mod_masks(struct core *core) {
+    struct xkb_keymap *keymap = core->keyboard.keymap;
+    if (core->mods_keymap == keymap) {
+        return;
+    }
+    core->mods_keymap = keymap;
+    core->mod_ctrl = mod_mask(keymap, XKB_MOD_NAME_CTRL);
+    core->mod_shift = mod_mask(keymap, XKB_MOD_NAME_SHIFT);
+    core->mod_alt = mod_mask(keymap, XKB_MOD_NAME_ALT);
+    core->mod_meta = mod_mask(keymap, XKB_MOD_NAME_LOGO);
+    core->mod_caps = mod_mask(keymap, XKB_MOD_NAME_CAPS);
+    core->mod_num = mod_mask(keymap, XKB_MOD_NAME_NUM);
+    // AltGr: whatever the keymap's ISO_Level3_Shift sets (Mod5 in the usual keymaps)
+    core->mod_altgr = 0;
+    for (xkb_keycode_t keycode = xkb_keymap_min_keycode(keymap);
+         keycode <= xkb_keymap_max_keycode(keymap) && core->mod_altgr == 0; keycode++) {
+        const xkb_keysym_t *syms;
+        int count = xkb_keymap_key_get_syms_by_level(keymap, keycode, 0, 0, &syms);
+        for (int i = 0; i < count; i++) {
+            if (syms[i] == XKB_KEY_ISO_Level3_Shift) {
+                uint32_t code = keycode - 8;
+                core->mod_altgr = mods_of_keys(keymap, &code, 1);
+                break;
+            }
+        }
+    }
+    if (core->mod_altgr == 0) {
+        core->mod_altgr = mod_mask(keymap, "Mod5");
+    }
+}
+
+static uint32_t
+xkb_mods_of_viewer(struct core *core, uint32_t viewer) {
+    return (viewer & VIEWER_CTRL ? core->mod_ctrl : 0) | (viewer & VIEWER_SHIFT ? core->mod_shift : 0) |
+           (viewer & VIEWER_ALT ? core->mod_alt : 0) | (viewer & VIEWER_META ? core->mod_meta : 0) |
+           (viewer & VIEWER_ALTGR ? core->mod_altgr : 0);
+}
+
+static bool
+key_pressed(struct wlr_keyboard *keyboard, uint32_t code) {
+    for (size_t i = 0; i < keyboard->num_keycodes; i++) {
+        if (keyboard->keycodes[i] == code) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void
+notify_key(struct core *core, uint32_t code, bool pressed, uint32_t time) {
+    struct wlr_keyboard_key_event event = {
+            .time_msec = time,
+            .keycode = code,
+            .update_state = true,
+            .state = pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED,
+    };
+    wlr_keyboard_notify_key(&core->keyboard, &event);
+}
+
+/*
+ * Make the server's modifiers agree with the viewer's (VIEWER_* bits), before an input event. event_code: the evdev
+ * code of the key event that follows (0: not a key event); that key isn't corrected, its own event does that.
+ */
+static void
+sync_modifiers(struct core *core, uint32_t viewer, uint32_t event_code, uint32_t time) {
+    struct wlr_keyboard *keyboard = &core->keyboard;
+    if (keyboard->keymap == NULL) {
+        return;
+    }
+    update_mod_masks(core);
+
+    // modifier keys the viewer doesn't hold anymore (released while the page didn't have focus)
+    uint32_t pressed[WLR_KEYBOARD_KEYS_CAP];
+    size_t num_pressed = keyboard->num_keycodes;
+    memcpy(pressed, keyboard->keycodes, num_pressed * sizeof(pressed[0]));
+    for (size_t i = 0; i < num_pressed; i++) {
+        uint32_t modifier = viewer_modifier_of_key(pressed[i]) & VIEWER_HELD;
+        if (modifier != 0 && pressed[i] != event_code && (viewer & modifier) == 0) {
+            notify_key(core, pressed[i], false, time);
+        }
+    }
+
+    // modifiers the viewer holds that no pressed key (nor the key of this event) accounts for
+    uint32_t event_modifier = viewer_modifier_of_key(event_code);
+    uint32_t covered = event_modifier;
+    for (size_t i = 0; i < keyboard->num_keycodes; i++) {
+        covered |= viewer_modifier_of_key(keyboard->keycodes[i]);
+    }
+    uint32_t depressed = mods_of_keys(keyboard->keymap, keyboard->keycodes, keyboard->num_keycodes) |
+                         xkb_mods_of_viewer(core, viewer & VIEWER_HELD & ~covered);
+
+    // Caps Lock and Num Lock, unless this event is that key (it toggles the lock itself)
+    uint32_t locked = keyboard->modifiers.locked;
+    if (!(event_modifier & VIEWER_CAPS)) {
+        locked = (locked & ~core->mod_caps) | (viewer & VIEWER_CAPS ? core->mod_caps : 0);
+    }
+    if (!(event_modifier & VIEWER_NUM)) {
+        locked = (locked & ~core->mod_num) | (viewer & VIEWER_NUM ? core->mod_num : 0);
+    }
+
+    if (depressed != keyboard->modifiers.depressed || keyboard->modifiers.latched != 0 ||
+        locked != keyboard->modifiers.locked) {
+        // wlroots tells the focused client only if this changes its modifiers
+        wlr_keyboard_notify_modifiers(keyboard, depressed, 0, locked, keyboard->modifiers.group);
+    }
+}
+
 // key(evdevCode, pressed, timeMs)
 static napi_value
 key(napi_env env, napi_callback_info info) {
     napi_value argv[3];
     struct core *core = core_or_throw(env);
     if (core && get_args(env, info, 3, argv)) {
-        struct wlr_keyboard_key_event event = {
-                .time_msec = arg_u32(env, argv[2]),
-                .keycode = arg_u32(env, argv[0]),
-                .update_state = true,
-                .state = arg_bool(env, argv[1]) ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED,
-        };
-        wlr_keyboard_notify_key(&core->keyboard, &event);
+        uint32_t code = arg_u32(env, argv[0]);
+        bool pressed = arg_bool(env, argv[1]);
+        // a key goes down and up once: a release already made (sync_modifiers, releaseAllKeys) isn't sent again,
+        // nor a press of a key that's down
+        if (key_pressed(&core->keyboard, code) != pressed) {
+            notify_key(core, code, pressed, arg_u32(env, argv[2]));
+        }
+        flush(core);
+    }
+    return undefined(env);
+}
+
+// syncModifiers(viewerModifiers (VIEWER_* bits), eventEvdevCode (0: not a key event), timeMs)
+static napi_value
+syncModifiers(napi_env env, napi_callback_info info) {
+    napi_value argv[3];
+    struct core *core = core_or_throw(env);
+    if (core && get_args(env, info, 3, argv)) {
+        sync_modifiers(core, arg_u32(env, argv[0]), arg_u32(env, argv[1]), arg_u32(env, argv[2]));
+        flush(core);
+    }
+    return undefined(env);
+}
+
+// releaseAllKeys(): every key still held is released (the viewer's page lost focus, or the viewer went)
+static napi_value
+releaseAllKeys(napi_env env, napi_callback_info info) {
+    struct core *core = core_or_throw(env);
+    if (core) {
+        struct wlr_keyboard *keyboard = &core->keyboard;
+        uint32_t time = now_msec();
+        uint32_t pressed[WLR_KEYBOARD_KEYS_CAP];
+        size_t num_pressed = keyboard->num_keycodes;
+        memcpy(pressed, keyboard->keycodes, num_pressed * sizeof(pressed[0]));
+        for (size_t i = 0; i < num_pressed; i++) {
+            notify_key(core, pressed[i], false, time);
+        }
+        // and modifiers held without a key (sync_modifiers); the locks stay
+        if (keyboard->keymap != NULL && (keyboard->modifiers.depressed != 0 || keyboard->modifiers.latched != 0)) {
+            wlr_keyboard_notify_modifiers(keyboard, 0, 0, keyboard->modifiers.locked, keyboard->modifiers.group);
+        }
         flush(core);
     }
     return undefined(env);
@@ -1068,6 +1291,8 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("pointerButton", pointerButton),
             DECLARE_NAPI_METHOD("pointerAxis", pointerAxis),
             DECLARE_NAPI_METHOD("key", key),
+            DECLARE_NAPI_METHOD("syncModifiers", syncModifiers),
+            DECLARE_NAPI_METHOD("releaseAllKeys", releaseAllKeys),
             DECLARE_NAPI_METHOD("keyboardFocus", keyboardFocus),
             DECLARE_NAPI_METHOD("configure", configure),
             DECLARE_NAPI_METHOD("close", closeToplevel),

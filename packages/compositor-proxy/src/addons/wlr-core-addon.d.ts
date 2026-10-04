@@ -48,8 +48,19 @@ declare namespace wlrCore {
 
   export function pointerAxis(horizontal: boolean, value: number, discrete: number, timeMs: number): void
 
-  /** evdev key code */
+  /** evdev key code. A press of a key that's down, or a release of a key that's up, is dropped. */
   export function key(code: number, pressed: boolean, timeMs: number): void
+
+  /**
+   * Makes the keyboard's modifiers agree with the viewer's, before an input event: modifier keys the viewer doesn't
+   * hold anymore are released, modifiers it holds without a key are set in the mask. modifiers: bits 0 Ctrl, 1 Shift,
+   * 2 Alt, 3 Meta, 4 AltGr, 5 Caps Lock, 6 Num Lock. eventCode: the evdev code of the key event that follows (0: not
+   * a key event), which is left to its own event.
+   */
+  export function syncModifiers(modifiers: number, eventCode: number, timeMs: number): void
+
+  /** Releases every key that's held (and any modifier held without a key); the locks stay. */
+  export function releaseAllKeys(): void
 
   /** sid 0: no keyboard focus */
   export function keyboardFocus(sid: number): void

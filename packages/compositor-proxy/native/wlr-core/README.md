@@ -84,6 +84,13 @@ The prototype, by hand:
   `wl_event_loop_dispatch_idle` + `wl_display_flush_clients`.
 - **Frame callbacks**: wlroots sends none on its own; `wlr_surface_send_frame_done` sends all of a surface's pending
   callbacks, driven by the existing frame pacing (now `src/FramePacing.ts`, free of native code).
+- **Keyboard state**: wlroots' xkb state is built from key events alone, so a key-up the viewer's page never sees (a
+  browser shortcut, Alt+Tab) leaves a modifier held forever. The browser's `getModifierState()` is the truth instead:
+  `syncModifiers` (before every input event) releases modifier keys the browser doesn't hold and sets modifiers it
+  holds without a key in the mask (`wlr_keyboard_notify_modifiers` only notifies clients on a change);
+  `releaseAllKeys` runs when the page loses focus or the viewer goes. A release of a key that's up (and a press of one
+  that's down) is dropped, so a key released early isn't released twice. AltGr's modifier is whatever the keymap's
+  `ISO_Level3_Shift` sets (Mod5 usually).
 - **Build**: wlroots 0.17 with `-Db_ndebug=true` fails `-Werror` (variables only used in asserts), so it's built with
   `werror=false`. Its Wayland and X11 backends can't be disabled in 0.17; the addon links libwayland-client too
   (harmless).

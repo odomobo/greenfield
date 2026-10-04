@@ -519,6 +519,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   detach(): void {
     this.send = undefined
+    this.wlr.releaseAllKeys()
     this.wlr.keyboardFocus(0)
   }
 
@@ -628,18 +629,26 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         this.updateOutput((message.output ?? message) as { width?: unknown; height?: unknown; scale?: unknown })
         break
       case 'pointer':
+        this.syncModifiers(message, 0)
         this.pointerMotion(message)
         break
       case 'button':
+        this.syncModifiers(message, 0)
         this.pointerMotion(message)
         this.wlr.pointerButton(LINUX_BUTTONS[Number(message.button)] ?? 0x110, Boolean(message.pressed), time(message))
         break
       case 'axis':
+        this.syncModifiers(message, 0)
         this.pointerMotion(message)
         this.pointerAxis(message)
         break
       case 'key': {
-        const code: number | undefined = EvDevKeyCode[message.code as keyof typeof EvDevKeyCode]
+        // (a numeric enum maps numbers back to names too, and inherits toString & co.: only own numeric values)
+        const value: unknown = Object.prototype.hasOwnProperty.call(EvDevKeyCode, String(message.code))
+          ? EvDevKeyCode[message.code as keyof typeof EvDevKeyCode]
+          : undefined
+        const code = typeof value === 'number' ? value : undefined
+        this.syncModifiers(message, code ?? 0)
         if (code !== undefined) {
           this.wlr.key(code, Boolean(message.pressed), time(message))
         }
@@ -647,6 +656,11 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       }
       case 'focus':
         this.pageFocused = Boolean(message.focused)
+        if (!this.pageFocused) {
+          // keys released while the page doesn't have focus never reach it: let go of them now, while the app still
+          // has keyboard focus to see the releases
+          this.wlr.releaseAllKeys()
+        }
         this.wlr.keyboardFocus(this.pageFocused ? this.active : 0)
         this.scheduleScene()
         break
@@ -749,6 +763,17 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     }
   }
 
+  /**
+   * Makes the keyboard's modifiers agree with the browser's (the message's `modifiers`, see the scene protocol)
+   * before the input event. eventCode: the evdev code of a key event (0: not one).
+   */
+  private syncModifiers(message: ControlMessage, eventCode: number) {
+    const bits = modifierBits(message.modifiers)
+    if (bits !== undefined) {
+      this.wlr.syncModifiers(bits, eventCode, time(message))
+    }
+  }
+
   private pointerMotion(message: ControlMessage) {
     const sid = typeof message.surface === 'string' ? this.sids.get(message.surface) ?? 0 : 0
     if (sid === 0) {
@@ -781,6 +806,16 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       )
     }
   }
+}
+
+/** The scene protocol's Modifiers as the native core's bits, undefined if they aren't there. */
+export function modifierBits(modifiers: unknown): number | undefined {
+  if (typeof modifiers !== 'object' || modifiers === null) {
+    return undefined
+  }
+  const m = modifiers as Record<string, unknown>
+  const names = ['ctrl', 'shift', 'alt', 'meta', 'altGr', 'capsLock', 'numLock']
+  return names.reduce((bits, name, bit) => (m[name] === true ? bits | (1 << bit) : bits), 0)
 }
 
 function time(message: ControlMessage): number {

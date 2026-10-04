@@ -30,7 +30,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 5
+export const PROTOCOL_VERSION = 6
 
 export const enum EnvelopeKind {
   CONTROL = 1,
@@ -150,16 +150,35 @@ export type ShellNotification = {
 /** Pointer target picked by the viewer: surface key + surface local coordinates, or null for the desktop. */
 type PointerTarget = { surface: string | null; sx?: number; sy?: number; x: number; y: number; time: number }
 
+/**
+ * The browser's modifier state at an input event (KeyboardEvent/MouseEvent.getModifierState()), sent with every key,
+ * pointer, button and axis message. It's the truth about modifiers: the server's keyboard state is made to agree with
+ * it before the event (a modifier released while the page didn't have focus is released then). altGr: AltGraph; ctrl
+ * and alt are false while it's held (Windows reports AltGr as Ctrl+Alt).
+ */
+export type Modifiers = {
+  ctrl: boolean
+  shift: boolean
+  alt: boolean
+  meta: boolean
+  altGr: boolean
+  capsLock: boolean
+  numLock: boolean
+}
+
 export type ViewerMessage =
   /** scale: the viewer's devicePixelRatio. The server stores it; apps aren't told yet (needs the wlroots migration). */
   | { type: 'hello'; output: { width: number; height: number; scale: number } }
   | { type: 'output'; width: number; height: number; scale: number }
-  | ({ type: 'pointer'; buttons: number } & PointerTarget)
-  | ({ type: 'button'; button: number; pressed: boolean; buttons: number } & PointerTarget)
-  | ({ type: 'axis'; deltaX: number; deltaY: number; deltaMode: number } & PointerTarget)
-  /** code is KeyboardEvent.code, the server maps it to an evdev key code and owns the keymap and modifier state */
-  | { type: 'key'; code: string; pressed: boolean; capsLock: boolean; numLock: boolean; time: number }
-  /** the viewer page gained/lost keyboard focus */
+  | ({ type: 'pointer'; buttons: number; modifiers: Modifiers } & PointerTarget)
+  | ({ type: 'button'; button: number; pressed: boolean; buttons: number; modifiers: Modifiers } & PointerTarget)
+  | ({ type: 'axis'; deltaX: number; deltaY: number; deltaMode: number; modifiers: Modifiers } & PointerTarget)
+  /**
+   * code is KeyboardEvent.code, the server maps it to an evdev key code and owns the keymap. Keys that repeat
+   * (KeyboardEvent.repeat) aren't sent: apps repeat keys themselves.
+   */
+  | { type: 'key'; code: string; pressed: boolean; modifiers: Modifiers; time: number }
+  /** the viewer page gained/lost keyboard focus (lost also when it's hidden); losing it releases every held key */
   | { type: 'focus'; focused: boolean }
   // window changes; seq: the window's next change sequence number, see the top of this file
   | { type: 'window.move'; window: string; seq: number; x: number; y: number }

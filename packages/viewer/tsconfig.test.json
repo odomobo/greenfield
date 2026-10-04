@@ -6,5 +6,5 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  "include": ["test", "src/windows.ts"]
+  "include": ["test", "src/windows.ts", "src/modifiers.ts"]
 }
