@@ -140,7 +140,7 @@ The Compositor Proxy CLI accepts the arguments listed below.
 | `--allow-origin`  | `http://localhost:8080` | The allowed origins during CORS checks.                                                                                                                        |
 | `--base-url`      | `ws://localhost:8081`   | The base ws(s) url to use when connecting to this endpoint.  This is also required to inform other endpoints when doing direct endpoint to endpoint transfers. |
 | `--render-device` | `/dev/dri/renderD128`   | Path of the render device that should be used for hardware acceleration. e.g. /dev/dri/renderD128                                                              |
-| `--encoder`       | `x264`                  | The gstreamer h264 encoder to use. 'x264' is a pure software encoder while 'nvh264' is a hw  accelerated encoder for Nvidia based GPUs.                        |
+| `--encoder`       | `auto`                  | The video encoder: `auto` (VA-API or NVIDIA hardware encoder if the machine has one, else none), `none` (PNG patches only), `nvh264` or `vaapih264`.            |
 | `--applications`  |                         | The path of the applications JSON file.                                                                                                                        |
 
 An additional `--applications` config file is also required. This example applications JSON file maps the

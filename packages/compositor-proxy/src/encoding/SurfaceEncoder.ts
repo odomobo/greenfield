@@ -7,7 +7,7 @@
  */
 import type { Patch } from '@gfld/scene-protocol'
 import { EncoderPool } from './EncoderPool.js'
-import { MAX_PATCH_PIXELS, planPatches, RelentlessMeter, SurfaceClass } from './policy.js'
+import { CLASS_PERIOD_MS, MAX_PATCH_PIXELS, planPatches, RelentlessMeter, SurfaceClass } from './policy.js'
 import { area, clip, intersect, Rect } from './region.js'
 
 /** Items (patches or video frames) of one surface that may exist between capture and the socket. */
@@ -49,7 +49,7 @@ export interface SurfaceHost<V extends VideoEncoder> {
   encodeVideo(encoder: V, buffer: BufferInfo): Promise<Uint8Array>
 }
 
-export type Logger = { error(message: string): void }
+export type Logger = { error(message: string): void; info?(message: string): void }
 
 const resolved = Promise.resolve()
 
@@ -368,6 +368,9 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     if (after === before) {
       return undefined
     }
+    this.context.logger.info?.(
+      `Surface ${this.key} is now ${after} (backlogged ${Math.round(this.meter.fraction(now) * 100)}% of the last ${CLASS_PERIOD_MS} ms).`,
+    )
     if (after === 'streaming') {
       // video only if an encoder is free; otherwise it stays on patches, with low priority
       if (this.lease === undefined && this.videoEligible(buffer) && this.context.pool.available > 0) {

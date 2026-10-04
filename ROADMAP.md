@@ -222,6 +222,19 @@ Why this works:
   if the link and CPU keep up, nothing waits and priorities don't matter.
 - It replaces the old rules "ignore the single largest damage" and "new windows start in video".
 
+**Found while implementing 2a (open, needs a decision):** the first bullet doesn't hold as written. Frame callbacks
+are held until the surface has a free slot, and a surface refills its slots from its queue at once, so a callback-driven
+client is only granted its next callback when its previous frame has (almost) all gone out. Its next commit then finds
+no unsent work and doesn't count as backlogged; the surface is "needy" by the definition, because we paced it that way.
+It is backlogged only if the last item is still in flight when the callback is granted, i.e. when the link (not the
+CPU) is slow relative to the frame gap (callback tick up to 16 ms, plus the app's render time). Measured on loopback
+with `scripts/e2e/busy-client.c`: a 640x480 client ran at 20-30 fps and a 1920x1080 one at 5-6 fps, using 56% and 128%
+of a core on the session's normal-priority threads; neither was ever promoted (backlog fraction 0.00), so the nice-19
+workers saw no work. So CPU-bound relentless clients on a fast link stay normal, which is the contention the streaming
+class was meant to fix. Possible fixes: measure demand instead (a commit within about one frame interval of a granted
+callback counts as backlogged), or release callbacks only while the surface has no queued rectangles either and count
+time with queued rectangles as backlog; both change this section, so left as specified.
+
 Changing class:
 
 - Normal → streaming with video: drop the surface's queued and unsent patches, start its video with a key frame
@@ -691,9 +704,28 @@ single large item never stalls the link. Initial window before any estimate: 64 
      `git submodule update --init`.
    - Must still pass `scripts/test-gateway.sh` and the unit tests; GPU (dmabuf) buffers stay untested without
      hardware.
-2a. **Streaming class, scheduler and PNG-only without GPU acceleration.** The spec is
-    [Encoding policy](#encoding-policy); this lists the work. Sonnet, own branch and worktree. Works without 2b. No
-    scene protocol change.
+2a. **Streaming class, scheduler and PNG-only without GPU acceleration.** **Done** (branch `core2a`, 2026-10-04). The
+    spec is [Encoding policy](#encoding-policy); this lists the work. Sonnet, own branch and worktree. Works without 2b.
+    No scene protocol change.
+    - **Implemented as listed below**, with these notes and deviations:
+      - `auto` looks for `/dev/nvidia<N>` (not `/dev/nvidiactl`, which WSL has without a GPU device), and for the
+        elements with `gst-inspect-1.0 --exists`; the logic is in `packages/gateway/src/encoder.ts` (unit tests with
+        mocked probes). `EncoderPool` reports a creation failure once and then behaves as size 0.
+      - Video frames take slots like patches (the sink's `sendFrame` got a `done` callback, and both sink calls carry
+        the surface's class). When no slot is free, the wanted frame (a key frame, or a delta of the latest content) is
+        encoded when one frees up. Dropped unsent items (key frame replacing a chain, `dropPatches`, closing) free
+        their slots through `done(false)`.
+      - The streaming pool (`StreamingEncoder.ts`, worker in `png-worker.ts`) has one shared FIFO queue that an idle
+        worker takes from, instead of assigning to workers round-robin; capture is allowed while fewer than 2 x workers
+        patches are encoding or waiting. `setThreadNice` returns the thread id (or minus errno).
+      - The frame clock got a testable queue class (`FrameCallbackQueue`); `ProcessingDuration` is gone.
+      - Class changes are logged (`Surface x is now streaming (backlogged N% ...)`).
+      - Not done / open: the relentless measure doesn't promote callback-driven clients on a fast link, see "Found
+        while implementing 2a" in the spec above. The streaming path is therefore only covered by unit tests (the e2e
+        busy client stays normal on loopback). Video (GPU) paths are untested here as before.
+      - New e2e script `scripts/e2e/busy.sh` (with `busy-client.c`): a busy client is shown as patches and paced, and
+        foot stays responsive while it runs. The e2e gateways run `--encoder none`; the viewer's video decoding has no
+        e2e coverage now (its unit tests stay). The viewer test hook got `__viewerTest.patches()`.
     - Gateway: `--encoder <auto|none|nvh264|vaapih264>`, default `auto`, `x264` removed (`config.ts`, `ipc.ts`,
       `monitor.ts`, `session-process.ts`, docs and `--help`). Detection in the gateway at start, logged. The session
       gets `none` or a hardware encoder; with `none`, `startWlrootsCompositor` makes an encoder pool of size 0 and

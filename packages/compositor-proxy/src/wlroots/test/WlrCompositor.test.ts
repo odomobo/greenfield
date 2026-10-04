@@ -186,8 +186,10 @@ let sent: ControlMessage[]
 
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 const waitFor = async (condition: () => boolean) => {
-  for (let i = 0; i < 200 && !condition(); i++) {
-    await flush()
+  // real time: some things (PNG encoding of icons) finish on other threads
+  const start = Date.now()
+  while (!condition() && Date.now() - start < 3000) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
   }
   assert.ok(condition(), 'timed out')
 }
