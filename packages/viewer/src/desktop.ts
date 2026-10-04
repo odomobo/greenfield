@@ -5,6 +5,7 @@ import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
 import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 import { modifiersOf } from './modifiers'
 import { ClipboardSync, isPasteChord } from './clipboard'
+import { dragHasFiles, dropAllowed, droppedFiles, uploadFiles } from './file-drop'
 import { acceptsInput, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
 import { WindowSync } from './window-sync'
 
@@ -104,6 +105,9 @@ export class Desktop {
   )
   /** while a paste waits for the browser's clipboard: the key events that follow it wait too, to keep their order */
   private keyChain?: Promise<void>
+  /** where files being dragged over the desktop were last reported, and the next id of an uploaded file */
+  private fileDragAt?: Point
+  private nextFileId = 1
 
   private pointer: Point = { x: 0, y: 0 }
   /** where the current button press started; interactions the client starts on a press are measured from here */
@@ -1091,6 +1095,57 @@ export class Desktop {
       },
       { passive: false },
     )
+
+    // Files dragged in from the user's computer: the browser sends drag events, not pointer events, until the drop.
+    // The server runs a drag of its own meanwhile, so apps under the pointer show their drop targets.
+    const fileDragOver = (event: DragEvent) => {
+      if (!dragHasFiles(event.dataTransfer)) {
+        return
+      }
+      event.preventDefault()
+      event.dataTransfer!.dropEffect = 'copy'
+      const at = point(event)
+      if (this.fileDragAt?.x !== at.x || this.fileDragAt?.y !== at.y) {
+        this.fileDragAt = at
+        this.connection.send({
+          type: 'file-drag',
+          over: true,
+          ...this.target(at, event.timeStamp),
+        })
+      }
+    }
+    canvas.addEventListener('dragenter', fileDragOver)
+    canvas.addEventListener('dragover', fileDragOver)
+    canvas.addEventListener('dragleave', (event) => {
+      if (this.fileDragAt && dragHasFiles(event.dataTransfer)) {
+        this.fileDragAt = undefined
+        this.connection.send({ type: 'file-drag', over: false, ...this.target(point(event), event.timeStamp) })
+      }
+    })
+    canvas.addEventListener('drop', (event) => {
+      if (!dragHasFiles(event.dataTransfer)) {
+        return
+      }
+      event.preventDefault()
+      this.fileDragAt = undefined
+      const files = droppedFiles(event.dataTransfer!)
+      const target = this.target(point(event), event.timeStamp)
+      if (!dropAllowed(files)) {
+        console.warn('These files are too many or too big to upload to the session.')
+        this.connection.send({ type: 'file-drag', over: false, ...target })
+        return
+      }
+      const uploads = files.map((file) => ({ id: this.nextFileId++, file }))
+      this.connection.send({
+        type: 'file-drop',
+        files: uploads.map(({ id, file }) => ({ id, name: file.name, size: file.size })),
+        ...target,
+      })
+      void uploadFiles(uploads, {
+        chunk: (id, bytes) => this.connection.sendFileChunk(id, bytes),
+        buffered: () => this.connection.buffered,
+      })
+    })
 
     const key = (event: KeyboardEvent, pressed: boolean) => {
       // the client repeats keys itself (wl_keyboard.repeat_info)

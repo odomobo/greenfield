@@ -1,4 +1,11 @@
-import { CLOSE_TAKEN_OVER, decodeEnvelope, DecodedEnvelope, encodeControl, ViewerMessage } from './protocol'
+import {
+  CLOSE_TAKEN_OVER,
+  decodeEnvelope,
+  DecodedEnvelope,
+  encodeControl,
+  encodeFileChunk,
+  ViewerMessage,
+} from './protocol'
 
 export type ConnectionState =
   | { kind: 'connecting' }
@@ -111,6 +118,18 @@ export class Connection {
 
   get open(): boolean {
     return this.ws?.readyState === WebSocket.OPEN
+  }
+
+  /** bytes handed to the socket and not sent yet (uploads wait for this to go down) */
+  get buffered(): number {
+    return this.ws?.bufferedAmount ?? 0
+  }
+
+  /** The next bytes of a file being uploaded (see the protocol's `file-drop`). */
+  sendFileChunk(id: number, bytes: Uint8Array): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(encodeFileChunk(id, bytes))
+    }
   }
 
   send(message: ViewerMessage): void {

@@ -79,7 +79,7 @@ start_gateway() {
   local port="$1" log="$2" scheme=https
   shift 2
   [[ " $* " == *" --insecure-plaintext "* ]] && scheme=http
-  (exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" XDG_DATA_HOME="$WORK/data" XDG_CONFIG_HOME="$WORK/config" \
+  (exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" XDG_DATA_HOME="$WORK/data" XDG_CONFIG_HOME="$WORK/config" XDG_CACHE_HOME="$WORK/cache" \
     node "$REPO/packages/gateway/dist/main.js" --dev-auth --dev-time-scale "$TIME_SCALE" --bind-ip 127.0.0.1 \
     --bind-port "$port" --state-dir "$WORK/state" "$@") >"$log" 2>&1 &
   STARTED_PID=$!

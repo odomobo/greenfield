@@ -17,6 +17,7 @@ import { EvDevKeyCode } from './keys.js'
 import { Apps } from './Apps.js'
 import { X11Windows } from './X11.js'
 import { Clipboard } from './Clipboard.js'
+import { FileDrops } from './FileDrops.js'
 
 const logger = createLogger('wlroots')
 /** GFLD_WLR_TRACE=1: log wlroots events and viewer messages */
@@ -136,6 +137,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   readonly x11Display?: string
   private readonly x11: X11Windows
   private readonly clipboard: Clipboard
+  private readonly fileDrops: FileDrops
   private send?: (message: ControlMessage) => void
   private sink: EncodingSink = inactiveSink
   private readonly encoding: EncodingContext<WlrEncoder>
@@ -159,6 +161,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     config: { h264Encoder: H264Encoder; videoStreams: number },
     private readonly wlr: WlrNative,
     watchFd: FdWatcher,
+    /** where files dropped from the user's computer are saved */
+    dropsDirectory?: string,
   ) {
     const currentSink = () => this.sink
     const forwardingSink: EncodingSink = {
@@ -176,6 +180,12 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.encoding.startTicking()
 
     this.clipboard = new Clipboard((text) => this.wlr.setClipboardText(text))
+    this.fileDrops = new FileDrops(
+      this.wlr,
+      (target) => this.pointerMotion(target),
+      (surface) => (typeof surface === 'string' ? this.sids.get(surface) : undefined),
+      dropsDirectory,
+    )
     this.x11 = new X11Windows((sid, x, y) => this.wlr.setPosition(sid, x, y))
     const { socket, fd, x11Display } = this.wlr.create(
       (type, ...args) => this.onEvent(type, args),
@@ -547,6 +557,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   detach(): void {
     this.send = undefined
     this.clipboard.detach()
+    this.fileDrops.leave()
     this.wlr.releaseAllKeys()
     this.wlr.keyboardFocus(0)
   }
@@ -694,6 +705,17 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       case 'clipboard':
         this.clipboard.viewerText(message.text)
         break
+      case 'file-drag':
+        this.syncModifiers(message, 0)
+        if (message.over) {
+          this.fileDrops.over(message)
+        } else {
+          this.fileDrops.leave()
+        }
+        break
+      case 'file-drop':
+        this.fileDrops.drop(message)
+        break
       case 'focus':
         this.pageFocused = Boolean(message.focused)
         if (!this.pageFocused) {
@@ -759,6 +781,10 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       default:
         logger.info(`Unhandled viewer message: ${message.type}`)
     }
+  }
+
+  handleFileChunk(id: number, data: Uint8Array): void {
+    this.fileDrops.chunk(id, data)
   }
 
   /**

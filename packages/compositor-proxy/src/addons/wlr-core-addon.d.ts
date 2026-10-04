@@ -103,6 +103,23 @@ declare namespace wlrCore {
    */
   export function setClipboardText(text: string): void
 
+  /**
+   * Files dragged in from the user's computer (see wlr_core_dnd.c): startFileDrag starts a drag, over the client of this
+   * surface, that offers text/uri-list (false if it can't: a drag is going on, no such surface); the pointer motion
+   * calls that follow move it. fileDragAccepted: the app under the pointer accepted. dropFileDrag releases it (the
+   * app gets the drop if it accepted, else the drag is over); cancelFileDrag ends it. provideFiles gives the
+   * text/uri-list the apps' receive requests are answered with (those that wait, and those to come).
+   */
+  export function startFileDrag(sid: number): boolean
+
+  export function fileDragAccepted(): boolean
+
+  export function dropFileDrag(timeMs: number): void
+
+  export function cancelFileDrag(): void
+
+  export function provideFiles(list: string): void
+
   export function createFrameEncoder(
     encoderType: 'nvh264' | 'x264' | 'vaapih264',
     frameEncoded: (sample: Buffer | undefined) => void,

@@ -47,7 +47,7 @@ static struct wl_surface *pointer_surface;
 static struct wl_data_offer *offer;
 static const char *output_file;
 static int receive_fd = -1;
-static char received[256];
+static char received[4096];
 static size_t received_length;
 static bool dropped;
 
@@ -198,8 +198,17 @@ static const struct wl_seat_listener seat_listener = {seat_capabilities, seat_na
 
 // --- the drop target
 
+/* the mime types of the offer the drag brought (the text we start drags with, or text/uri-list for files) */
+static char offered[8][64];
+static int offered_count;
+static const char *chosen_mime = MIME;
+
 static void
-offer_offer(void *data, struct wl_data_offer *o, const char *mime) {}
+offer_offer(void *data, struct wl_data_offer *o, const char *mime) {
+    if (offered_count < 8) {
+        snprintf(offered[offered_count++], 64, "%s", mime);
+    }
+}
 static void
 offer_source_actions(void *data, struct wl_data_offer *o, uint32_t actions) {}
 static void
@@ -208,14 +217,21 @@ static const struct wl_data_offer_listener offer_listener = {offer_offer, offer_
 
 static void
 device_data_offer(void *data, struct wl_data_device *d, struct wl_data_offer *o) {
+    offered_count = 0;
     wl_data_offer_add_listener(o, &offer_listener, NULL);
 }
 static void
 device_enter(void *data, struct wl_data_device *d, uint32_t serial, struct wl_surface *surface, wl_fixed_t x,
              wl_fixed_t y, struct wl_data_offer *o) {
     offer = o;
+    chosen_mime = MIME;
+    for (int i = 0; i < offered_count; i++) {
+        if (strcmp(offered[i], "text/uri-list") == 0) {
+            chosen_mime = "text/uri-list";
+        }
+    }
     if (surface == target_window.surface && o) {
-        wl_data_offer_accept(o, serial, MIME);
+        wl_data_offer_accept(o, serial, chosen_mime);
         wl_data_offer_set_actions(o, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
         printf("target entered\n");
         fflush(stdout);
@@ -234,7 +250,7 @@ device_drop(void *data, struct wl_data_device *d) {
     }
     int fds[2];
     pipe(fds);
-    wl_data_offer_receive(offer, MIME, fds[1]);
+    wl_data_offer_receive(offer, chosen_mime, fds[1]);
     close(fds[1]);
     receive_fd = fds[0];
     dropped = true;
@@ -313,7 +329,13 @@ main(int argc, char **argv) {
                 FILE *file = fopen(output_file, "w");
                 fprintf(file, "%s", received);
                 fclose(file);
+                // (a list of URIs ends its lines with CR LF)
+                for (char *c = received; *c; c++) {
+                    if (*c == '\r') *c = ' ';
+                    if (*c == '\n') *c = '|';
+                }
                 printf("dropped %s\n", received);
+                received_length = 0;
                 fflush(stdout);
                 if (offer && dropped) {
                     wl_data_offer_finish(offer);

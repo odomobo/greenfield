@@ -11,6 +11,9 @@
  * PATCH payload (server -> viewer): u16le surface key length, surface key, then (all u32le) contentSerial, surface
  * width, surface height, x, y, width, height, followed by an RGBA PNG of that rectangle of the surface.
  *
+ * FILE payload (viewer -> server): u32le file id, then the next bytes of that file: files dragged from the user's
+ * computer onto the desktop are uploaded in chunks, announced by a `file-drop` message (ids, names, sizes), see there.
+ *
  * A surface is either streamed as video (FRAME, H.264) or updated with lossless PNG patches (PATCH) of its changed
  * areas, see the encoding policy in ROADMAP.md. Frames and patches of one surface arrive in order and are applied in
  * order: a patch draws over whatever the surface showed (including the last video frame), a video frame replaces it.
@@ -36,6 +39,7 @@ export const enum EnvelopeKind {
   CONTROL = 1,
   FRAME = 2,
   PATCH = 3,
+  FILE = 4,
 }
 
 /** The session was taken over by another viewer. Don't reconnect automatically. */
@@ -198,6 +202,18 @@ export type ViewerMessage =
   | { type: 'clipboard'; text: string }
   /** the viewer page gained/lost keyboard focus (lost also when it's hidden); losing it releases every held key */
   | { type: 'focus'; focused: boolean }
+  /**
+   * Files from the user's computer are being dragged over the desktop (the browser's drag events), at this target;
+   * sent as they move. The server starts a drag with a text/uri-list offer, so apps under the pointer show their drop
+   * targets. over: false when the drag left the page (or was cancelled).
+   */
+  | ({ type: 'file-drag'; over: boolean } & PointerTarget)
+  /**
+   * The files were dropped at this target. Their content follows as FILE envelopes (ids, in order, `size` bytes in
+   * all); once complete the server saves them in a directory of the user's (~/.cache/greenfield/drops/<random>/, files
+   * older than a day are removed when a session starts) and gives the app under the pointer their file:// URIs.
+   */
+  | ({ type: 'file-drop'; files: { id: number; name: string; size: number }[] } & PointerTarget)
   // window changes; seq: the window's next change sequence number, see the top of this file
   | { type: 'window.move'; window: string; seq: number; x: number; y: number }
   | { type: 'window.activate'; window: string; seq: number }
@@ -240,6 +256,16 @@ export function encodeControl(message: ViewerMessage | ControlMessage): Uint8Arr
   return controlEnvelope(EnvelopeKind.CONTROL, textEncoder.encode(JSON.stringify(message)))
 }
 
+/** Encode a viewer -> server chunk of an uploaded file (see `file-drop`) as a binary envelope. */
+export function encodeFileChunk(id: number, bytes: Uint8Array): Uint8Array {
+  const envelope = new Uint8Array(6 + bytes.byteLength)
+  envelope[0] = PROTOCOL_VERSION
+  envelope[1] = EnvelopeKind.FILE
+  new DataView(envelope.buffer).setUint32(2, id, true)
+  envelope.set(bytes, 6)
+  return envelope
+}
+
 /** Encode a server -> viewer frame as a binary envelope addressed to the surface's key. */
 export function encodeFrame(surfaceKey: string, frame: Uint8Array): Uint8Array {
   const key = textEncoder.encode(surfaceKey)
@@ -265,6 +291,19 @@ export function decodeControl(data: Uint8Array): ControlMessage {
     throw new Error('Control message without a type.')
   }
   return message
+}
+
+export type ViewerEnvelope =
+  | { kind: 'control'; message: ControlMessage }
+  | { kind: 'file'; id: number; data: Uint8Array }
+
+/** Decode any viewer -> server envelope (a control message, or a chunk of a file). Throws like decodeControl. */
+export function decodeViewerEnvelope(data: Uint8Array): ViewerEnvelope {
+  if (data.byteLength >= 6 && data[0] === PROTOCOL_VERSION && data[1] === EnvelopeKind.FILE) {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+    return { kind: 'file', id: view.getUint32(2, true), data: data.subarray(6) }
+  }
+  return { kind: 'control', message: decodeControl(data) }
 }
 
 /** A lossless update of a rectangle of a surface, see the PATCH envelope. */

@@ -247,6 +247,33 @@ writer_writable(int fd, uint32_t mask, void *data) {
     return 0;
 }
 
+/* Writes the text to fd (which we own from here) without ever blocking on an app that doesn't read: what fits now,
+ * the rest when the pipe has room. */
+static void
+write_text_to_fd(struct text *text, int fd) {
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    struct writer *w = calloc(1, sizeof(*w));
+    w->fd = fd;
+    w->text = text;
+    text->refs++;
+    if (writer_write(w)) {
+        writer_finish(w);
+        return;
+    }
+    w->source = wl_event_loop_add_fd(clip_core->loop, fd, WL_EVENT_WRITABLE, writer_writable, w);
+}
+
+void
+core_write_text_async(const char *data, size_t length, int fd) {
+    struct text *text = calloc(1, sizeof(*text));
+    text->data = malloc(length + 1);
+    memcpy(text->data, data, length);
+    text->length = length;
+    text->refs = 1;
+    write_text_to_fd(text, fd);
+    text_unref(text);
+}
+
 struct browser_source {
     struct wlr_data_source base;
     struct text *text;
@@ -263,17 +290,7 @@ browser_source_send(struct wlr_data_source *source, const char *mime_type, int32
         close(fd);
         return;
     }
-    // never block on an app that doesn't read: write what fits now, the rest when the pipe has room
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
-    struct writer *w = calloc(1, sizeof(*w));
-    w->fd = fd;
-    w->text = self->text;
-    self->text->refs++;
-    if (writer_write(w)) {
-        writer_finish(w);
-        return;
-    }
-    w->source = wl_event_loop_add_fd(clip_core->loop, fd, WL_EVENT_WRITABLE, writer_writable, w);
+    write_text_to_fd(self->text, fd);
 }
 
 static void

@@ -12,7 +12,8 @@
 #
 # Each can also be run on its own (they take GATEWAY_PORT). They start the gateway with --dev-auth --dev-time-scale,
 # which shortens its sign-in delays; see the header of scripts/e2e/auth.sh. Requires foot, dbus-daemon, notify-send,
-# Xwayland and x11-utils (xev, xfontsel, xwininfo), playwright-cli (for its Playwright library and Chrome), curl,
+# Xwayland, x11-utils (xev, xfontsel, xwininfo), gcc, wayland-scanner and wayland-protocols (for the drag and drop
+# test client), playwright-cli (for its Playwright library and Chrome), curl,
 # node, and the built packages (yarn build).
 #
 #   scripts/test-gateway.sh

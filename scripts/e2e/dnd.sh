@@ -6,7 +6,11 @@
 #   1. drag between remote apps: pressing on the source window starts the app's drag; the viewer shows the app's drag
 #      icon at the pointer (surface content, following the pointer); moving over the target window and releasing drops
 #      the text there (the target app reads it through the data offer and writes it to a file);
-#   2. the drag is over afterwards: the viewer shows no icon, and a click on the source starts another drag.
+#   2. the drag is over afterwards: the viewer shows no icon, and a click on the source starts another drag;
+#   3. files from the user's computer (the page gets the drag events the browser would send, with File objects):
+#      moving them over the target window makes the app see a drag with a text/uri-list offer, moving them away
+#      cancels it, dropping them uploads them into the session's drop directory ($XDG_CACHE_HOME/greenfield/drops) and
+#      the app receives their file:// URIs.
 #
 # Requires: gcc, wayland-scanner (libwayland-dev), wayland-protocols, playwright-cli (for its Playwright library and
 # browser), curl, node, the built packages (yarn build). Usage: scripts/e2e/dnd.sh   (GATEWAY_PORT)
@@ -93,4 +97,39 @@ wait_for "() => window.__viewerTest.drag() === null" "the viewer to be told the 
 [ ! -e "$WORK/dropped" ] || fail "text was dropped outside the target"
 echo "    ok"
 
-echo "PASS: drag and drop between remote apps: icon, drop, cancel"
+step "files dragged in from the user's computer: the app under the pointer gets their file:// URIs"
+# (Playwright can't drag files from the OS: the page gets the drag events the browser would send, with real File objects)
+file_drag() { # $1: dragenter, dragover, dragleave or drop; $2 $3: desktop coordinates; $4: file names (JSON array)
+  pw_eval "() => {
+    const c = document.getElementById('output'), r = c.getBoundingClientRect()
+    const dt = new DataTransfer()
+    for (const name of $4) dt.items.add(new File(['content of ' + name], name))
+    c.dispatchEvent(new DragEvent('$1', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.x + $2, clientY: r.y + $3 }))
+    return true
+  }" | grep -q true || fail "couldn't send $1"
+}
+ENTERED="$(grep -c 'target entered' "$WORK/dnd.log")"
+entered_again() { [ "$(grep -c 'target entered' "$WORK/dnd.log")" -gt "$ENTERED" ]; }
+file_drag dragenter "$TARGET_X" "$TARGET_Y" '["from browser.txt", "two.txt"]'
+file_drag dragover "$TARGET_X" "$TARGET_Y" '["from browser.txt", "two.txt"]'
+wait_until "the target app to see the files come in" 10 entered_again
+file_drag dragleave "$TARGET_X" "$TARGET_Y" '["from browser.txt"]'
+wait_for "() => window.__viewerTest.drag() === null" "the drag of files to end when they leave" 5
+rm -f "$WORK/dropped"
+ENTERED="$(grep -c 'target entered' "$WORK/dnd.log")"
+file_drag dragenter "$TARGET_X" "$TARGET_Y" '["from browser.txt", "two.txt"]'
+file_drag dragover "$TARGET_X" "$TARGET_Y" '["from browser.txt", "two.txt"]'
+wait_until "the target app to see the files come in again" 10 entered_again
+file_drag drop "$TARGET_X" "$TARGET_Y" '["from browser.txt", "two.txt"]'
+uris_dropped() { grep -q 'two.txt' "$WORK/dropped" 2>/dev/null; }
+wait_until "the drop of files (the app got: $(cat "$WORK/dropped" 2>/dev/null))" 10 uris_dropped
+DROP_DIR="$(ls -d "$WORK"/cache/greenfield/drops/d-* | head -n 1)"
+[ "$(cat "$DROP_DIR/from browser.txt")" = "content of from browser.txt" ] || fail "the dropped file's content is wrong"
+[ "$(cat "$DROP_DIR/two.txt")" = "content of two.txt" ] || fail "the second dropped file's content is wrong"
+printf 'file://%s/from%%20browser.txt\r\nfile://%s/two.txt\r\n' "$DROP_DIR" "$DROP_DIR" >"$WORK/expected-uris"
+cmp -s "$WORK/expected-uris" "$WORK/dropped" || fail "the app got the wrong list: $(cat -A "$WORK/dropped")"
+wait_for "() => window.__viewerTest.drag() === null" "the drag to be over after the drop" 5
+echo "    saved in ${DROP_DIR#$WORK/}"
+echo "    ok"
+
+echo "PASS: drag and drop: between remote apps (icon, drop, cancel) and files from the user's computer"

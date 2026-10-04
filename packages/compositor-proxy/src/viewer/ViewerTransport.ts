@@ -2,7 +2,7 @@ import { WebSocket } from 'ws'
 import { Socket } from 'node:net'
 import { createLogger } from '../Logger.js'
 import { setSocketSendBuffer, setTcpNotSentLowat } from '../socket-options.js'
-import { decodeControl, encodeControl, encodeFrame, encodePatch, isKeyFrame, Patch } from './protocol.js'
+import { decodeViewerEnvelope, encodeControl, encodeFrame, encodePatch, isKeyFrame, Patch } from './protocol.js'
 
 const logger = createLogger('viewer-transport')
 
@@ -46,6 +46,8 @@ export interface ViewerTransport {
   readonly closed: boolean
 
   onMessage: (message: ControlMessage) => void
+  /** The next bytes of an uploaded file (see the scene protocol's `file-drop`). */
+  onFileChunk: (id: number, data: Uint8Array) => void
   onClose: (code: number, reason: string) => void
   /**
    * A frame for this surface had to be dropped and the following frames can't be decoded without a key frame.
@@ -79,6 +81,9 @@ export class WebSocketViewerTransport implements ViewerTransport {
   onMessage: (message: ControlMessage) => void = () => {
     /* noop */
   }
+  onFileChunk: (id: number, data: Uint8Array) => void = () => {
+    /* noop */
+  }
   onClose: (code: number, reason: string) => void = () => {
     /* noop */
   }
@@ -108,15 +113,19 @@ export class WebSocketViewerTransport implements ViewerTransport {
         this.close(4400, 'Expected binary messages.')
         return
       }
-      let message: ControlMessage
+      let envelope: ReturnType<typeof decodeViewerEnvelope>
       try {
-        message = decodeControl(data)
+        envelope = decodeViewerEnvelope(data)
       } catch (e: any) {
         logger.error(`Invalid message from viewer: ${e.message}`)
         this.close(4400, e.message)
         return
       }
-      this.onMessage(message)
+      if (envelope.kind === 'file') {
+        this.onFileChunk(envelope.id, envelope.data)
+      } else {
+        this.onMessage(envelope.message)
+      }
     })
     ws.on('close', (code, reason) => {
       this._closed = true

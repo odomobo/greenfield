@@ -26,6 +26,8 @@ class FakeCore {
   readonly closed: number[] = []
   readonly outputSizes: [number, number][] = []
   readonly clipboard: string[] = []
+  /** startFileDrag, fileDragAccepted, dropFileDrag, cancelFileDrag and provideFiles calls */
+  readonly fileDrag: string[] = []
   readonly toplevels = new Map<number, Toplevel>()
   readonly children = new Map<number, [number, number, number][]>()
 
@@ -83,6 +85,20 @@ class FakeCore {
     readPixels: () => undefined,
     setClipboardText: (text) => {
       this.clipboard.push(text)
+    },
+    startFileDrag: (sid) => {
+      this.fileDrag.push(`start ${sid}`)
+      return true
+    },
+    fileDragAccepted: () => true,
+    dropFileDrag: () => {
+      this.fileDrag.push('drop')
+    },
+    cancelFileDrag: () => {
+      this.fileDrag.push('cancel')
+    },
+    provideFiles: (list) => {
+      this.fileDrag.push(`provide ${JSON.stringify(list)}`)
     },
     createFrameEncoder: () => ({}),
     destroyFrameEncoder: () => undefined,
@@ -552,4 +568,21 @@ test('a drag of a remote app tells the viewer, with its icon and where the icon 
   assert.deepEqual(lateDrags().slice(-1), [
     { type: 'drag', active: true, icon: undefined },
   ])
+})
+
+test('files dragged in start a drag on the surface under the pointer, move it, and cancel it when they leave', () => {
+  core.newWindow(1)
+  const target = (x: number) => ({ surface: '1/1', sx: x, sy: 5, x, y: 5, time: 1 })
+  compositor.handleMessage({ type: 'file-drag', over: true, ...target(10) })
+  compositor.handleMessage({ type: 'file-drag', over: true, ...target(20) })
+  assert.deepEqual(core.fileDrag, ['start 1'])
+  assert.deepEqual(core.motions.slice(-2), [
+    [1, 10, 5],
+    [1, 20, 5],
+  ])
+  compositor.handleMessage({ type: 'file-drag', over: false })
+  assert.deepEqual(core.fileDrag, ['start 1', 'cancel'])
+  // over the desktop there's nothing to drop on
+  compositor.handleMessage({ type: 'file-drag', over: true, surface: null, x: 5, y: 5, time: 1 })
+  assert.deepEqual(core.fileDrag, ['start 1', 'cancel'])
 })

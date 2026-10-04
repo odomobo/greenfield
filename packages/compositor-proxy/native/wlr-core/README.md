@@ -20,6 +20,15 @@ Since wave 2 B, X11 apps run too (XWayland).
   maximize, fullscreen and minimize requests), so the policy is the same for both; override-redirect windows (menus,
   tooltips) are surfaces of the window they belong to, at their X11 position relative to it. `setPosition` tells X11
   apps where the scene shows their windows. `wlr_core_internal.h` is what it shares with `wlr_core.c`.
+- `native/wlr-core/src/wlr_core_clipboard.c`: the clipboard bridge (wave 3 E). A remote app's selection is read through a
+  non-blocking pipe on the `wl_event_loop` (text mime types in the order text/plain;charset=utf-8, UTF8_STRING,
+  text/plain, TEXT, STRING; at most 4 MB, 3 s) and reported as `clipboard-text`; `setClipboardText` makes the browser's
+  text the seat's selection through a server-side `wlr_data_source` (its `send` writes without blocking). The
+  primary selection stays between remote apps (browsers have none).
+- `native/wlr-core/src/wlr_core_dnd.c`: drag and drop (wave 3 E). Between remote apps: `request_start_drag` becomes a
+  seat pointer drag, the icon surface is reported (`drag-start`, `drag-icon`, `drag-end`). Files from the user's
+  computer: a drag of ours with a `text/uri-list` source (`startFileDrag`, `fileDragAccepted`, `dropFileDrag`,
+  `cancelFileDrag`, `provideFiles`), driven by `src/wlroots/FileDrops.ts`.
 - `native/wlr-core/src/xwayland_sockets.c`: replaces wlroots' `xwayland/sockets.c` at link time (see the gotchas).
 - `native/wlr-core/src/wlr_core_encoder.c`: the existing GStreamer encoder (`native/encoding`), compiled into the same
   addon against the system libwayland (`shim/westfield.h`), fed from wlroots buffers. `src/westfield-egl.c`,
@@ -103,6 +112,37 @@ The prototype, by hand:
 - **Activation when a window goes away** (wave 1): the prototype left nothing focused when the active window closed.
   Now a closed dialog gives the focus back to its parent, otherwise the topmost shown (not minimized) window gets it.
 
+Clipboard and drag and drop (wave 3 E):
+
+- **Selections are read lazily**: `set_selection` fires inside wlroots' dispatch, where the app's write end of the pipe
+  is only sent at the next flush (the outermost call flushes), so the reader is an event source on the loop, not a
+  blocking `read`. An app that never closes its end is dropped after 3 s; a newer selection cancels the reader.
+- **No echo**: the browser's text is a `wlr_data_source` of our own (recognized by its `impl`), so `set_selection` for it
+  isn't read back. `Clipboard.ts` also remembers the last text, so the same text isn't set twice.
+- **Browsers**: writing the clipboard needs focus and often a gesture, reading needs permission. The viewer reads
+  `navigator.clipboard.readText()` on Ctrl+V, Ctrl+Shift+V and Shift+Insert and holds the key events until the text
+  is sent (key events behind it keep their order); a refused write is retried on the next input and when the page
+  gets focus. Without `readText` it uses the `paste` event. Headless Chrome needs `clipboard-read` and
+  `clipboard-write` granted (`scripts/e2e/browser-driver.js` does).
+- **Drags and the pointer**: `wlr_seat_start_pointer_drag` clears the pointer focus and installs a grab; the existing
+  `pointerMotion` (enter on a new surface, then motion) is all that moves the drag. While a drag goes on the viewer
+  must name the surface under the pointer, not the one the press started on (`drag` message). A drag icon's
+  `current.dx/dy` are per commit, so the offset is the sum over its commits.
+- **The drop needs an accepted action**: `drag_handle_pointer_button` drops only if the app answered the enter with
+  `accept` and `set_actions` (`source->accepted && current_dnd_action`), else the drag just ends. A drag of files
+  therefore waits (`FileDrops.release`, up to 0.5 s) for the app before releasing the button.
+- **Faked button**: a drag needs a pointer button held (`grab_button`, `button_count`). For files from the browser we
+  start the drag and then notify BTN_LEFT pressed under the drag's pointer grab, which swallows it, so no app sees a
+  click; the release goes the same way. `provideFiles` finds the source through `seat->drag_source`, which keeps it
+  alive after the drop until the next drag.
+- **Uploads**: the data source of a file drag keeps the receivers' pipes until the upload is complete
+  (`provideFiles`), so a big upload delays the app's read of the drop, not the session. Files are saved in
+  `$XDG_CACHE_HOME/greenfield/drops/<random>/` (default `~/.cache`; the e2e scripts point it into their work
+  directory), 2 GiB and 1000 files at most per drop, and directories older than a day are removed when a session
+  starts. Apps that can't read the user's cache directory (some sandboxes) can't take the files.
+- **Tests**: foot sets the clipboard through OSC 52, which needs no wl-clipboard here; `scripts/e2e/dnd-client.c` is a
+  Wayland client built by `dnd.sh` (gcc, wayland-scanner, wayland-protocols).
+
 XWayland (wave 2 B):
 
 - **X11 sockets**: wlroots 0.17 insists on creating `/tmp/.X11-unix/X<n>`. That fails on WSL (WSLg mounts the
@@ -137,8 +177,7 @@ XWayland (wave 2 B):
 
 ## Not done yet (later waves of the migration)
 
-The browser clipboard bridge (clipboard between Wayland apps already works: data device + primary selection; X11 <->
-Wayland sync is wlroots', set up but not tested: no xclip or wl-clipboard here), drag and drop, fullscreen, popup
+Clipboard images and files (only text crosses to the browser), drag and drop with X11 apps (untested), fullscreen, popup
 unconstraining to the output, Caps/Num Lock sync, keyboard layout from the session's locale, telling apps the output
 scale, GPU (dmabuf) buffers. Server-owned window state with sequence numbers (wave 2 A).
 

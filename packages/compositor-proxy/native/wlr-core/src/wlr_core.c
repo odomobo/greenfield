@@ -1289,6 +1289,7 @@ readPixels(napi_env env, napi_callback_info info) {
 
 napi_value wlr_core_encoder_init(napi_env env, napi_value exports);
 napi_value wlr_core_clipboard_init(napi_env env, napi_value exports);
+napi_value wlr_core_dnd_init(napi_env env, napi_value exports);
 
 static napi_value
 init(napi_env env, napi_value exports) {
@@ -1313,6 +1314,7 @@ init(napi_env env, napi_value exports) {
     };
     NAPI_CALL(env, napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc))
     wlr_core_clipboard_init(env, exports);
+    wlr_core_dnd_init(env, exports);
     return wlr_core_encoder_init(env, exports);
 }
 
