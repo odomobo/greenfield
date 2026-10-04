@@ -48,7 +48,8 @@ This document records the design decisions made so far and the order of the rema
   few seconds' grace for network hiccups). So another tab, a reload, or closing and reopening the browser all require
   signing in again. Desktop sessions keep running regardless.
 - After sign-in: the user's own sessions, attach to one or start a new one.
-- **Two-factor authentication through PAM** (planned): the sign-in page will support PAM's follow-up prompts (e.g.
+- **Two-factor authentication through PAM** (planned, lowest priority: only once the core is verified sound and free of
+  vulnerabilities): the sign-in page will support PAM's follow-up prompts (e.g.
   "Verification code:"), so any two-factor method configured in PAM works without project-specific code.
 
 ## Sessions
@@ -134,7 +135,9 @@ Drawn by the browser in HTML/CSS.
 
 ## Encoding policy
 
-Each window is in one of two modes, chosen dynamically:
+Each window is in one of two modes, chosen dynamically. **Without GPU acceleration on the server (the norm: mostly
+VPSes), there is only slow mode**: no H.264 at all, not even x264, every window is sent as PNG patches. Video mode
+exists only with GPU acceleration, which is to be revisited later (see wave 4 G).
 
 - **Fast mode (video)**: the whole window is encoded as H.264. Damage only decides whether a frame is sent at all
   (commits without damage are skipped); it can't select regions.
@@ -169,7 +172,7 @@ Other rules:
 - Use `wl_surface.damage`, skip empty damage, release app buffers as early as possible.
 - A small fixed pool of warm video encoders (server) and decoders (browser) with a simple policy. If the pool is full,
   a window that would be in fast mode stays in slow mode.
-- Hardware encoders when available, falling back to x264. The browser uses software decode for now (no hard decoder
+- Hardware encoders only; no x264 fallback (no GPU: slow mode only, see above). The browser uses software decode for now (no hard decoder
   limits).
 - Rejected: one tiled "atlas" video stream for all windows (too much trouble for the benefit).
 
@@ -331,7 +334,7 @@ Other rules:
      | 3 | **Done.** **H. Input and X11 gaps** (details: wlr-core README, wave 3 H; scene protocol v9 after merging; v7 on its branch). Browser shortcuts and Keyboard Lock: dropped: shortcuts the browser takes don't reach apps (user decision). Pointer lock and relative motion, X11 `_NET_WM_ICON` taskbar icons, X11 apps from a terminal ended at logout, touch (wl_touch from touch pointer events; pen stays a pointer, no tablet protocol) and v120/smooth scrolling are done; pointer lock, touch and the browser side of confinement are only unit tested (no headless way). Original plan: browser shortcuts reach the app (Ctrl+W/T/N, Alt+Tab, ...) through the browser's Keyboard Lock API in fullscreen, with a hint on how to enter it; pointer lock and relative motion (`pointer-constraints-v1`, `relative-pointer-v1`) from the browser's Pointer Lock API, for games and 3D apps; taskbar icons for X11 windows from `_NET_WM_ICON` when there's no `.desktop` icon; X11 apps started from a terminal in the session are closed at logout like Wayland ones (wave 2 B gap); touch and pen input from pointer events if cheap (otherwise its own item); check that the viewer sends high-resolution scrolling (`axis_value120`). | Sonnet | 400-700 |
      | 3 | **Done.** **I. Cheaper H.264 encoding** (knobs: the `X264_*` defines at the top of `gst_frame_encoder.c`; notes in the wlr-core README; not benchmarked, the user tunes) (`native/encoding/src/gst_frame_encoder.c`; video is only used for busy surfaces, so it should be cheap to encode and low in bitrate, not high quality). x264: `speed-preset=superfast` with `tune=zerolatency`, dropping the upstream overrides that make it expensive (`me=2` UMH search, `analyse=51`, `dct8x8`, `cabac`, `psy-tune=2`; no speed preset meant `medium`); quality-based rate control under a bitrate cap instead of 12 Mbps CBR (1.2 Mbps for alpha). Pad coded sizes to 16 instead of 128 (128 saved new streams on small resizes, which matters little since most updates are PNG patches); check the browser's decoder accepts it. Two paths: shared-memory buffers to x264 go through a CPU pipeline (`appsrc ! videoconvert ! (padding) ! x264enc`; the alpha stream built by our C code writing the alpha bytes as a gray frame, no GL), the GL pipeline (upload, shader, convert, download) stays for GPU (dmabuf) buffers and hardware encoders (nvh264, VA-API), where it's the cheap path. The agent doesn't benchmark: the user measures and tunes the preset (up or down from superfast) and rate control by hand. | Sonnet | 200-400 |
      | 3 | **Done.** **Resize and move on release**: window moves work the same way (the window follows the pointer, one `window.move` on drop, none on Escape; the 50 ms throttled sends are gone; server-initiated moves unchanged). An interactive resize (an app's border, the window menu's Size) sends nothing to the app while dragging: the viewer stretches the shown content into the dragged rectangle (fixed edges in place) and sends one `window.resize` (`done: true`) on release (click or Enter in Size; Escape sends nothing), staying stretched until the app commits the size. No intermediate encoder restarts. The scene carries each window's size limits (`minWidth`, `minHeight`, `maxWidth`, `maxHeight`, window geometry pixels, absent: unbounded; xdg_toplevel min/max size, X11 from WM_NORMAL_HINTS) and the viewer clamps the drag to them (`packages/viewer/src/resize.ts`). Scene protocol v10. The server still handles `done: false`. | Sonnet | 150 |
-     | 4 | **G. GPU buffers**: linux-dmabuf with the GLES2 renderer, dmabuf readback for patches and import for video, ported from `native/encoding/src/pixels.c`. Depends on I (both change the encoder's GL path, which I restructures). Can't be verified on the development machine (WSL has no `/dev/dri` render node, so apps can't allocate GPU buffers); it's only tested on real hardware. | Sonnet | 200-400 |
+     | 4 | **Deferred** (revisit GPU acceleration later; servers are mostly VPSes without GPUs). **G. GPU buffers**: linux-dmabuf with the GLES2 renderer, dmabuf readback for patches and import for video, ported from `native/encoding/src/pixels.c`. Depends on I (both change the encoder's GL path, which I restructures). Can't be verified on the development machine (WSL has no `/dev/dri` render node, so apps can't allocate GPU buffers); it's only tested on real hardware. | Sonnet | 200-400 |
 
      Wave 1 alone gives today's features on wlroots. In total about 3.5-5.5k lines added and 60k+ deleted (much of
      the deleted code is generated or vendored).
@@ -342,7 +345,9 @@ Other rules:
      `git submodule update --init`.
    - Must still pass `scripts/test-gateway.sh` and the unit tests; GPU (dmabuf) buffers stay untested without
      hardware.
-2. **Two-factor sign-in via PAM prompts.**
+2. **PNG-only without GPU acceleration.** When the server has no GPU acceleration, slow mode (PNG patches) is the only
+   mode: no video, no x264, new windows start as patches (see [Encoding policy](#encoding-policy)). Video mode stays
+   for servers with GPU acceleration, to revisit later.
 3. **Viewer: one DOM element per window instead of one WebGL canvas.** Each window becomes a positioned element with
    its own canvas, stacked in DOM order, so the browser does stacking, clipping, hit-testing, occlusion and window
    moves/animations (CSS transforms), and window decorations and shadows can be HTML/CSS that stacks with its window.
@@ -421,6 +426,9 @@ Other rules:
 
 13. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
     is manual (see `packages/gateway` docs).
+
+14. **Two-factor sign-in via PAM prompts** (lowest priority of all). Only makes sense once the core infrastructure is
+    verified sound and free of vulnerabilities.
 
 ### Needs verification on other hardware
 
