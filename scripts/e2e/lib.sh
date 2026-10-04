@@ -45,6 +45,8 @@ trap cleanup EXIT
 
 fail() {
   echo "FAIL: $*" >&2
+  # what the page showed (kept with E2E_KEEP=1)
+  [ -n "$DRIVER_PORT" ] && pw screenshot "$WORK/failure.png" >/dev/null 2>&1 && echo "screenshot: $WORK/failure.png" >&2
   [ -s "$WORK/driver.log" ] && { echo "--- browser driver log ---" >&2; tail -n 20 "$WORK/driver.log" >&2; }
   echo "--- gateway log (tail) ---" >&2
   # (without foot's WAYLAND_DEBUG protocol log)
@@ -156,3 +158,21 @@ wait_until() {
 }
 
 visible() { echo "!document.getElementById('$1').hidden"; }
+
+# Click in the middle of an element (real pointer events). $1: a CSS selector.
+click_element() {
+  local center
+  center="$(pw_eval "() => { const r = document.querySelector('$1').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.y + r.height / 2) }" | tr -d '"')"
+  read -r CX CY <<<"$center"
+  pw mousemove "$CX" "$CY" >/dev/null
+  pw mousedown >/dev/null
+  pw mouseup >/dev/null
+}
+
+# Signing in with a real click: the page needs user activation for its history guard and leave confirmation.
+browser_login() {
+  wait_for "() => $(visible login-view) && !!document.querySelector('#password')" "the sign-in form"
+  pw_eval "() => { document.querySelector('#username').value = '$ME'; document.querySelector('#password').value = '$PASSWORD'; return true }" >/dev/null
+  click_element '#login-submit'
+  wait_for "() => $(visible sessions-view)" "the session list"
+}

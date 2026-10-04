@@ -203,6 +203,13 @@ Other rules:
   notifications; app processes tracked from client credentials). Built by `yarn build` (submodule + meson; CI on
   Ubuntu 24.04); `scripts/test-gateway.sh` passes on it; unit tests for `WlrCompositor` (fake core) and `Apps`. The
   old stack stays selectable with `GFLD_LEGACY_COMPOSITOR=1` until wave 2 C deletes it.
+- wlroots migration, wave 2 B: X11 apps through XWayland. An X11 display per session (`DISPLAY` for launched apps,
+  Xwayland started on the first X11 connection); X11 windows are desktop windows with their title, WM_CLASS app id and
+  transient parent, told where the viewer puts them; their move, resize, maximize and minimize requests go through the
+  same policy; override-redirect menus and tooltips show with their window; X11/Wayland clipboard sync is wlroots'
+  (untested). `scripts/e2e/x11.sh` (xev, xfontsel) runs in `scripts/test-gateway.sh`; gtk4-demo under X11 checked by
+  hand. Works on WSL (read-only `/tmp/.X11-unix`) and with several users. Details:
+  `packages/compositor-proxy/native/wlr-core/README.md`.
 
 ### Core
 
@@ -286,6 +293,13 @@ Other rules:
        `session-process-legacy.ts` and `GFLD_LEGACY_COMPOSITOR`.
      - Wave 1: the prototype left nothing focused when the active window closed; now a dialog's parent, else the
        topmost shown window, is activated. Wave 2 A (server-owned state) should keep this.
+     - Wave 2 B: wlroots' X11 socket code fails on WSL (read-only `/tmp/.X11-unix`), breaks multi-user servers (it
+       creates `/tmp/.X11-unix` 0755 as the first user) and can unlink a live X server's socket; our
+       `xwayland_sockets.c` replaces it at link time (keep it in sync with wlroots' `xwayland/sockets.h` on upgrades).
+     - Wave 2 B: X11 windows have absolute positions; `WlrCompositor` tells them where the scene shows them
+       (`setPosition`, via `X11.ts`). Wave 2 A should keep calling it wherever the scene's positions are decided.
+     - Wave 2 B: X11 apps without their own decorations (xev, xterm) can't be moved by the user until the viewer has
+       title bars of its own (Lower priority, decorations) or a modifier-drag.
    - **Work plan: three waves.** Within a wave, tasks run in parallel, each on its own branch and worktree; a wave
      starts once the previous one is merged and tested. At most about three branches at once: wave 2 and 3 tasks all
      add to `wlr_core.c` and `WlrCompositor.ts`, so more means painful merges (and each branch needs hands-on testing).
@@ -297,7 +311,7 @@ Other rules:
      |---|---|---|---|
      | 1 | **Done.** **Make wlroots the default**: the session process on `WlrCompositor`; the desktop shell on it (Apps menu, launching, notifications; client PIDs from `wl_client_get_credentials`); CI and build docs get meson (the XWayland packages come with B); unit tests for `WlrCompositor` with the addon mocked; `scripts/test-gateway.sh` passes on it. Everything else builds on this. | Fork (tricky: session lifecycle, the prototype's gotchas) | ~1k |
      | 2 | **A. Window-state sync**: the server owns window state; sequence-number reconciliation (above) in the viewer, the scene protocol and `WlrCompositor`. | Fork (tricky: ordering and races) | 300-500 |
-     | 2 | **B. XWayland**: `wlr_xwayland` with its window manager; X11 windows (including override-redirect menus and tooltips) become scene windows. | Fork (tricky: X11 quirks) | 400-700 |
+     | 2 | **Done.** **B. XWayland**: `wlr_xwayland` with its window manager; X11 windows (including override-redirect menus and tooltips) become scene windows. | Fork (tricky: X11 quirks) | 400-700 (about 700 in C and TypeScript, plus tests) |
      | 2 | **C. Delete the old stack**: the libwayland fork and its addons (~33k lines), `packages/compositor` (~9.4k), `@gfld/compositor-wasm`, `@gfld/xtsb` (~14k), generated protocol code (~6k), the proxy's interceptors and generators (~1-2k), the old session process; docs and build scripts updated. Only removes what nothing else uses. | Sonnet | ~0 (60k+ deleted) |
      | 3 | **D. Polish**: fullscreen, popups kept on screen, key repeat, keyboard layout from the locale, Caps/Num Lock sync; cheap globals (viewporter, presentation time, xdg-activation, single-pixel buffer, idle inhibit). | Sonnet | 500-800 |
      | 3 | **E. Clipboard with the browser, then drag and drop** (in that order, one agent: drag and drop reuses the clipboard's data plumbing). Clipboard: a server-side data source for text from the browser (on Ctrl+V), the selection read through a pipe and sent to the viewer, primary selection the same way; X11/Wayland sync comes with `wlr_xwayland`. Drag and drop: between remote apps via wlroots' seat drags with the drag icon shown by the viewer, then local files into remote apps (uploaded, offered as `text/uri-list`). | Sonnet | 1.1-1.6k |
@@ -306,10 +320,11 @@ Other rules:
 
      Wave 1 alone gives today's features on wlroots. In total about 3.5-5.5k lines added and 60k+ deleted (much of
      the deleted code is generated or vendored).
-   - **Packages**: the build needs `meson` (and ninja). XWayland needs `xwayland`, `libxcb-composite0-dev`,
-     `libxcb-ewmh-dev`, `libxcb-icccm4-dev`, `libxcb-render0-dev`, `libxcb-res0-dev`, `libxcb-xfixes0-dev`.
-     `libxcb-errors-dev` (nicer X11 error messages, optional) isn't packaged for Ubuntu 24.04. Add them to the CI
-     packages and the build docs. Clones need `git submodule update --init`.
+   - **Packages**: the build needs `meson` (and ninja). XWayland needs `xwayland` (also at run time), `libxcb1-dev`,
+     `libxcb-composite0-dev`, `libxcb-ewmh-dev`, `libxcb-icccm4-dev`, `libxcb-render0-dev`, `libxcb-res0-dev`,
+     `libxcb-xfixes0-dev` (in CI and the build docs since wave 2 B); its end-to-end test needs x11-utils.
+     `libxcb-errors-dev` (nicer X11 error messages, optional) isn't packaged for Ubuntu 24.04. Clones need
+     `git submodule update --init`.
    - Must still pass `scripts/test-gateway.sh` and the unit tests; GPU (dmabuf) buffers stay untested without
      hardware.
 2. **Two-factor sign-in via PAM prompts.**

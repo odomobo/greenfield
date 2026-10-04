@@ -238,8 +238,8 @@ install(TARGETS
 
 # The session's Wayland side (ROADMAP.md, Core item 1): wlroots is a submodule (`git submodule update --init`) pinned to
 # 0.17.4 and built with meson as a static library against the system's libraries (libwayland, pixman, xkbcommon,
-# libdrm). The addon links the system libwayland, not the fork above, so a process must load either it or the fork's
-# addons, never both (they share the libwayland-server.so.0 soname).
+# libdrm, and the xcb libraries for XWayland). The addon links the system libwayland, not the fork above, so a process
+# must load either it or the fork's addons, never both (they share the libwayland-server.so.0 soname).
 set(WLR_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/native/wlroots)
 set(WLR_BUILD ${CMAKE_BINARY_DIR}/wlroots)
 if (NOT EXISTS ${WLR_SOURCE}/meson.build)
@@ -249,13 +249,18 @@ find_program(MESON meson)
 if (NOT MESON)
     message(FATAL_ERROR "meson is needed to build wlroots (Ubuntu: apt install meson).")
 endif ()
+# Changing these options rebuilds wlroots from scratch (existing build directories are wiped when they differ).
+set(WLR_MESON_OPTIONS
+        --buildtype=release -Ddefault_library=static -Dwerror=false -Dexamples=false
+        -Dbackends= -Drenderers=gles2 -Dallocators=gbm -Dsession=disabled -Dxwayland=enabled -Dxcb-errors=disabled)
+string(REPLACE ";" " " WLR_MESON_OPTIONS_TEXT "${WLR_MESON_OPTIONS}")
+# rewritten (and its timestamp changed) only when the options change
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/wlroots-options.txt CONTENT "${WLR_MESON_OPTIONS_TEXT}\n")
 add_custom_command(
         OUTPUT ${WLR_BUILD}/libwlroots.a
-        COMMAND test -f ${WLR_BUILD}/build.ninja || meson setup ${WLR_BUILD} ${WLR_SOURCE}
-            --buildtype=release -Ddefault_library=static -Dwerror=false -Dexamples=false
-            -Dbackends= -Drenderers=gles2 -Dallocators=gbm -Dsession=disabled -Dxwayland=disabled
-            -Dxcb-errors=disabled
+        COMMAND sh -c "cmp -s ${CMAKE_BINARY_DIR}/wlroots-options.txt ${WLR_BUILD}/gfld-options.txt || { rm -rf ${WLR_BUILD} && meson setup ${WLR_BUILD} ${WLR_SOURCE} ${WLR_MESON_OPTIONS_TEXT} && cp ${CMAKE_BINARY_DIR}/wlroots-options.txt ${WLR_BUILD}/gfld-options.txt; }"
         COMMAND ninja -C ${WLR_BUILD}
+        DEPENDS ${CMAKE_BINARY_DIR}/wlroots-options.txt
         WORKING_DIRECTORY ${WLR_SOURCE}
         COMMENT "Building wlroots"
         VERBATIM
@@ -263,11 +268,14 @@ add_custom_command(
 add_custom_target(wlroots-static DEPENDS ${WLR_BUILD}/libwlroots.a)
 
 pkg_check_modules(WLR_DEPS REQUIRED IMPORTED_TARGET
-        wayland-server>=1.22 pixman-1>=0.42 xkbcommon libdrm>=2.4.114 gbm egl glesv2)
+        wayland-server>=1.22 pixman-1>=0.42 xkbcommon libdrm>=2.4.114 gbm egl glesv2
+        xcb xcb-composite xcb-ewmh xcb-icccm xcb-render xcb-res xcb-xfixes)
 
 add_library(wlr-core-addon SHARED
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_encoder.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_xwayland.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/xwayland_sockets.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/gst_frame_encoder.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/gst_main_loop.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src/westfield-egl.c

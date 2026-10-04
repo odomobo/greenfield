@@ -41,6 +41,8 @@ jobs:
       - name: wlroots build dependencies
         run: |
           sudo apt-get -y install --no-install-recommends meson libwayland-dev wayland-protocols libpixman-1-dev libxkbcommon-dev libgbm-dev libgles-dev
+          # XWayland (X11 apps); Ubuntu has no libxcb-errors-dev, wlroots is built without it
+          sudo apt-get -y install --no-install-recommends xwayland libxcb1-dev libxcb-composite0-dev libxcb-ewmh-dev libxcb-icccm4-dev libxcb-render0-dev libxcb-res0-dev libxcb-xfixes0-dev
 
       - name: Install
         run: yarn install # will run `yarn install` command

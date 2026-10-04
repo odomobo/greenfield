@@ -44,6 +44,8 @@ export class Apps {
   private readonly apps = new Map<number, App>()
   /** Wayland client id -> pid of its app */
   private readonly clients = new Map<number, number>()
+  /** DISPLAY for X11 apps (XWayland), undefined if there's none */
+  x11Display?: string
 
   constructor(
     private readonly waylandDisplay: string,
@@ -61,7 +63,12 @@ export class Apps {
       // Don't log the environment, it can contain secrets.
       appLogger.info(`Launching application ${executable} with args ${JSON.stringify(args)}`)
       const child = spawn(executable, args, {
-        env: { ...process.env, ...env, WAYLAND_DISPLAY: this.waylandDisplay },
+        env: {
+          ...process.env,
+          ...env,
+          WAYLAND_DISPLAY: this.waylandDisplay,
+          ...(this.x11Display ? { DISPLAY: this.x11Display } : {}),
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       child.stdout.on('data', (data) => appLogger.info(data.toString()))

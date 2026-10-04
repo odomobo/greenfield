@@ -30,14 +30,20 @@ git submodule update --init
 sudo apt install build-essential cmake ninja-build meson pkg-config \
   libwayland-dev wayland-protocols libpixman-1-dev libxkbcommon-dev libdrm-dev libgbm-dev libegl-dev libgles-dev \
   libopengl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
-  libgraphene-1.0-dev libudev-dev libffi-dev
+  libgraphene-1.0-dev libudev-dev libffi-dev \
+  xwayland libxcb1-dev libxcb-composite0-dev libxcb-ewmh-dev libxcb-icccm4-dev libxcb-render0-dev libxcb-res0-dev \
+  libxcb-xfixes0-dev
 yarn install
 yarn build
 ```
 
-The first build compiles wlroots (a few minutes); after changing the submodule's version, delete
-`packages/compositor-proxy/build/wlroots` so it's rebuilt. Running sessions also needs the apps' runtime pieces:
-`dbus-daemon`, and for the end-to-end test `foot`, `notify-send` (libnotify-bin) and playwright-cli.
+The first build compiles wlroots (a few minutes); it's rebuilt when its build options change, and after changing the
+submodule's version delete `packages/compositor-proxy/build/wlroots` so it's rebuilt. Running sessions also needs the
+apps' runtime pieces: `dbus-daemon`, `Xwayland` (package xwayland, for X11 apps), and for the end-to-end test `foot`,
+`notify-send` (libnotify-bin), x11-utils (xev, xfontsel, xwininfo) and playwright-cli.
+
+X11 apps: each session has an X11 display (XWayland, `DISPLAY` for the apps it launches; Xwayland itself starts when
+the first X11 app connects). `GFLD_XWAYLAND=0` in the gateway's environment turns it off.
 
 `GFLD_LEGACY_COMPOSITOR=1` in the gateway's environment runs sessions on the old stack (the libwayland fork) instead,
 until it's deleted.
@@ -55,9 +61,9 @@ Open https://127.0.0.1:8443/ (self-signed certificate; the fingerprint is printe
 own user with that password. `--dev-auth` skips PAM and privilege separation: sessions run as you. It refuses to
 start on non-loopback addresses, as root, or without a password of at least 8 characters.
 
-End-to-end test: `scripts/test-gateway.sh` (runs `scripts/e2e/auth.sh` and `scripts/e2e/desktop.sh` in parallel; they start
-the gateway with `--dev-auth --dev-time-scale 3`, a test-only flag that divides the failed-sign-in delay and the presence
-timeouts, and is refused without `--dev-auth`).
+End-to-end test: `scripts/test-gateway.sh` (runs `scripts/e2e/auth.sh`, `desktop.sh` and `x11.sh` in parallel; they
+start the gateway with `--dev-auth --dev-time-scale 3`, a test-only flag that divides the failed-sign-in delay and the
+presence timeouts, and is refused without `--dev-auth`).
 
 ## Real mode (PAM, multi-user)
 

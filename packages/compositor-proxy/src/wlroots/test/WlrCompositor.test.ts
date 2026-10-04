@@ -65,6 +65,7 @@ class FakeCore {
     },
     toplevelState: (sid) => this.toplevels.get(sid),
     windowSurfaces: (sid) => this.children.get(sid) ?? [[sid, 0, 0]],
+    setPosition: () => undefined,
     sendFrameDone: (sid) => {
       this.frameDone.push(sid)
     },
