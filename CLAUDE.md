@@ -19,3 +19,11 @@
   the browser is driven by `scripts/e2e/browser-driver.js` rather than `playwright-cli` (which waits a fixed second
   after every command). New e2e checks go into one of those scripts (or a new script added to the runner), and wait on
   conditions with `wait_for` / `wait_until` from `scripts/e2e/lib.sh`, never fixed sleeps.
+
+## Never kill processes by name
+
+- Don't use `pkill`, `killall` or anything else that matches processes by name or command line (`pkill -f`,
+  `pkill -x foot`, ...). The user runs their own apps, gateways and sessions on this machine, and a name match kills
+  those too.
+- Kill only processes you started, by the PID you recorded when starting them (`$!` in shell, `child.pid` in Node),
+  or by stopping the process group you created.
