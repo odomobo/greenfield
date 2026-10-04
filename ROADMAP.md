@@ -33,7 +33,9 @@ This document records the design decisions made so far and the order of the rema
     over Unix sockets.
 - **Transport**: a single WebSocket with a priority send queue (input/control before video), latest-wins frame
   coalescing, one frame in flight per window, and small kernel send buffers (`TCP_NOTSENT_LOWAT`). It sits behind a
-  `ViewerTransport` interface so WebTransport can be added later if ever needed.
+  `ViewerTransport` interface so WebTransport can be added later if ever needed. Planned: priority classes and a
+  per-surface scheduler (see [Encoding policy](#encoding-policy)) and our own congestion control (see
+  [Transport and congestion control](#transport-and-congestion-control)).
 
 ## Security and sign-in
 
@@ -135,46 +137,118 @@ Drawn by the browser in HTML/CSS.
 
 ## Encoding policy
 
-Each window is in one of two modes, chosen dynamically. **Without GPU acceleration on the server (the norm: mostly
-VPSes), there is only slow mode**: no H.264 at all, not even x264, every window is sent as PNG patches. Video mode
-exists only with GPU acceleration, which is to be revisited later (see wave 4 G).
+(Decided 2026-10-04, replacing the earlier fast/slow mode policy; Core items 2a and 2b implement it.)
 
-- **Fast mode (video)**: the whole window is encoded as H.264. Damage only decides whether a frame is sent at all
-  (commits without damage are skipped); it can't select regions.
-- **Slow mode (PNG patches)**: only the damaged areas are sent, as lossless PNG patches of at most ~64k pixels each
-  (to tune); larger areas are split. The viewer applies patches as soon as they arrive.
+Two separate questions: how a surface is **prioritized** (normal or streaming) and how it is **encoded** (PNG patches
+or video). Wayland has no rendering modes: every client attaches a buffer, damages what changed and commits, and
+paces itself by frame callbacks. So streaming is recognized from behavior, not declared.
 
-Choosing the mode:
+Priority classes:
 
-- Per window, a changed-pixels-per-second measure (damage area × rate) over a sliding period of at least 1–2 s, with
-  hysteresis between the modes. The threshold is absolute, so small windows need no special rule.
-- **The single largest damage within the period is ignored.** This keeps one-off full-window repaints (launch, an app
-  switching to a different view) from pushing a window into video, and lets every quiet window make an occasional
-  large update.
-- **New windows start in fast mode.** Briefly fuzzy video for a quiet window beats briefly choppy patches for a busy
-  one; the measure moves the window to slow mode from there.
-- Interactive resizing is not special-cased (for now).
+- **Normal** (medium priority): every surface starts here, new windows included.
+- **Streaming** (low priority): a surface that is **relentless**, i.e. keeps sending new data before its old data has
+  gone out (a game, a video, a busy animation).
+- Control messages (scene, input, cursor, shell) are above both and always pre-empt them.
 
-Switching modes:
+When a surface is relentless:
 
-- **Fast → slow**: queue a full-window PNG render (as patches) so a crisp image replaces the video.
-- **Slow → fast while patches are still queued**: drop the unsent patches and switch to video immediately.
+- A surface is **backlogged** from the moment a commit arrives while damage from an earlier commit is still unsent,
+  until everything it has queued (including its encoded slots, below) has been sent.
+- The measure is the fraction of time it spent backlogged over a sliding period of about 1.5 s. Promote to streaming
+  above roughly 85%; demote once it stays below roughly 40% for about 2 s (hysteresis; all tunable).
+- This measures what the app asks for, not what it gets: a throttled game is still always backlogged, so it stays
+  streaming. A one-off big repaint (launch, a view switch) leaves a backlog but no new commits, so it doesn't count.
+  A needy surface that keeps draining its queue before its next damage stays normal: it isn't causing contention.
+- Replaces the old "ignore the single largest damage" rule and "new windows start in video".
 
-Merging damage in slow mode:
+Encoding:
 
-- A queued patch whose pixels haven't been read yet will pick up the latest content when it is encoded. So the parts
-  of new damage that overlap a queued patch are removed (possibly the whole damage).
-- Once a patch has started encoding, its pixels are fixed: new damage overlapping it is queued normally.
-- In short: never queue a not-yet-captured area twice, never skip an area whose captured pixels may be stale.
+- **Without GPU acceleration on the server (the norm: mostly VPSes), everything is PNG patches**, streaming surfaces
+  included, best effort. No H.264 at all, not even x264.
+- **PNG patches**: only the damaged areas are sent, as lossless patches of at most ~64k pixels each (to tune); larger
+  areas are split. The viewer applies patches as soon as they arrive. A streaming surface's frame can therefore tear
+  across patches (accepted: holding patches back for whole frames would add latency).
+- **Video** (H.264 of the whole surface) only with GPU acceleration, hardware encoders only, and only for streaming
+  surfaces. Leaving streaming queues a full-surface PNG render so a crisp image replaces the video. GPU acceleration
+  is to be revisited later (wave 4 G, deferred).
+- Measured (2026-10-04, our encoder at deflate level 4, full 256×256 patches): ordinary UI about 10–30 KB (typically
+  ~15 KB), photo- or game-like content about 40–150 KB, noise ~256 KB. Most patches are far smaller (a keystroke, a
+  cursor blink: under 2 KB).
+
+Damage, newest content wins (already how it works):
+
+- A surface's queue holds rectangles, not pixels, oldest first. New damage overlapping a queued rectangle is removed
+  (the queued rectangle keeps its place and will read the latest pixels). Pixels are read only when a patch is
+  captured; once captured, its pixels are fixed and new damage over it is queued normally. So never queue a
+  not-yet-captured area twice, never skip an area whose captured pixels may be stale.
+- Use `wl_surface.damage`, skip empty damage, release app buffers as early as possible.
+
+Per-surface sources and the scheduler:
+
+- Each surface is a source with at most 2 slots: one item encoded and ready to send, one being encoded (an item is a
+  patch, or a whole video frame). A slot is filled (pixels captured) only when it frees up, so damage keeps merging
+  while the surface waits. Because a surface only encodes into free slots, CPU time follows the send schedule: no
+  process priorities needed.
+- **Frame callbacks follow the slots**: a surface whose slots are both full gets its next frame callback only when one
+  frees, so an app (a game rendering on the CPU with llvmpipe) slows down to what we can send instead of rendering
+  frames that would be merged away.
+- **Scheduler**: control messages first, always. Then a deficit round-robin over the sources' ready items, weighted by
+  bytes, with a quota per class of about 3 (normal) to 1 (streaming), tunable. Within a class, round-robin between
+  surfaces. With equal-sized patches it behaves like a per-message round-robin; byte weighting keeps it fair once
+  video frames of different sizes are in the mix. Normal surfaces are clearly preferred but never starve streaming
+  ones, and a class with nothing to send leaves the whole link to the other. The transport's queue uses the same
+  classes.
 
 Other rules:
 
-- Use `wl_surface.damage`, skip empty damage, release app buffers as early as possible.
-- A small fixed pool of warm video encoders (server) and decoders (browser) with a simple policy. If the pool is full,
-  a window that would be in fast mode stays in slow mode.
-- Hardware encoders only; no x264 fallback (no GPU: slow mode only, see above). The browser uses software decode for now (no hard decoder
-  limits).
+- A small pool of warm video encoders (server) when video exists; if it's full, a streaming surface stays on patches.
+  The browser uses software decode for now (no hard decoder limits).
 - Rejected: one tiled "atlas" video stream for all windows (too much trouble for the benefit).
+
+## Transport and congestion control
+
+(Decided 2026-10-04; Core item 2b.)
+
+The goal: never let more than about 20 ms of data queue anywhere between the server and the screen, on any link
+speed and latency, without starving throughput on fast high-latency links. TCP's own backpressure already keeps the
+queues bounded (one item in flight, `TCP_NOTSENT_LOWAT` 32 KB on direct TCP, a 32 KB send buffer to the gateway, the
+gateway's relay uses `pipe()` and sets `TCP_NOTSENT_LOWAT` on the browser socket), but bounded in bytes, not time, and
+the kernel's usual congestion control (cubic) fills router buffers at the bottleneck (bufferbloat).
+
+- **Our own BBRv3-style congestion controller in the session process**, on top of whatever TCP the kernel runs (QUIC
+  stacks do the same in user space). Pacing our sends at the measured bottleneck rate keeps TCP from ever filling the
+  network's queues, so the distro's congestion control doesn't matter.
+  - Model: bottleneck bandwidth (max delivery rate over the last couple of probe cycles), base delay (min round-trip
+    time over ~10 s), in-flight limit about bandwidth × base delay, pacing rate from them.
+  - Delivery-rate samples come from viewer acks; samples taken while we had nothing to send (app-limited, which is
+    most of the time on a desktop) may only raise the bandwidth estimate.
+  - States as in BBRv3 (IETF draft-ietf-ccwg-bbr; check its constants when implementing): Startup, Drain, ProbeBW's
+    gentle cycle (DOWN, CRUISE, REFILL, UP at +25% every ~2–3 s), ProbeRTT the v3 way (half the window for ~200 ms,
+    at most every ~5 s, skipped when an idle moment already showed the base delay). Gentle probing was the reason for
+    choosing v3: v1's ProbeRTT drops to 4 packets and stalls a saturating stream for ~200 ms every 10 s.
+  - We can't see packet loss or ECN, which v2/v3 use to bound data in flight. Instead a **delay bound**: when
+    round-trip times rise more than ~20 ms above the base delay, lower the in-flight limit, as v3 does on loss.
+  - At least 2 non-control items may always be in flight, so a single large item never stalls the link.
+  - Control messages bypass the controller (they're tiny) and are never held back.
+- **Acks on arrival**: the viewer acknowledges each data message when it arrives (not after applying it), so samples
+  measure the network, not decoding. Round-trip times are measured on the server only (send time to ack), no clock
+  sync. These acks replace the viewer's current decode-time feedback.
+- **Viewer backlog hold**: the browser's WebSocket API has no backpressure (it reads everything and queues message
+  events), so the viewer's own backlog is invisible to TCP. Each ack carries the bytes received but not yet applied.
+  The server holds non-control items while that is more than 1 MB, not counting the largest item. The report is half
+  a round trip old, so the real backlog can briefly exceed it (fine for a safety net; it only triggers if the browser
+  decodes slower than the server encodes, which should be rare). The viewer must also report when its backlog drops
+  back under the threshold, or the server would wait forever.
+- Not designed for very slow links: at least a lower-end broadband connection is expected, latency may be high.
+- Tested against a simulated link (bottleneck bandwidth, base delay, buffer size) on a virtual clock, so the tests run
+  in seconds; WSL can't shape real traffic without root.
+- Rejected: a second WebSocket for latency pings (it waits in the same bottleneck queue as the data, so it measures
+  base plus queue unless the router queues per connection); a fixed in-flight cap in items or bytes (latency then
+  depends on link speed, and a 300 ms link is starved); hand-rolled delay estimation with ad-hoc fixes for base-delay
+  drift (whack-a-mole; BBR's model covers it).
+- **On the table for later: kernel BBR** (`net.ipv4.tcp_congestion_control=bbr` system-wide, or per socket by the
+  gateway when `bbr` is in `tcp_allowed_congestion_control`; Ubuntu kernels ship `tcp_bbr`). Not used for now to keep
+  installation simple. It would complement our controller, not replace it, and would belong in the install script.
 
 ## Audio (playback only)
 
@@ -345,9 +419,24 @@ Other rules:
      `git submodule update --init`.
    - Must still pass `scripts/test-gateway.sh` and the unit tests; GPU (dmabuf) buffers stay untested without
      hardware.
-2. **PNG-only without GPU acceleration.** When the server has no GPU acceleration, slow mode (PNG patches) is the only
-   mode: no video, no x264, new windows start as patches (see [Encoding policy](#encoding-policy)). Video mode stays
-   for servers with GPU acceleration, to revisit later.
+2a. **Streaming class, scheduler and PNG-only without GPU acceleration** (see [Encoding policy](#encoding-policy)).
+    Sonnet. Works without 2b.
+    - Without GPU acceleration on the server, everything is PNG patches: no video, no x264. Video only with GPU
+      acceleration and hardware encoders, for streaming surfaces.
+    - Normal and streaming priority classes; every surface starts normal; promotion by the "relentless" measure
+      (time backlogged with new commits arriving, ~1.5 s period, hysteresis), not by damage rate.
+    - Per-surface sources with 2 slots (one ready, one encoding), replacing `PatchPump`'s single round-robin; frame
+      callbacks follow the slots.
+    - Scheduler: control first, then byte-weighted deficit round-robin between the classes (about 3:1, tunable),
+      round-robin between surfaces within a class, in the patch pipeline and in `ViewerTransport`.
+2b. **Our own congestion control** (see [Transport and congestion control](#transport-and-congestion-control)). Opus
+    fork (subtle: bugs show up as random latency spikes).
+    - BBRv3-style controller in the session process with a delay bound instead of loss/ECN, at least 2 non-control
+      items in flight, control messages exempt.
+    - Viewer acks on arrival (replacing the decode-time feedback), carrying the viewer's backlog in bytes; the server
+      holds non-control items above 1 MB of backlog (not counting the largest item); the viewer reports when it drops
+      back under.
+    - Unit tests against a simulated link on a virtual clock.
 3. **Viewer: one DOM element per window instead of one WebGL canvas.** Each window becomes a positioned element with
    its own canvas, stacked in DOM order, so the browser does stacking, clipping, hit-testing, occlusion and window
    moves/animations (CSS transforms), and window decorations and shadows can be HTML/CSS that stacks with its window.
@@ -425,7 +514,8 @@ Other rules:
 ### Last
 
 13. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
-    is manual (see `packages/gateway` docs).
+    is manual (see `packages/gateway` docs). Could later also enable kernel BBR (see
+    [Transport and congestion control](#transport-and-congestion-control)); not for now, to keep installation simple.
 
 14. **Two-factor sign-in via PAM prompts** (lowest priority of all). Only makes sense once the core infrastructure is
     verified sound and free of vulnerabilities.
