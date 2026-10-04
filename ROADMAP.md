@@ -195,45 +195,42 @@ doesn't need to know a surface's class; nothing about it is in the scene protoco
 Every surface starts **normal**, new windows included (starting low would make every new window load slowly behind
 any running game).
 
-A surface is promoted to **streaming** when it is *relentless*: it keeps sending new data before its old data has
-gone out. Defined precisely:
+A surface is promoted to **streaming** when it is *relentless*: it keeps asking for new data while it is still busy
+sending the old. Defined precisely, on **discrete periods** (fixed, back to back, per surface, `CLASS_PERIOD_MS` =
+750 ms; a surface is only judged on whole periods):
 
-- A surface has **unsent work** when any of these exist: queued (not yet captured) patch rectangles, items in its
-  slots (captured, being encoded, or encoded and waiting to be sent; see below), or a video frame being encoded or
-  waiting in the transport. "Sent" means handed to the socket by the scheduler.
-- The surface becomes **backlogged** when a commit with non-empty damage arrives while it has unsent work from an
-  earlier commit. It stays backlogged until it has no unsent work at all. (Commits while already backlogged change
-  nothing: the rule is idempotent.)
-- The **backlog fraction** is the share of the last `CLASS_PERIOD_MS` = 1500 ms the surface spent backlogged. A
-  surface younger than `CLASS_PERIOD_MS` can't be promoted: the decision always sees a whole period.
-- **Promote** to streaming when the fraction is at least `PROMOTE_FRACTION` = 0.85.
-- **Demote** to normal once the fraction has stayed below `DEMOTE_FRACTION` = 0.40 for `DEMOTE_HOLD_MS` = 2000 ms
-  without interruption.
-- Evaluated on every commit and on a 200 ms tick (the existing `EncodingContext.startTicking`), so a surface that
-  goes quiet is demoted without committing.
+- A surface has **unsent work**, and is **busy**, while any of these exist: queued (not yet captured) patch rectangles,
+  items in its slots (captured, being encoded, or encoded and waiting to be sent; see below), or a video frame being
+  encoded or waiting in the transport. "Sent" means handed to the socket by the scheduler.
+- During a period the time the surface was busy and the time it was backlogged are added up. At the end of the period
+  the two fractions (of the period) are kept as the *previous period's* and the counters start again.
+- A commit with non-empty damage makes the surface **backlogged** if the previous completed period's busy fraction was
+  at least `PROMOTE_FRACTION` = 0.60 (no separate busy threshold). It stays backlogged until it is no longer busy.
+  Backlogged implies busy. Commits while already backlogged change nothing.
+- **Promote** to streaming at the end of a period whose backlogged fraction is at least `PROMOTE_FRACTION` = 0.60.
+- **Demote** to normal at the end of a period whose backlogged fraction is below `DEMOTE_FRACTION` = 0.15 (one
+  period, no hold timer).
+- Nothing happens before a surface has completed two periods (a commit needs a completed previous period to count as
+  backlogged at all).
+- Periods are closed on every commit and on a 200 ms tick (the existing `EncodingContext.startTicking`), so a surface
+  that goes quiet is demoted without committing.
 
 Why this works:
 
-- It measures what the app asks for, not what it gets: a throttled game is still always backlogged (each frame
-  callback we grant brings a commit while the previous frame's patches are still queued), so it stays streaming.
-- A one-off big repaint (launch, a view switch) leaves a backlog but brings no new commits while it drains, so it
-  doesn't count.
-- A needy surface that keeps draining its work before its next damage stays normal: it isn't causing contention, and
-  if the link and CPU keep up, nothing waits and priorities don't matter.
+- A callback-paced client (frame callbacks are held until a slot is free, see Frame callbacks) never commits while its
+  previous frame is unsent, so "commit while there is unsent work" can't see it. Busy time can: a client that is busy
+  most of a period is the one the link or CPU can't keep up with, and its commits in the next period are backlogged.
+  Measured: a 1920x1080 busy client was busy 86-94% of each period and promoted at the end of its second period (about
+  1.5 s after it started); a 640x480 one was busy 40-45% on loopback and stayed normal.
+- A one-off big repaint (launch, a view switch) is a single damage after a quiet period, so it is never backlogged,
+  however long it takes to drain.
+- A needy surface that is busy less than 60% of the time stays normal: it isn't causing contention, and if the link and
+  CPU keep up, nothing waits and priorities don't matter.
+- A relentless surface is promoted 1.5 to 2.25 s after it starts, and a quiet one is demoted within 0.75 to 1.5 s.
 - It replaces the old rules "ignore the single largest damage" and "new windows start in video".
 
-**Found while implementing 2a (open, needs a decision):** the first bullet doesn't hold as written. Frame callbacks
-are held until the surface has a free slot, and a surface refills its slots from its queue at once, so a callback-driven
-client is only granted its next callback when its previous frame has (almost) all gone out. Its next commit then finds
-no unsent work and doesn't count as backlogged; the surface is "needy" by the definition, because we paced it that way.
-It is backlogged only if the last item is still in flight when the callback is granted, i.e. when the link (not the
-CPU) is slow relative to the frame gap (callback tick up to 16 ms, plus the app's render time). Measured on loopback
-with `scripts/e2e/busy-client.c`: a 640x480 client ran at 20-30 fps and a 1920x1080 one at 5-6 fps, using 56% and 128%
-of a core on the session's normal-priority threads; neither was ever promoted (backlog fraction 0.00), so the nice-19
-workers saw no work. So CPU-bound relentless clients on a fast link stay normal, which is the contention the streaming
-class was meant to fix. Possible fixes: measure demand instead (a commit within about one frame interval of a granted
-callback counts as backlogged), or release callbacks only while the surface has no queued rectangles either and count
-time with queued rectangles as backlog; both change this section, so left as specified.
+(Decided 2026-10-04: the first version of this rule, backlogged = a commit arriving while unsent work exists over a
+sliding 1.5 s window, never promoted a callback-paced client, because the held callbacks make it drain before it commits.)
 
 Changing class:
 
@@ -719,12 +716,12 @@ single large item never stalls the link. Initial window before any estimate: 64 
         worker takes from, instead of assigning to workers round-robin; capture is allowed while fewer than 2 x workers
         patches are encoding or waiting. `setThreadNice` returns the thread id (or minus errno).
       - The frame clock got a testable queue class (`FrameCallbackQueue`); `ProcessingDuration` is gone.
-      - Class changes are logged (`Surface x is now streaming (backlogged N% ...)`).
-      - Not done / open: the relentless measure doesn't promote callback-driven clients on a fast link, see "Found
-        while implementing 2a" in the spec above. The streaming path is therefore only covered by unit tests (the e2e
-        busy client stays normal on loopback). Video (GPU) paths are untested here as before.
+      -       - The relentless measure was changed after the first version, see "Classes" (periods of 750 ms, busy and
+        backlogged fractions). Class changes are logged with the last period's fractions. Video (GPU) paths are
+        untested here as before.
       - New e2e script `scripts/e2e/busy.sh` (with `busy-client.c`): a busy client is shown as patches and paced, and
-        foot stays responsive while it runs. The e2e gateways run `--encoder none`; the viewer's video decoding has no
+        foot stays responsive while it runs; it also waits for the busy surface to be promoted to streaming and for the nice-19
+        workers to use CPU. The e2e gateways run `--encoder none`; the viewer's video decoding has no
         e2e coverage now (its unit tests stay). The viewer test hook got `__viewerTest.patches()`.
     - Gateway: `--encoder <auto|none|nvh264|vaapih264>`, default `auto`, `x264` removed (`config.ts`, `ipc.ts`,
       `monitor.ts`, `session-process.ts`, docs and `--help`). Detection in the gateway at start, logged. The session
@@ -732,7 +729,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
       never creates a `WlrEncoder`. A hardware encoder that fails to create is logged once and treated as `none`.
     - `encoding/policy.ts`: remove `DamageMeter`, `nextMode`, `EncodingMode`, `FAST_ABOVE_...`, `SLOW_BELOW_...`,
       `INITIAL_FAST_MS`; add the relentless measure (a pure class: `markBackloggedStart(now)`,
-      `markBackloggedEnd(now)`, `fraction(now)`, plus the promote/demote decision with its constants), keeping
+      `markBusyStart/End(now)`, the period fractions, plus the promote/demote decision with its constants), keeping
       `planPatches` and the patch constants.
     - `encoding/SurfaceEncoder.ts`: class (`'normal' | 'streaming'`) instead of mode; video only when streaming, an
       encoder is available and the surface isn't small (or its pixels can't be read). Track unsent work and the
@@ -753,9 +750,9 @@ single large item never stalls the link. Initial window before any estimate: 64 
       frame-clock tick once one is free; remove the `ProcessingDuration` delay; keep the viewer decode-time delay and
       the detached throttle.
     - All constants named and grouped at the top of their files, so they're easy to tune.
-    - Unit tests: the measure (a one-off big repaint stays normal; a surface committing every frame callback while
-      its patches queue is promoted within ~1.5 s; a throttled one stays streaming; a needy one that drains between
-      commits stays normal; demotion after 2 s below 0.40; no promotion before 1.5 s of age); the encode pools (streaming
+    - Unit tests: the measure (a one-off big repaint never promoted, even when it drains over several periods; a
+      callback-paced relentless client promoted at the end of its second period; a needy one under 60% busy stays
+      normal; demotion after one period under 15%; nothing before two completed periods); the encode pools (streaming
       patches go to the workers and normal ones to libuv, at most 4 normal encodes, slots respected, a worker's
       thread really runs at nice 19: read its nice value from `/proc/self/task/<tid>/stat`, with the tid returned by
       the native helper; worker PNGs identical to `png.ts` output); the send scheduler (byte-weighted 3:1 with mixed sizes,

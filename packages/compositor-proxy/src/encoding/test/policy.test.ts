@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import {
   CLASS_PERIOD_MS,
   DEMOTE_FRACTION,
-  DEMOTE_HOLD_MS,
   MAX_PATCH_PIXELS,
   planPatches,
   PROMOTE_FRACTION,
@@ -13,159 +12,144 @@ import { area, Rect } from '../region.js'
 
 const r = (x: number, y: number, width: number, height: number): Rect => ({ x, y, width, height })
 
-/**
- * Drives a meter like a surface would: a clock, backlogged intervals, and an evaluation every 50 ms (commits and the
- * 200 ms tick).
- */
-function clock(meter: RelentlessMeter, start = 0) {
-  let now = start
+const P = CLASS_PERIOD_MS
+
+/** Drives a meter like a surface does: a clock that ticks every 5 ms, calling `each` and then evaluating at each. */
+function clock(meter: RelentlessMeter) {
+  let now = 0
   return {
     get now() {
       return now
     },
-    /** advance by `ms`, evaluating every 50 ms; `backlogged` is whether the surface is backlogged throughout */
-    run(ms: number, backlogged: boolean) {
+    run(ms: number, each: (now: number) => void = () => undefined) {
       const end = now + ms
-      if (backlogged) {
-        meter.markBackloggedStart(now)
-      } else {
-        meter.markBackloggedEnd(now)
-      }
       while (now < end) {
-        now = Math.min(end, now + 50)
+        now += 5
+        each(now)
         meter.evaluate(now)
       }
     },
   }
 }
 
-test('the fraction is the share of the last period spent backlogged', () => {
-  const meter = new RelentlessMeter()
-  assert.equal(meter.fraction(1000), 0)
-  meter.markBackloggedStart(1000)
-  assert.equal(meter.fraction(1000 + CLASS_PERIOD_MS / 2), 0.5)
-  meter.markBackloggedEnd(1000 + CLASS_PERIOD_MS / 2)
-  assert.equal(meter.fraction(1000 + CLASS_PERIOD_MS), 0.5)
-  // it slides: half of the backlogged time is out of the period now
-  assert.equal(meter.fraction(1000 + CLASS_PERIOD_MS + CLASS_PERIOD_MS / 4), 0.25)
-  assert.equal(meter.fraction(1000 + 3 * CLASS_PERIOD_MS), 0)
-})
-
-test('start and end are idempotent', () => {
-  const meter = new RelentlessMeter()
-  meter.markBackloggedStart(0)
-  meter.markBackloggedStart(500)
-  meter.markBackloggedEnd(1000)
-  meter.markBackloggedEnd(1200)
-  assert.equal(meter.fraction(CLASS_PERIOD_MS), 1000 / CLASS_PERIOD_MS)
-})
-
-test('a one-off big repaint stays normal', () => {
-  const meter = new RelentlessMeter(0)
-  const time = clock(meter)
-  time.run(5000, false)
-  // the repaint takes 300 ms to go out, no new commits meanwhile
-  time.run(300, false)
-  time.run(5000, false)
-  assert.equal(meter.surfaceClass, 'normal')
-})
-
-test('a surface that commits while its patches queue is promoted once a whole period has passed', () => {
-  const meter = new RelentlessMeter(0)
-  const time = clock(meter)
-  time.run(CLASS_PERIOD_MS - 50, true)
-  assert.equal(meter.surfaceClass, 'normal', 'not before CLASS_PERIOD_MS of age, however backlogged')
-  time.run(50, true)
-  assert.equal(meter.surfaceClass, 'streaming')
-})
-
-test('promotion is within about a period for a surface backlogged from its first commit', () => {
-  const meter = new RelentlessMeter(0)
-  const time = clock(meter)
-  time.run(100, false) // not backlogged until its second commit
-  time.run(CLASS_PERIOD_MS, true)
-  // backlogged for (period - 100) ms of the last period is only 0.93 of it: promoted
-  assert.equal(meter.surfaceClass, 'streaming')
-  assert.ok(meter.fraction(time.now) >= PROMOTE_FRACTION)
-})
-
-test('a throttled surface stays streaming: it is backlogged however slowly it is allowed to draw', () => {
-  const meter = new RelentlessMeter(0)
-  const time = clock(meter)
-  time.run(3000, true)
-  assert.equal(meter.surfaceClass, 'streaming')
-  // drains for a moment between frames (10%), still far above the demotion threshold
-  for (let i = 0; i < 20; i++) {
-    time.run(450, true)
-    time.run(50, false)
-  }
-  assert.equal(meter.surfaceClass, 'streaming')
-})
-
-test('a needy surface that drains between its commits stays normal', () => {
-  const meter = new RelentlessMeter(0)
-  const time = clock(meter)
-  // 60 commits a second, each takes about 5 ms to go out: backlogged a third of the time at most
-  for (let i = 0; i < 300; i++) {
-    time.run(5, true)
-    time.run(11, false)
-  }
-  assert.equal(meter.surfaceClass, 'normal')
-  assert.ok(meter.fraction(time.now) < PROMOTE_FRACTION)
-})
-
-test('a surface above the demotion fraction is not demoted, however long', () => {
-  const meter = new RelentlessMeter(0)
-  const time = clock(meter)
-  time.run(2000, true)
-  assert.equal(meter.surfaceClass, 'streaming')
-  // backlogged 60% of the time: between the thresholds
-  for (let i = 0; i < 40; i++) {
-    time.run(450, true)
-    time.run(300, false)
-  }
-  assert.ok(meter.fraction(time.now) > DEMOTE_FRACTION)
-  assert.equal(meter.surfaceClass, 'streaming')
-})
-
-test('demotion needs DEMOTE_HOLD_MS below the fraction without interruption', () => {
-  const meter = new RelentlessMeter(0)
-  const time = clock(meter)
-  time.run(2000, true)
-  assert.equal(meter.surfaceClass, 'streaming')
-  time.run(0, false)
-  // the fraction falls below DEMOTE_FRACTION after (1 - 0.4) of a period, then the hold starts
-  const below = CLASS_PERIOD_MS * (1 - DEMOTE_FRACTION)
-  // the hold has run for about half of DEMOTE_HOLD_MS
-  time.run(below + DEMOTE_HOLD_MS / 2, false)
-  assert.equal(meter.surfaceClass, 'streaming', 'still holding')
-  // an interruption: backlogged again long enough to lift the fraction over the threshold resets the hold
-  time.run(1000, true)
-  time.run(0, false)
-  // the backlog starts to slide out of the period 500 ms after it ended, and the fraction is below the threshold
-  // 400 ms later
-  time.run(900 + DEMOTE_HOLD_MS - 600, false)
-  assert.equal(meter.surfaceClass, 'streaming', 'the hold restarted')
-  time.run(800, false)
-  assert.equal(meter.surfaceClass, 'normal')
-})
-
-test('demotion takes DEMOTE_HOLD_MS after the fraction fell below the threshold', () => {
-  const meter = new RelentlessMeter(0)
-  const time = clock(meter)
-  time.run(2000, true)
-  const end = time.now
-  time.run(0, false)
-  let demotedAt: number | undefined
-  while (time.now < end + 10_000 && demotedAt === undefined) {
-    time.run(50, false)
-    if (meter.surfaceClass === 'normal') {
-      demotedAt = time.now
+/**
+ * A callback-paced client: a commit every 50 ms (backlogged if the last period was busy enough), each draining `idleMs`
+ * before the next one.
+ */
+function paced(meter: RelentlessMeter, idleMs: number) {
+  return (now: number) => {
+    const phase = now % 50
+    if (phase === 0) {
+      meter.markBackloggedStart(now)
+      meter.markBusyStart(now)
+    } else if (idleMs > 0 && phase === 50 - idleMs) {
+      meter.markBusyEnd(now)
     }
   }
-  assert.ok(demotedAt !== undefined)
-  const belowSince = end + CLASS_PERIOD_MS * (1 - DEMOTE_FRACTION)
-  assert.ok(demotedAt - belowSince >= DEMOTE_HOLD_MS && demotedAt - belowSince < DEMOTE_HOLD_MS + 100)
+}
+
+test('nothing happens before two periods have completed', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(2 * P - 50, paced(meter, 0))
+  assert.equal(meter.surfaceClass, 'normal')
+  assert.ok(meter.lastPeriod!.busy > 0.9)
+  assert.equal(meter.lastPeriod?.backlogged, 0, 'a commit needs a completed previous period to be backlogged')
+})
+
+test('a callback-paced relentless client is promoted at the end of its second period', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(2 * P - 50, paced(meter, 0))
+  assert.equal(meter.surfaceClass, 'normal')
+  time.run(50, paced(meter, 0))
+  assert.equal(meter.surfaceClass, 'streaming')
+  assert.ok(meter.lastPeriod!.backlogged >= PROMOTE_FRACTION)
+})
+
+test('a paced client that drains a little before each next commit is still promoted', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  // busy 90% of the time: the next commit comes 5 ms after it drained
+  time.run(2 * P, paced(meter, 5))
+  assert.equal(meter.surfaceClass, 'streaming')
+})
+
+test('a one-off big repaint is never backlogged, however long it takes to drain', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(3 * P)
+  // a single damage after quiet periods, draining over several periods with no further commits
+  meter.markBackloggedStart(time.now)
+  meter.markBusyStart(time.now)
+  assert.ok(!meter.backlogged)
+  time.run(4 * P)
+  assert.equal(meter.surfaceClass, 'normal')
+  assert.equal(meter.lastPeriod?.busy, 1)
+  assert.equal(meter.lastPeriod?.backlogged, 0)
+  meter.markBusyEnd(time.now)
+  time.run(2 * P)
+  assert.equal(meter.surfaceClass, 'normal')
+})
+
+test('a needy client under the busy threshold stays normal, however often it commits', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  // busy 40% of each frame
+  time.run(10 * P, paced(meter, 30))
+  assert.ok(meter.lastPeriod!.busy < PROMOTE_FRACTION)
+  assert.equal(meter.surfaceClass, 'normal')
+})
+
+test('a surface is backlogged only after a period that was busy at least PROMOTE_FRACTION', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  // first period busy 55%: below
+  meter.markBusyStart(0)
+  time.run(P * 0.55)
+  meter.markBusyEnd(time.now)
+  time.run(P * 0.45)
+  assert.ok(meter.lastPeriod!.busy < PROMOTE_FRACTION)
+  meter.markBackloggedStart(time.now)
+  assert.ok(!meter.backlogged)
+  // a period busy 65%: above
+  meter.markBusyStart(time.now)
+  time.run(P * 0.65)
+  meter.markBusyEnd(time.now)
+  time.run(P * 0.35)
+  assert.ok(meter.lastPeriod!.busy >= PROMOTE_FRACTION)
+  meter.markBackloggedStart(time.now)
+  assert.ok(meter.backlogged)
+  meter.markBusyEnd(time.now + 10)
+  assert.ok(!meter.backlogged, 'backlogged ends when the surface is not busy anymore')
+})
+
+test('a quiet streaming surface is demoted at the end of the first period below DEMOTE_FRACTION', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(2 * P, paced(meter, 0))
+  assert.equal(meter.surfaceClass, 'streaming')
+  meter.markBusyEnd(time.now)
+  time.run(P - 50)
+  assert.equal(meter.surfaceClass, 'streaming', 'judged only at the end of a period')
+  time.run(50)
+  assert.equal(meter.surfaceClass, 'normal')
+  assert.ok(meter.lastPeriod!.backlogged < DEMOTE_FRACTION)
+})
+
+test('a streaming surface that is busy and backlogged most of each period stays streaming', () => {
+  const meter = new RelentlessMeter(0)
+  const time = clock(meter)
+  time.run(2 * P, paced(meter, 0))
+  assert.equal(meter.surfaceClass, 'streaming')
+  // busy 70% of each period, with gaps of 30%
+  for (let i = 0; i < 6; i++) {
+    time.run(P * 0.7, paced(meter, 0))
+    meter.markBusyEnd(time.now)
+    time.run(P * 0.3)
+  }
+  assert.ok(meter.lastPeriod!.backlogged >= DEMOTE_FRACTION)
+  assert.equal(meter.surfaceClass, 'streaming')
 })
 
 test('planPatches leaves out damage that a queued patch will pick up', () => {

@@ -7,7 +7,7 @@
  */
 import type { Patch } from '@gfld/scene-protocol'
 import { EncoderPool } from './EncoderPool.js'
-import { CLASS_PERIOD_MS, MAX_PATCH_PIXELS, planPatches, RelentlessMeter, SurfaceClass } from './policy.js'
+import { MAX_PATCH_PIXELS, PeriodFractions, planPatches, RelentlessMeter, SurfaceClass } from './policy.js'
 import { area, clip, intersect, Rect } from './region.js'
 
 /** Items (patches or video frames) of one surface that may exist between capture and the socket. */
@@ -90,6 +90,8 @@ export interface PatchSource {
 
 export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements PatchSource {
   private readonly meter: RelentlessMeter
+  /** the class the surface's encoding follows now (the meter decides it at period ends, `evaluate` applies it) */
+  private appliedClass: SurfaceClass = 'normal'
   /** patches queued but not captured yet: they will read the latest pixels when they are */
   private queued: Rect[] = []
   /** bumped whenever queued content is superseded (video start or stop), results of encodings started before are dropped */
@@ -119,7 +121,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   }
 
   get surfaceClass(): SurfaceClass {
-    return this.meter.surfaceClass
+    return this.appliedClass
   }
 
   get destroyed(): boolean {
@@ -149,9 +151,9 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     return this.meter.backlogged
   }
 
-  /** the share of the class period the surface spent backlogged, for tests and logging */
-  backlogFraction(): number {
-    return this.meter.fraction(this.context.now())
+  /** the busy and backlogged shares of the last completed period, for tests and logging */
+  get lastPeriod(): PeriodFractions | undefined {
+    return this.meter.lastPeriod
   }
 
   /**
@@ -172,6 +174,12 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
    * buffer.
    */
   commit(damage: Rect[]): Promise<void> {
+    const result = this.commitNow(damage)
+    this.updateBusy()
+    return result
+  }
+
+  private commitNow(damage: Rect[]): Promise<void> {
     const buffer = this.host.currentBuffer()
     if (buffer === undefined || this._destroyed) {
       return resolved
@@ -185,10 +193,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       return resolved
     }
     const now = this.context.now()
-    if (this.hasUnsentWork) {
-      // new damage while earlier damage hasn't gone out: backlogged (idempotent)
-      this.meter.markBackloggedStart(now)
-    }
+    // backlogged if the last period was busy enough (the new work makes the surface busy, so it counts from now)
+    this.meter.markBackloggedStart(now)
     const switched = this.evaluate(now, buffer)
     if (switched) {
       // a class switch that sends the whole surface covers this damage
@@ -223,7 +229,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   tick(): void {
     const buffer = this.host.currentBuffer()
     if (buffer && !this._destroyed) {
-      this.updateBacklog()
+      this.updateBusy()
       void this.evaluate(this.context.now(), buffer)
     }
   }
@@ -233,6 +239,12 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
    * needs the buffer.
    */
   refresh(): Promise<void> {
+    const result = this.refreshNow()
+    this.updateBusy()
+    return result
+  }
+
+  private refreshNow(): Promise<void> {
     const buffer = this.host.currentBuffer()
     if (buffer === undefined || this._destroyed || !this.context.sink.active) {
       return resolved
@@ -253,7 +265,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this.queued = []
     this.context.sink.dropPatches(this.key)
     this.queuePatches([boundsOf(buffer)], boundsOf(buffer))
-    this.updateBacklog()
+    this.updateBusy()
     return resolved
   }
 
@@ -262,7 +274,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this.queued = []
     this.videoWanted = undefined
     this.context.sink.dropPatches(this.key)
-    this.updateBacklog()
+    this.updateBusy()
   }
 
   destroy(): void {
@@ -303,7 +315,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
         if (this.startVideo() === undefined) {
           this.logUnsupported()
         }
-        this.updateBacklog()
+        this.updateBusy()
         return undefined
       }
       this.slotsUsed++
@@ -328,7 +340,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       this.context.pump.schedule(this)
     }
     void this.pumpVideo()
-    this.updateBacklog()
+    this.updateBusy()
   }
 
   isCurrent(epoch: number): boolean {
@@ -352,9 +364,13 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     }
   }
 
-  private updateBacklog() {
-    if (this.meter.backlogged && !this.hasUnsentWork) {
-      this.meter.markBackloggedEnd(this.context.now())
+  /** Tell the meter whether the surface has unsent work now. */
+  private updateBusy() {
+    const busy = this.hasUnsentWork
+    if (busy && !this.meter.busy) {
+      this.meter.markBusyStart(this.context.now())
+    } else if (!busy && this.meter.busy) {
+      this.meter.markBusyEnd(this.context.now())
     }
   }
 
@@ -363,13 +379,14 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
    * start, crisp render); undefined if only the priority changed (or nothing).
    */
   private evaluate(now: number, buffer: BufferInfo): Promise<void> | undefined {
-    const before = this.meter.surfaceClass
     const after = this.meter.evaluate(now)
-    if (after === before) {
+    if (after === this.appliedClass) {
       return undefined
     }
+    this.appliedClass = after
+    const last = this.meter.lastPeriod
     this.context.logger.info?.(
-      `Surface ${this.key} is now ${after} (backlogged ${Math.round(this.meter.fraction(now) * 100)}% of the last ${CLASS_PERIOD_MS} ms).`,
+      `Surface ${this.key} is now ${after} (last period: busy ${Math.round((last?.busy ?? 0) * 100)}%, backlogged ${Math.round((last?.backlogged ?? 0) * 100)}%).`,
     )
     if (after === 'streaming') {
       // video only if an encoder is free; otherwise it stays on patches, with low priority
@@ -411,7 +428,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     if (this.context.sink.active) {
       this.queuePatches([boundsOf(buffer)], boundsOf(buffer))
     }
-    this.updateBacklog()
+    this.updateBusy()
   }
 
   private requestVideo(keyFrame: boolean): Promise<void> {

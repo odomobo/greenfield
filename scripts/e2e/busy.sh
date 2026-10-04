@@ -25,7 +25,7 @@ gcc -Wall -Wno-unused-result -O2 -I"$WORK" -o "$WORK/busy-client" "$E2E_DIR/busy
 mkdir -p "$WORK/data/applications" "$WORK/config"
 cat >"$WORK/run-busy" <<EOF
 #!/bin/sh
-exec "$WORK/busy-client" "$WORK/busy-frames" >"$WORK/busy.log" 2>&1
+exec "$WORK/busy-client" "$WORK/busy-frames" ${BUSY_W:-1920} ${BUSY_H:-1080} >"$WORK/busy.log" 2>&1
 EOF
 chmod +x "$WORK/run-busy"
 cat >"$WORK/data/applications/test-busy.desktop" <<EOF
@@ -73,6 +73,28 @@ busy_running() { [ "$(frames)" -gt 20 ]; }
 wait_until "the busy client to commit frames" 20 busy_running
 wait_for "() => window.__viewerTest.patches() > 0" "patches of the busy window" 10
 [ "$(pw_eval "() => window.__viewerTest.videoFrames().decoded")" = 0 ] || fail "video frames without a video encoder"
+# The surface is relentless: it commits on every callback, busy in its first period and backlogged in its second, so the
+# server promotes it to the streaming class at the end of the second (1.5 - 2.25 s after it started)
+promoted() { grep -aq 'is now streaming' "$WORK/gateway.log"; }
+wait_until "the busy surface to be promoted to the streaming class" 20 promoted
+echo "    $(grep -a 'is now streaming' "$WORK/gateway.log" | head -1 | sed 's/.*msg:"//; s/"}$//')"
+# Its patches are now encoded by the streaming workers, whose threads run at nice 19: those threads use CPU
+SESSION_PID="$(ps --ppid "$GATEWAY_PID" -o pid=,args= | grep session-process | awk '{print $1}' | head -1)"
+[ -n "$SESSION_PID" ] || fail "no session process"
+# CPU ticks (user + system) of the session's threads at nice 19
+nice19_ticks() {
+  local total=0 stat line rest
+  for stat in /proc/"$SESSION_PID"/task/*/stat; do
+    line="$(cat "$stat" 2>/dev/null)" || continue
+    rest="${line##*) }"
+    set -- $rest
+    [ "${17}" = 19 ] && total=$((total + ${12} + ${13}))
+  done
+  echo "$total"
+}
+workers_busy() { [ "$(nice19_ticks)" -gt 0 ]; }
+wait_until "the nice-19 streaming workers to encode the busy surface's patches" 20 workers_busy
+echo "    the nice-19 workers have used $(nice19_ticks) ticks of CPU"
 F0="$(frames)"
 START="$EPOCHREALTIME"
 more_frames() { [ "$(frames)" -ge $((F0 + 30)) ]; }

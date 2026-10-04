@@ -9,93 +9,126 @@ import { boundingBox, clip, disjoint, Rect, splitRect, subtract } from './region
 
 export type SurfaceClass = 'normal' | 'streaming'
 
-/** The backlog fraction is measured over this sliding period. A surface younger than this can't be promoted. */
-export const CLASS_PERIOD_MS = 1500
-/** Normal -> streaming when the share of the period spent backlogged is at least this. */
-export const PROMOTE_FRACTION = 0.85
-/** Streaming -> normal once the fraction has stayed below this ... */
-export const DEMOTE_FRACTION = 0.4
-/** ... for this long without interruption. */
-export const DEMOTE_HOLD_MS = 2000
+/** Surfaces are judged on fixed, back-to-back periods of this length. */
+export const CLASS_PERIOD_MS = 750
+/**
+ * Normal -> streaming at the end of a period in which the surface was backlogged at least this share of the time. Also
+ * the busy share the previous period needs for a commit to count as backlogged.
+ */
+export const PROMOTE_FRACTION = 0.6
+/** Streaming -> normal at the end of a period in which the backlogged share was below this. */
+export const DEMOTE_FRACTION = 0.15
 /** Max pixels per PNG patch, larger areas are split. */
 export const MAX_PATCH_PIXELS = 64 * 1024
 /** A commit's damage in more pieces than this is sent as its bounding box instead (fewer, larger patches). */
 export const MAX_PATCH_RECTS = 32
 
+export type PeriodFractions = { busy: number; backlogged: number }
+
 /**
- * Measures how relentless a surface is: the share of the last period it spent backlogged (committing new damage while
- * earlier damage hasn't gone out yet, see SurfaceEncoder), and decides its class from that. Times are in ms.
+ * Measures how relentless a surface is, on discrete periods, and decides its class from that. Times are in ms.
+ *
+ * - Busy: the surface has unsent work (`markBusyStart` / `markBusyEnd`).
+ * - Backlogged: a commit with new damage (`markBackloggedStart`) counts if the previous completed period's busy share
+ *   was at least PROMOTE_FRACTION; the surface then stays backlogged until it is no longer busy. Backlogged implies busy.
+ *
+ * At the end of each period its two shares are kept and the counters start again. Only whole periods count: nothing
+ * changes before two have completed.
  */
 export class RelentlessMeter {
-  /** finished backlogged intervals within (or just before) the period, oldest first */
-  private intervals: { start: number; end: number }[] = []
+  private periodStart: number
+  private busySince?: number
   private backloggedSince?: number
-  private belowSince?: number
+  private busyMs = 0
+  private backloggedMs = 0
+  private previous?: PeriodFractions
+  private completed = 0
   private _class: SurfaceClass = 'normal'
 
-  /**
-   * @param startTime when the surface appeared; it can't be promoted before one whole period has passed
-   */
   constructor(
-    private readonly startTime = -Infinity,
+    startTime = 0,
     private readonly periodMs = CLASS_PERIOD_MS,
-  ) {}
+  ) {
+    this.periodStart = startTime
+  }
 
   get surfaceClass(): SurfaceClass {
     return this._class
+  }
+
+  get busy(): boolean {
+    return this.busySince !== undefined
   }
 
   get backlogged(): boolean {
     return this.backloggedSince !== undefined
   }
 
-  /** Idempotent: nothing changes if the surface is backlogged already. */
-  markBackloggedStart(now: number): void {
-    this.backloggedSince ??= now
+  /** The shares of the last completed period, if there is one. */
+  get lastPeriod(): PeriodFractions | undefined {
+    return this.previous
   }
 
-  /** Idempotent. */
-  markBackloggedEnd(now: number): void {
+  markBusyStart(now: number): void {
+    this.advance(now)
+    this.busySince ??= now
+  }
+
+  /** The surface has no unsent work anymore: it is not busy, and so not backlogged. */
+  markBusyEnd(now: number): void {
+    this.advance(now)
     if (this.backloggedSince !== undefined) {
-      this.intervals.push({ start: this.backloggedSince, end: now })
+      this.backloggedMs += now - this.backloggedSince
       this.backloggedSince = undefined
     }
-  }
-
-  /** The share (0 to 1) of the last period that was spent backlogged. */
-  fraction(now: number): number {
-    const from = now - this.periodMs
-    this.intervals = this.intervals.filter((interval) => interval.end > from)
-    let backlogged = 0
-    for (const { start, end } of this.intervals) {
-      backlogged += end - Math.max(start, from)
+    if (this.busySince !== undefined) {
+      this.busyMs += now - this.busySince
+      this.busySince = undefined
     }
-    if (this.backloggedSince !== undefined) {
-      backlogged += now - Math.max(this.backloggedSince, from)
-    }
-    return Math.min(1, Math.max(0, backlogged / this.periodMs))
   }
 
   /**
-   * Decide the class at `now` (called on every commit and on a regular tick). Returns the (possibly new) class.
+   * A commit with non-empty damage arrived (its work makes the surface busy): it becomes backlogged if the previous
+   * completed period was busy enough. Idempotent.
    */
-  evaluate(now: number): SurfaceClass {
-    const fraction = this.fraction(now)
-    if (this._class === 'normal') {
-      if (now - this.startTime >= this.periodMs && fraction >= PROMOTE_FRACTION) {
-        this._class = 'streaming'
-        this.belowSince = undefined
-      }
-    } else if (fraction < DEMOTE_FRACTION) {
-      this.belowSince ??= now
-      if (now - this.belowSince >= DEMOTE_HOLD_MS) {
-        this._class = 'normal'
-        this.belowSince = undefined
-      }
-    } else {
-      this.belowSince = undefined
+  markBackloggedStart(now: number): void {
+    this.advance(now)
+    if (this.previous !== undefined && this.previous.busy >= PROMOTE_FRACTION) {
+      this.busySince ??= now
+      this.backloggedSince ??= now
     }
+  }
+
+  /** Close the periods that ended by `now` and decide the class. Returns the (possibly new) class. */
+  evaluate(now: number): SurfaceClass {
+    this.advance(now)
     return this._class
+  }
+
+  private advance(now: number) {
+    while (now >= this.periodStart + this.periodMs) {
+      const end = this.periodStart + this.periodMs
+      const busy = this.busyMs + (this.busySince !== undefined ? end - this.busySince : 0)
+      const backlogged = this.backloggedMs + (this.backloggedSince !== undefined ? end - this.backloggedSince : 0)
+      this.previous = { busy: busy / this.periodMs, backlogged: backlogged / this.periodMs }
+      this.completed++
+      this.periodStart = end
+      this.busyMs = 0
+      this.backloggedMs = 0
+      if (this.busySince !== undefined) {
+        this.busySince = end
+      }
+      if (this.backloggedSince !== undefined) {
+        this.backloggedSince = end
+      }
+      if (this.completed >= 2) {
+        if (this._class === 'normal' && this.previous.backlogged >= PROMOTE_FRACTION) {
+          this._class = 'streaming'
+        } else if (this._class === 'streaming' && this.previous.backlogged < DEMOTE_FRACTION) {
+          this._class = 'normal'
+        }
+      }
+    }
   }
 }
 

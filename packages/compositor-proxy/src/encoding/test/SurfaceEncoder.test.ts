@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { Patch } from '@gfld/scene-protocol'
 import { EncoderPool } from '../EncoderPool.js'
-import { CLASS_PERIOD_MS, DEMOTE_HOLD_MS, SurfaceClass } from '../policy.js'
+import { CLASS_PERIOD_MS, SurfaceClass } from '../policy.js'
 import { area, Rect } from '../region.js'
 import {
   BufferInfo,
@@ -214,7 +214,7 @@ const settle = () => new Promise((resolve) => setImmediate(resolve))
 const full = (host: FakeSurface) => [r(0, 0, host.buffer!.width, host.buffer!.height)]
 
 /** A relentless surface: full repaints every 50 ms while the network takes nothing, so its patches queue up. */
-async function relentless(env: Env, encoder: SurfaceEncoder<FakeEncoder>, host: FakeSurface, ms = CLASS_PERIOD_MS + 100) {
+async function relentless(env: Env, encoder: SurfaceEncoder<FakeEncoder>, host: FakeSurface, ms = 2 * CLASS_PERIOD_MS + 100) {
   env.sink.autoDone = false
   for (let t = 0; t < ms; t += 50) {
     env.advance(50)
@@ -258,8 +258,8 @@ test('a one-off large repaint of a quiet surface stays normal', async () => {
 test('a surface that keeps committing while its patches queue is promoted to streaming, after a whole period', async () => {
   const env = setup(0)
   const { encoder, host } = env.surface('a')
-  await relentless(env, encoder, host, CLASS_PERIOD_MS - 100)
-  assert.equal(encoder.surfaceClass, 'normal', 'not before a whole period')
+  await relentless(env, encoder, host, 2 * CLASS_PERIOD_MS - 100)
+  assert.equal(encoder.surfaceClass, 'normal', 'not before two whole periods')
   await relentless(env, encoder, host, 300)
   assert.equal(encoder.surfaceClass, 'streaming')
 })
@@ -313,7 +313,7 @@ test('a streaming surface stays on patches while all encoders are taken, and tak
   assert.ok(b.encoder.usesVideo, 'takes the freed encoder')
 })
 
-test('a quiet streaming surface is demoted after DEMOTE_HOLD_MS and its video is replaced by a crisp image', async () => {
+test('a quiet streaming surface is demoted within two periods and its video is replaced by a crisp image', async () => {
   const env = setup(2)
   const { encoder, host } = env.surface('a')
   await relentless(env, encoder, host)
@@ -329,7 +329,7 @@ test('a quiet streaming surface is demoted after DEMOTE_HOLD_MS and its video is
     await settle()
   }
   assert.equal(encoder.surfaceClass, 'normal')
-  assert.ok(quietMs >= DEMOTE_HOLD_MS)
+  assert.ok(quietMs <= 2 * CLASS_PERIOD_MS, `demoted after ${quietMs} ms`)
   assert.ok(!encoder.usesVideo)
   assert.equal(env.pool.available, 2, 'the encoder went back to the pool')
   await settle()
