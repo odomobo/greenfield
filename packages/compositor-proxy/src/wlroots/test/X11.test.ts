@@ -6,6 +6,7 @@ import { WlrCompositor, WlrNative } from '../WlrCompositor.js'
 type Toplevel = {
   geometry: [number, number, number, number]
   configured: [number, number]
+  limits: [number, number, number, number]
   maximized: boolean
   fullscreen: boolean
 }
@@ -47,6 +48,7 @@ class FakeCore {
     this.toplevels.set(sid, {
       geometry: [0, 0, width, height],
       configured: [0, 0],
+      limits: [0, 0, 0, 0],
       maximized: false,
       fullscreen: false,
     })

@@ -8,6 +8,7 @@ type Configure = { sid: number; width: number; height: number; state: Record<str
 type Toplevel = {
   geometry: [number, number, number, number]
   configured: [number, number]
+  limits: [number, number, number, number]
   maximized: boolean
   fullscreen: boolean
 }
@@ -143,6 +144,7 @@ class FakeCore {
     this.toplevels.set(sid, {
       geometry: [0, 0, width, height],
       configured: [0, 0],
+      limits: [0, 0, 0, 0],
       maximized: false,
       fullscreen: false,
     })
@@ -644,6 +646,22 @@ test('a server-initiated change is reported without touching the sequence number
   await flush()
   const [window] = windowsOf(lastScene())
   assert.deepEqual([window.seq, window.maximized, window.x, window.y], [1, true, -10, -5])
+})
+
+test('the size limits an app declared reach the scene; 0 (unbounded) is left out', async () => {
+  core.newWindow(1)
+  core.newWindow(2)
+  core.toplevels.get(1)!.limits = [320, 200, 0, 0]
+  core.toplevels.get(2)!.limits = [0, 0, 800, 600]
+  core.commit(1, 400, 300)
+  await flush()
+  const [first, second] = windowsOf(lastScene())
+  assert.deepEqual([first.minWidth, first.minHeight, first.maxWidth, first.maxHeight], [320, 200, undefined, undefined])
+  assert.deepEqual([second.minWidth, second.minHeight, second.maxWidth, second.maxHeight], [undefined, undefined, 800, 600])
+  core.newWindow(3)
+  await flush()
+  const third = windowsOf(lastScene()).find((window) => window.id === '1/3')!
+  assert.equal('minWidth' in third || 'maxWidth' in third, false)
 })
 
 test('an app clipboard text goes to the viewer; viewer text becomes the selection', () => {

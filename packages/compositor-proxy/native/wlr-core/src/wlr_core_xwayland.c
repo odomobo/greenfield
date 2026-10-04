@@ -633,6 +633,18 @@ x11_toplevel_state(struct gsurf *gsurf, struct toplevel_state *state) {
     };
     state->configured_width = xwin->xsurface->width;
     state->configured_height = xwin->xsurface->height;
+    // WM_NORMAL_HINTS (ICCCM): PMinSize is bit 4, PMaxSize bit 5
+    const xcb_size_hints_t *hints = xwin->xsurface->size_hints;
+    if (hints != NULL) {
+        if (hints->flags & (1 << 4)) {
+            state->min_width = hints->min_width > 0 ? hints->min_width : 0;
+            state->min_height = hints->min_height > 0 ? hints->min_height : 0;
+        }
+        if (hints->flags & (1 << 5)) {
+            state->max_width = hints->max_width > 0 ? hints->max_width : 0;
+            state->max_height = hints->max_height > 0 ? hints->max_height : 0;
+        }
+    }
     state->maximized = xwin->maximized;
     state->fullscreen = xwin->fullscreen;
     return true;

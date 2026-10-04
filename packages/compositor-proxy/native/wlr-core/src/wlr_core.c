@@ -1280,7 +1280,7 @@ closeToplevel(napi_env env, napi_callback_info info) {
     return undefined(env);
 }
 
-// toplevelState(sid) -> { geometry: [x, y, w, h], configured: [w, h], maximized, fullscreen } | undefined
+// toplevelState(sid) -> { geometry: [x, y, w, h], configured: [w, h], limits: [minW, minH, maxW, maxH], maximized, fullscreen } | undefined
 static napi_value
 toplevelState(napi_env env, napi_callback_info info) {
     napi_value argv[1], result, array, value;
@@ -1300,6 +1300,10 @@ toplevelState(napi_env env, napi_callback_info info) {
         wlr_xdg_surface_get_geometry(toplevel->base, &state.geometry);
         state.configured_width = toplevel->current.width;
         state.configured_height = toplevel->current.height;
+        state.min_width = toplevel->current.min_width;
+        state.min_height = toplevel->current.min_height;
+        state.max_width = toplevel->current.max_width;
+        state.max_height = toplevel->current.max_height;
         state.maximized = toplevel->current.maximized;
         state.fullscreen = toplevel->current.fullscreen;
     }
@@ -1317,6 +1321,13 @@ toplevelState(napi_env env, napi_callback_info info) {
     napi_create_int32(env, state.configured_height, &value);
     napi_set_element(env, array, 1, value);
     napi_set_named_property(env, result, "configured", array);
+    napi_create_array_with_length(env, 4, &array);
+    int32_t limits[] = {state.min_width, state.min_height, state.max_width, state.max_height};
+    for (uint32_t i = 0; i < 4; i++) {
+        napi_create_int32(env, limits[i], &value);
+        napi_set_element(env, array, i, value);
+    }
+    napi_set_named_property(env, result, "limits", array);
     napi_get_boolean(env, state.maximized, &value);
     napi_set_named_property(env, result, "maximized", value);
     napi_get_boolean(env, state.fullscreen, &value);

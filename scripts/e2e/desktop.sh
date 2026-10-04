@@ -456,20 +456,50 @@ shown_geometry() {
 
 CANVAS_Y="$(pw_eval "() => Math.round(document.querySelector('canvas').getBoundingClientRect().y)")"
 
+# xdg_toplevel.configure events foot has received so far
+configure_count() {
+  grep -ac 'xdg_toplevel@[0-9]*\.configure(' "$WORK/gateway.log" || true
+}
+
 # Press on one of foot's resize borders (page coordinates) and drag by (dx, dy) in 3 steps. Prints the shown geometry
-# right after each step, without waiting for the server.
+# right after each step, without waiting for the server. The app is told nothing while dragging: the window.resize
+# messages the viewer sent during the drag and in total (after the window settled) are read with drag_sent, the
+# configures foot got while dragging are CONFIGURES_DURING - CONFIGURES_BEFORE (set in a subshell: read them from
+# the files instead, see drag_configures).
 resize_drag() {
   local px="$1" py="$2" dx="$3" dy="$4" i
   pw mousemove "$px" "$py" >/dev/null
   pw mousedown >/dev/null
   # the client starts the resize in response to the press
   wait_for "() => window.__viewerTest.interaction() === 'resize'" "the resize to start" 10
+  pw_eval "() => { window.__sent0 = window.__viewerTest.resizesSent(); return true }" >/dev/null
+  configure_count >"$WORK/configures-before"
   for i in 1 2 3; do
     pw mousemove $((px + dx * i / 3)) $((py + dy * i / 3)) >/dev/null
     echo "$(shown_geometry)"
   done
+  pw_eval "() => { window.__sentDuring = window.__viewerTest.resizesSent() - window.__sent0; return true }" >/dev/null
+  configure_count >"$WORK/configures-during"
   pw mouseup >/dev/null
   wait_for "() => !window.__viewerTest.resizing()" "the client to commit the final size" 10
+}
+# "during total": window.resize messages sent during the last drag, and for all of it
+drag_sent() {
+  echo "$(pw_eval "() => window.__sentDuring + ' ' + (window.__viewerTest.resizesSent() - window.__sent0)" | tr -d '"')"
+}
+# the configures foot got while the last drag was in progress
+drag_configures() {
+  echo $(($(cat "$WORK/configures-during") - $(cat "$WORK/configures-before")))
+}
+# fail unless the last drag sent nothing while dragging, one window.resize in total, and configured the app not at all
+# while dragging
+check_drag_quiet() {
+  local during total
+  read -r during total < <(drag_sent)
+  echo "    window.resize sent during the drag / in total: $during / $total; configures during the drag: $(drag_configures)"
+  [ "$during" = 0 ] || fail "the viewer sent $during window.resize messages while dragging"
+  [ "$total" = 1 ] || fail "the viewer sent $total window.resize messages for the whole drag, expected 1"
+  [ "$(drag_configures)" = 0 ] || fail "the app was configured while dragging"
 }
 
 step "moving with a slow server: late scenes never pull the window back"
@@ -502,6 +532,9 @@ read -r GX2 GY2 GW2 GH2 < <(shown_geometry)
 echo "    settled at $GX2,$GY2 ${GW2}x${GH2}"
 [ $((GX2 + GW2)) = "$RIGHT" ] || fail "right edge moved from $RIGHT to $((GX2 + GW2)) after the resize"
 [ "$GY2" = "$GY" ] || fail "top edge moved from $GY to $GY2"
+check_drag_quiet
+# foot snaps to its cell grid: the final size is near the dragged one
+[ "$((GW2 - (GW - 60)))" -ge -24 ] && [ "$((GW2 - (GW - 60)))" -le 24 ] || fail "the window settled at ${GW2}px wide, not near $((GW - 60))"
 
 step "resizing from the top edge keeps the bottom edge in place"
 read -r GX GY GW GH < <(shown_geometry)
@@ -515,6 +548,48 @@ read -r GX2 GY2 GW2 GH2 < <(shown_geometry)
 echo "    settled at $GX2,$GY2 ${GW2}x${GH2}"
 [ $((GY2 + GH2)) = "$BOTTOM" ] || fail "bottom edge moved from $BOTTOM to $((GY2 + GH2)) after the resize"
 [ $((GX2 + GW2)) = "$RIGHT" ] || fail "right edge moved during the top edge resize"
+check_drag_quiet
+
+step "shrinking below the app's minimum size stops at it, with the fixed edges in place"
+read -r GX GY GW GH < <(shown_geometry)
+ORIGW=$GW ORIGH=$GH
+read -r MINW MINH < <(echo "$(pw_eval "() => { const w = window.__viewerTest.windows()[0]; return (w.minWidth || 0) + ' ' + (w.minHeight || 0) }" | tr -d '"')")
+echo "    the scene reports the minimum size ${MINW}x${MINH} (foot's xdg_toplevel.set_min_size)"
+[ "$MINW" -gt 0 ] && [ "$MINH" -gt 0 ] || fail "the scene has no minimum size for foot"
+grep -aq "set_min_size($MINW, $MINH)" "$WORK/gateway.log" || fail "foot didn't set the minimum size ${MINW}x${MINH} the scene reports"
+# drag the top border down by more than the window is high
+BOTTOM=$((GY + GH))
+STEPS="$(resize_drag $((GX + GW / 2)) $((CANVAS_Y + GY - 3)) 0 $((GH + 60)) | awk '{ printf "%s,%s,%s ", $2, $2 + $4, $4 }')"
+echo "    during the drag (top,bottom,height): $STEPS"
+for STEP in $STEPS; do
+  IFS=, read -r T B H <<<"$STEP"
+  [ "$B" = "$BOTTOM" ] || fail "the bottom edge moved while clamping: $STEPS"
+  [ "$H" -ge "$MINH" ] || fail "the dragged height $H went below the minimum $MINH: $STEPS"
+done
+[ "$H" = "$MINH" ] || fail "the drag didn't stop at the minimum height $MINH: $STEPS"
+check_drag_quiet
+read -r GX2 GY2 GW2 GH2 < <(shown_geometry; echo)
+echo "    settled at $GX2,$GY2 ${GW2}x${GH2}"
+[ "$GH2" -ge "$MINH" ] && [ $((GY2 + GH2)) = "$BOTTOM" ] || fail "after clamping the window is ${GH2}px high with its bottom edge at $((GY2 + GH2)) (minimum $MINH, bottom edge $BOTTOM)"
+# the same for the width, from the left border
+GX=$GX2 GY=$GY2 GW=$GW2 GH=$GH2
+RIGHT=$((GX + GW))
+STEPS="$(resize_drag $((GX - 3)) $((CANVAS_Y + GY + GH / 2)) $((GW + 60)) 0 | awk '{ printf "%s,%s,%s ", $1, $1 + $3, $3 }')"
+echo "    during the drag (left,right,width): $STEPS"
+for STEP in $STEPS; do
+  IFS=, read -r L R W <<<"$STEP"
+  [ "$R" = "$RIGHT" ] || fail "the right edge moved while clamping: $STEPS"
+  [ "$W" -ge "$MINW" ] || fail "the dragged width $W went below the minimum $MINW: $STEPS"
+done
+[ "$W" = "$MINW" ] || fail "the drag didn't stop at the minimum width $MINW: $STEPS"
+check_drag_quiet
+read -r GX2 GY2 GW2 GH2 < <(shown_geometry; echo)
+echo "    settled at $GX2,$GY2 ${GW2}x${GH2}"
+[ "$GW2" -ge "$MINW" ] && [ $((GX2 + GW2)) = "$RIGHT" ] || fail "after clamping the window is ${GW2}px wide with its right edge at $((GX2 + GW2)) (minimum $MINW, right edge $RIGHT)"
+# back to the size it had (growing; the left and top borders of the tiny window)
+resize_drag $((GX2 - 3)) $((CANVAS_Y + GY2 + GH2 / 2)) $((GW2 - ORIGW)) 0 >/dev/null
+read -r GX2 GY2 GW2 GH2 < <(shown_geometry; echo)
+resize_drag $((GX2 + GW2 / 2)) $((CANVAS_Y + GY2 - 3)) 0 $((GH2 - ORIGH)) >/dev/null
 
 step "taskbar preview cards: the title and a close button only; right-clicking a card opens the window menu"
 read -r CARD_X CARD_Y < <(pw_eval "() => { const r = document.querySelector('$TASKBAR_BUTTON').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.bottom - 4) }" | tr -d '"'; echo)
@@ -573,6 +648,8 @@ echo "    ok"
 
 step "window menu, Size: arrow keys pick and move edges, Escape cancels"
 read -r SX SY SW SH < <(shown_geometry; echo)
+resizes_sent() { echo "$(pw_eval "() => window.__viewerTest.resizesSent()")"; }
+SENT0="$(resizes_sent)"
 taskbar_menu size
 wait_for "() => window.__viewerTest.interaction() === 'resize'" "Size to start" 5
 # the first arrow key picks the right edge, a vertical one then adds the bottom edge
@@ -580,8 +657,10 @@ pw press ArrowRight >/dev/null
 pw press ArrowRight >/dev/null
 pw press ArrowDown >/dev/null
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $SX && g.y === $SY && g.width === $((SW + 20)) && g.height === $((SH + 10)) }" "the arrow keys to size the window" 5
+[ "$(resizes_sent)" = "$SENT0" ] || fail "the viewer sent a window.resize while Size was still running"
 pw press Enter >/dev/null
 wait_for "() => !window.__viewerTest.interaction() && !window.__viewerTest.resizing()" "the size to be applied" 10
+[ "$(resizes_sent)" = "$((SENT0 + 1))" ] || fail "Enter should send exactly one window.resize ($SENT0 -> $(resizes_sent))"
 read -r X2 Y2 W2 H2 < <(shown_geometry; echo)
 echo "    $SW x $SH -> $W2 x $H2 (asked for $((SW + 20)) x $((SH + 10)))"
 [ "$X2" = "$SX" ] && [ "$Y2" = "$SY" ] || fail "the window's top left moved while its right and bottom edges were sized"
@@ -593,6 +672,7 @@ pw press ArrowLeft >/dev/null
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((X2 - 20)) && g.width === $((W2 + 20)) }" "the left edge to move" 5
 pw press Escape >/dev/null
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return !window.__viewerTest.interaction() && !window.__viewerTest.resizing() && [g.x, g.y, g.width, g.height].join(' ') === '$X2 $Y2 $W2 $H2' }" "Escape to cancel the size" 10
+[ "$(resizes_sent)" = "$((SENT0 + 1))" ] || fail "Escape in Size sent a window.resize"
 echo "    ok"
 
 step "fullscreen: the window covers the output, never the taskbar, and goes back"

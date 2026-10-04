@@ -278,6 +278,13 @@ Wave 3 H (input and X11 gaps; `src/wlr_core_input.c`):
   (the smallest not smaller) goes to JavaScript as RGBA (`toplevel-icon`), is PNG encoded and sent as `window.icon`
   (resent on attach); the taskbar shows it when the window's app has no desktop entry icon (`GroupIcon`). xclock, xeyes and
   xev set no `_NET_WM_ICON`: the e2e test sets one with xprop (which takes at most 64 values).
+- **Resize on release and size limits**: the viewer sends one `window.resize` (`done: true`) when an interactive resize ends, nothing
+  while dragging (`done: false` still works server-side, for other viewers). `toplevelState` returns `limits: [minW, minH,
+  maxW, maxH]` (0: unbounded): xdg from `toplevel->current.min_width` etc. (the committed state, so a client that changes its
+  limits is picked up at its next commit), X11 from `xsurface->size_hints` (`WM_NORMAL_HINTS`, flags PMinSize bit 4 and PMaxSize
+  bit 5, read by wlroots' xwm). The X11 path is only unit tested (the fake core), not by e2e. foot sets min size 12x39
+  (checked in its WAYLAND_DEBUG log; `desktop.sh` asserts the scene matches). Menu Size with arrow keys keeps accumulating the
+  nudge past a limit (the shown rect stops, releasing the arrow doesn't undo the overshoot).
 
 ## Not done yet (later waves of the migration)
 

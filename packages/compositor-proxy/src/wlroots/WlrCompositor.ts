@@ -769,6 +769,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         y,
         geometry: { x: state.geometry[0], y: state.geometry[1], width: state.geometry[2], height: state.geometry[3] },
         configuredSize: { width: state.configured[0], height: state.configured[1] },
+        ...limitFields(state.limits),
         surfaces: this.windowSurfaces(window.sid),
       })
     }
@@ -1104,4 +1105,14 @@ export function startWlrootsCompositor(config: { h264Encoder: H264Encoder; video
   apps.x11Display = compositor.x11Display
   compositor.clientListener = apps
   return { viewerHost: new ViewerHost(compositor, compositor), compositor, apps }
+}
+
+/** The scene's size limit fields: only the ones that are set (0 is unbounded). */
+function limitFields([minWidth, minHeight, maxWidth, maxHeight]: [number, number, number, number]) {
+  return {
+    ...(minWidth > 0 ? { minWidth } : {}),
+    ...(minHeight > 0 ? { minHeight } : {}),
+    ...(maxWidth > 0 ? { maxWidth } : {}),
+    ...(maxHeight > 0 ? { maxHeight } : {}),
+  }
 }

@@ -10,6 +10,7 @@ import { PointerLock } from './pointer-lock'
 import { wheelClick } from './wheel'
 import { acceptsInput, cursorRect, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
 import { WindowSync } from './window-sync'
+import { resizedRect } from './resize'
 import {
   arrowOf,
   edgesAfterArrow,
@@ -151,7 +152,6 @@ export class Desktop {
   private clientPointer: Point = { x: 0, y: 0 }
   /** the click that finished a menu interaction: its release isn't the app's */
   private swallowRelease = false
-  private pendingResize?: { window: string; width: number; height: number; edges: number }
 
   private renderScheduled = false
   private readonly decodeDurations: number[] = []
@@ -298,6 +298,13 @@ export class Desktop {
   debugResizing(): boolean {
     return this.resizeOverrides.size > 0
   }
+
+  /** How many window.resize messages were sent. For tests. */
+  debugResizesSent(): number {
+    return this.resizesSent
+  }
+
+  private resizesSent = 0
 
   /** For tests: hold every scene back this long (ms), in order, as if the server were slow. */
   debugSceneDelay = 0
@@ -548,6 +555,9 @@ export class Desktop {
 
   /** Send a window change, numbered so its echo in the scene can be told apart from older state (see WindowSync). */
   private sendWindowChange(change: WindowChange) {
+    if (change.type === 'window.resize') {
+      this.resizesSent++
+    }
     this.connection.send({ ...change, seq: this.sync.nextSeq(change.window) } as ViewerMessage)
   }
 
@@ -1568,21 +1578,8 @@ export class Desktop {
     }
     const dx = this.pointer.x - interaction.startPointer.x + (interaction.menu?.nudge.x ?? 0)
     const dy = this.pointer.y - interaction.startPointer.y + (interaction.menu?.nudge.y ?? 0)
-    const { edges, startRect } = interaction
-    let { x, y, width, height } = startRect
-    if (edges & EDGE_RIGHT) {
-      width = Math.max(1, Math.round(startRect.width + dx))
-    } else if (edges & EDGE_LEFT) {
-      width = Math.max(1, Math.round(startRect.width - dx))
-      x = startRect.x + startRect.width - width
-    }
-    if (edges & EDGE_BOTTOM) {
-      height = Math.max(1, Math.round(startRect.height + dy))
-    } else if (edges & EDGE_TOP) {
-      height = Math.max(1, Math.round(startRect.height - dy))
-      y = startRect.y + startRect.height - height
-    }
-    return { x, y, width, height }
+    const window = this.windows.find((w) => w.id === interaction.window)
+    return resizedRect(interaction.startRect, interaction.edges, dx, dy, window)
   }
 
   /** Did the client commit content for the size we asked for? */
@@ -1636,22 +1633,7 @@ export class Desktop {
         override.rect = rect
       }
       this.scheduleRender()
-      const first = this.pendingResize === undefined
-      this.pendingResize = {
-        window: interaction.window,
-        width: rect.width,
-        height: rect.height,
-        edges: interaction.edges,
-      }
-      // at most one resize request per frame
-      if (first) {
-        requestAnimationFrame(() => {
-          if (this.pendingResize && this.interaction) {
-            this.sendWindowChange({ type: 'window.resize', ...this.pendingResize, done: false })
-          }
-          this.pendingResize = undefined
-        })
-      }
+      // nothing is sent while dragging: the app is told the final size when the drag ends
     }
   }
 
@@ -1669,9 +1651,15 @@ export class Desktop {
       const window = this.windows.find((w) => w.id === interaction.window)
       const override = this.resizeOverrides.get(interaction.window)
       const rect = this.resizeRect(interaction)
-      this.pendingResize = undefined
       if (window === undefined || override === undefined) {
         this.resizeOverrides.delete(interaction.window)
+        return
+      }
+      if (interaction.menu?.cancelled) {
+        // Escape in Size: the window was never resized, nothing was sent
+        clearTimeout(override.settleTimer)
+        this.resizeOverrides.delete(interaction.window)
+        this.scheduleRender()
         return
       }
       override.rect = rect

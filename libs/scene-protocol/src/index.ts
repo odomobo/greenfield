@@ -39,7 +39,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 9
+export const PROTOCOL_VERSION = 10
 
 export const enum EnvelopeKind {
   CONTROL = 1,
@@ -98,6 +98,14 @@ export type SceneWindow = {
   geometry: { x: number; y: number; width: number; height: number }
   /** size of the configure the committed content reflects (xdg_toplevel only), see the server's SceneWindow */
   configuredSize?: { width: number; height: number }
+  /**
+   * The size limits the app declared, in window geometry pixels (xdg_toplevel min_size/max_size, X11 WM_NORMAL_HINTS
+   * PMinSize/PMaxSize). 0 (or absent) means unbounded, as in xdg-shell. The viewer keeps interactive resizes inside.
+   */
+  minWidth?: number
+  minHeight?: number
+  maxWidth?: number
+  maxHeight?: number
   /** bottom to top, relative to the window origin */
   surfaces: SceneSurface[]
 }

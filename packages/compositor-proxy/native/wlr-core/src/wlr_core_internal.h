@@ -114,6 +114,8 @@ struct configure_request {
 struct toplevel_state {
     struct wlr_box geometry;
     int32_t configured_width, configured_height;
+    /* 0: unbounded, as in xdg-shell */
+    int32_t min_width, min_height, max_width, max_height;
     bool maximized, fullscreen;
 };
 

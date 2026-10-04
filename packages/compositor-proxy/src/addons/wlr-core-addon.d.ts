@@ -106,6 +106,8 @@ declare namespace wlrCore {
     | {
         geometry: [number, number, number, number]
         configured: [number, number]
+        /** [minWidth, minHeight, maxWidth, maxHeight] in window geometry pixels, 0: unbounded */
+        limits: [number, number, number, number]
         maximized: boolean
         fullscreen: boolean
       }
