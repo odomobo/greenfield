@@ -90,7 +90,7 @@ test('the X11 display is the one the core started', () => {
   assert.equal(compositor.x11Display, ':5')
 })
 
-test('an X11 window is told where the scene shows it, once per change; a Wayland window never', async () => {
+test('an X11 window is told where the scene shows it, once per change (a Wayland window too, for its popups)', async () => {
   core.newWindow(1, true)
   core.newWindow(2, false)
   await flush()
@@ -106,7 +106,10 @@ test('an X11 window is told where the scene shows it, once per change; a Wayland
     [120, 80],
     [10, 20],
   ])
-  assert.deepEqual(positionsOf(2), [])
+  assert.deepEqual(positionsOf(2), [
+    [0, 0],
+    [300, 200],
+  ])
 })
 
 test('a maximized X11 window is at the output origin, and back where it was when restored', async () => {

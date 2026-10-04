@@ -225,6 +225,15 @@
   background: var(--color-subtle-hover);
 }
 
+.context-menu button:disabled {
+  color: var(--color-text-secondary);
+  opacity: 0.5;
+}
+
+.context-menu button:disabled:hover {
+  background: transparent;
+}
+
 .context-menu button.danger {
   color: var(--color-error);
 }
@@ -660,6 +669,42 @@
   position: relative;
   flex: 1;
   min-height: 0;
+}
+
+/* a fullscreen window covers the whole page: the taskbar is hidden above it, shown while the pointer is at the top edge */
+#taskbar-edge {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  z-index: 5;
+}
+
+#desktop-view.fullscreen #output-container {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+}
+
+#desktop-view.fullscreen #taskbar-edge {
+  display: block;
+}
+
+#desktop-view.fullscreen #taskbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  transform: translateY(-100%);
+  transition: transform 0.12s;
+}
+
+#desktop-view.fullscreen #taskbar-edge:hover + #taskbar,
+#desktop-view.fullscreen #taskbar:hover {
+  transform: none;
 }
 
 #output {

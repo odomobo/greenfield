@@ -160,15 +160,36 @@ XWayland (wave 2 B):
   starts a new SPS (openh264dec in gst drops one frame there; the browser doesn't). The e2e checks that the viewer
   decodes foot's video frames without failures (`__viewerTest.videoFrames()`).
 
+Wave 3 D (polish):
+
+- **Fullscreen**: `toplevel-request-fullscreen` is answered with a configure to the output size (and again when the output
+  changes); the scene's `fullscreen` flag places the window at the output origin. The viewer hides its taskbar and
+  grows the output over it (class `fullscreen` on `#desktop-view`, only while the topmost window shown is fullscreen),
+  so the output size changes when entering and leaving fullscreen; the taskbar slides in at the page's top edge. foot
+  has no fullscreen key by default (`-o key-bindings.fullscreen=F11`, as the e2e test app does).
+- **Popups**: `setPosition` is now told for every window, not only X11 ones (the core keeps it in `gsurf.pos_x/pos_y`);
+  a new `xdg_popup` is unconstrained (`wlr_xdg_popup_unconstrain_from_box`) against the output in its root toplevel's
+  surface coordinates when it is created. A window moved afterwards doesn't re-constrain its open popups. Checked with
+  gtk4-demo's menu near the right edge (slides left into view). X11 override-redirect menus aren't constrained.
+- **Keyboard**: `create` takes `{ model, layout, variant, options }` read from `/etc/default/keyboard`
+  (`keyboard-config.ts`; `XKB_DEFAULT_*` in the environment wins per field); a layout that doesn't compile falls back to
+  xkbcommon's default. `wlr_keyboard_set_repeat_info(25, 600)`: clients repeat keys, the viewer drops the browser's repeats.
+  AltGr sync finds `ISO_Level3_Shift` in whatever keymap is compiled (not tried with a non-US layout in a browser: this
+  machine's file says `us`).
+- **Globals**: viewporter, single-pixel-buffer, idle-inhibit (no renderer needed; idle inhibitors aren't acted on),
+  presentation-time (feedback is answered with `presented` when the frame callback is sent, `sendFrameDone`, with
+  CLOCK_MONOTONIC, 60 Hz refresh), xdg-activation (`toplevel-request-activate` -> raise, restore if minimized, focus; any
+  client with a token may do it: no focus-stealing prevention), xdg-output (one output at the origin, an
+  `wlr_output_layout` that exists only for it).
+
 ## Not done yet (later waves of the migration)
 
 The browser clipboard bridge (clipboard between Wayland apps already works: data device + primary selection; X11 <->
-Wayland sync is wlroots', set up but not tested: no xclip or wl-clipboard here), drag and drop, fullscreen, popup
-unconstraining to the output, Caps/Num Lock sync, keyboard layout from the session's locale, telling apps the output
+Wayland sync is wlroots', set up but not tested: no xclip or wl-clipboard here), drag and drop, telling apps the output
 scale, GPU (dmabuf) buffers. Server-owned window state with sequence numbers (wave 2 A).
 
-X11 specifically, not done: X11 apps without their own decorations (xev, xterm) can't be moved by the user, since the
-viewer has no title bars of its own yet (ROADMAP.md, decorations) nor a modifier-drag; X11 apps started from a terminal
+X11 specifically, not done: X11 apps without their own decorations (xev, xterm) can be moved only with the window menu's
+Move (taskbar button or preview card), until the viewer has title bars of its own (ROADMAP.md, decorations); X11 apps started from a terminal
 inside the session aren't tracked by `Apps` (they don't connect to Wayland; `_NET_WM_PID` would do); minimizing isn't
 told to X11 apps; activation requests (`_NET_ACTIVE_WINDOW`) and positions apps ask for (USPosition) are ignored, the
 viewer places windows; unmanaged window types that aren't override-redirect (some toolkits' menus) are ordinary

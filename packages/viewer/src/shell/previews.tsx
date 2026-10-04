@@ -16,8 +16,8 @@ const PREVIEW_HEIGHT = 120
 const PREVIEW_REFRESH_MS = 250
 
 /**
- * The window previews of a taskbar group, shown under its button: one card per window with its title, window
- * controls and a snapshot of its content, refreshed at a fixed rate straight onto the cards' canvases (no React
+ * The window previews of a taskbar group, shown under its button: one card per window with its title, a close button and a
+ * snapshot of its content, refreshed at a fixed rate straight onto the cards' canvases (no React
  * state - the images never pass through a render).
  */
 export function WindowPreview({ entry }: { entry: PreviewPopup }) {
@@ -121,38 +121,6 @@ function PreviewCard({ window, group, canvases }: PreviewCardProps) {
     desktop.activateWindow(window.id)
   }
 
-  const windowAction = (action: string) => {
-    switch (action) {
-      case 'minimize':
-        closePopup()
-        desktop.minimizeWindow(window.id)
-        break
-      case 'maximize':
-      case 'unmaximize':
-        closePopup()
-        desktop.setMaximized(window.id, action === 'maximize')
-        break
-      case 'close':
-        desktop.closeWindow(window.id)
-        break
-    }
-  }
-
-  const control = (action: string, label: string, content: string, hidden: boolean) => (
-    <button
-      type="button"
-      data-action={action}
-      title={label}
-      aria-label={label}
-      hidden={hidden}
-      onClick={(event) => {
-        event.stopPropagation()
-        windowAction(action)
-      }}
-      dangerouslySetInnerHTML={{ __html: content }}
-    />
-  )
-
   return (
     <div
       className={'preview-card' + (window.activated && !window.shownMinimized ? ' active' : '')}
@@ -187,14 +155,17 @@ function PreviewCard({ window, group, canvases }: PreviewCardProps) {
         <AppIcon name={group.app?.icon} size={16} />
         <span className="preview-title">{window.title || groupName(group)}</span>
         <div className="preview-controls">
-          {control('minimize', 'Minimize', glyphs.minimize(12), window.shownMinimized)}
-          {control(
-            window.maximized ? 'unmaximize' : 'maximize',
-            window.maximized ? 'Restore down' : 'Maximize',
-            window.maximized ? glyphs.restore(12) : glyphs.maximize(12),
-            false,
-          )}
-          {control('close', 'Close', glyphs.close(12), false)}
+          <button
+            type="button"
+            data-action="close"
+            title="Close"
+            aria-label="Close"
+            onClick={(event) => {
+              event.stopPropagation()
+              desktop.closeWindow(window.id)
+            }}
+            dangerouslySetInnerHTML={{ __html: glyphs.close(12) }}
+          />
         </div>
       </div>
       <canvas className="preview-image" ref={canvasRef} />

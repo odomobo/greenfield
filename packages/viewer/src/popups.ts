@@ -10,7 +10,7 @@ import { createStore } from './store'
  * outside-click logic finds the DOM of a popup and how anchored elements learn that they are open.
  */
 export type MenuItem =
-  | { label: string; action: () => void; danger?: boolean; testId?: string }
+  | { label: string; action: () => void; danger?: boolean; disabled?: boolean; testId?: string }
   | { separator: true }
   | { heading: string }
 

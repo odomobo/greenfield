@@ -6,6 +6,13 @@ import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, Vie
 import { modifiersOf } from './modifiers'
 import { acceptsInput, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
 import { WindowSync } from './window-sync'
+import {
+  arrowOf,
+  edgesAfterArrow,
+  NUDGE_STEP,
+  nearestEdges,
+  resizeCursor,
+} from './window-menu'
 
 type Point = { x: number; y: number }
 
@@ -17,10 +24,26 @@ type Pick = { window: SceneWindow; surface: string; sx: number; sy: number }
 
 type Size = { width: number; height: number }
 
+/**
+ * A Move or Size from the window menu (not asked for by the app): it follows the pointer without a button held, keys
+ * nudge it, a click finishes it, Escape cancels it.
+ */
+type MenuInteraction = {
+  /** what the arrow keys added to the pointer's distance from startPointer */
+  nudge: Point
+  /** Size: the edges were picked by an arrow key, not by the pointer's position */
+  keyChosen: boolean
+  /** Size: the rect the window had (what a cancel goes back to) */
+  original?: Rect
+  cancelled: boolean
+  /** removes the document listeners of the interaction */
+  stop: () => void
+}
+
 type Interaction =
-  | { mode: 'move'; window: string; startPointer: Point; startPosition: Point; lastSent: number }
+  | { mode: 'move'; window: string; startPointer: Point; startPosition: Point; lastSent: number; menu?: MenuInteraction }
   /** startRect: the window geometry rect (output coordinates) when the resize started */
-  | { mode: 'resize'; window: string; edges: number; startPointer: Point; startRect: Rect }
+  | { mode: 'resize'; window: string; edges: number; startPointer: Point; startRect: Rect; menu?: MenuInteraction }
 
 /**
  * A window being resized is shown at the size the user is dragging to, without waiting for the client: its latest
@@ -102,6 +125,10 @@ export class Desktop {
   /** implicit grab: while a button is held, pointer events go to the surface the press started on */
   private grab?: Pick
   private interaction?: Interaction
+  /** the pointer in page coordinates, wherever it is (a menu's Move and Size start from it) */
+  private clientPointer: Point = { x: 0, y: 0 }
+  /** the click that finished a menu interaction: its release isn't the app's */
+  private swallowRelease = false
   private pendingResize?: { window: string; width: number; height: number; edges: number }
 
   private renderScheduled = false
@@ -182,10 +209,12 @@ export class Desktop {
     this.animations.clear()
     this.restoreRects.clear()
     this.grab = undefined
+    this.interaction?.menu?.stop()
     this.interaction = undefined
     this.buttons = 0
     this.scheduleRender()
     this.onWindowsChanged([])
+    this.updateFullscreenLayout()
   }
 
   /**
@@ -280,6 +309,161 @@ export class Desktop {
 
   private notifyWindowsChanged() {
     this.onWindowsChanged(this.shellWindows())
+    this.updateFullscreenLayout()
+  }
+
+  /**
+   * While the topmost window shown is fullscreen (or a dialog of one), it covers the viewer's whole output: the output
+   * grows over the taskbar (hidden, revealed by the top edge of the page), see style.css.
+   */
+  private updateFullscreenLayout() {
+    let fullscreen = false
+    for (let i = this.windows.length - 1; i >= 0; i--) {
+      if (!this.isHidden(this.windows[i])) {
+        fullscreen = this.rootOf(this.windows[i]).fullscreen
+        break
+      }
+    }
+    this.canvas.closest('#desktop-view')?.classList.toggle('fullscreen', fullscreen)
+  }
+
+  /** Whether the window can be moved and sized by the user (not minimized, maximized or fullscreen). */
+  canMoveOrSize(id: string): boolean {
+    const window = this.windows.find((w) => w.id === id)
+    return window !== undefined && !window.maximized && !window.fullscreen && !this.isMinimized(window)
+  }
+
+  /** The window menu's Move: the window follows the pointer, a click drops it, Escape puts it back. */
+  startMenuMove(id: string): void {
+    const window = this.windows.find((w) => w.id === id)
+    if (window === undefined || !this.canMoveOrSize(id)) {
+      return
+    }
+    this.finishMenuInteraction(false)
+    this.activateWindow(id)
+    this.pointer = this.canvasPoint(this.clientPointer)
+    this.interaction = {
+      mode: 'move',
+      window: id,
+      startPointer: this.pointer,
+      startPosition: this.windowPosition(window),
+      lastSent: 0,
+      menu: this.menuInteraction(),
+    }
+    this.canvas.style.cursor = 'move'
+  }
+
+  /** The window menu's Size: the edge or corner nearest the pointer (or the first arrow key's) follows it. */
+  startMenuSize(id: string): void {
+    const window = this.windows.find((w) => w.id === id)
+    if (window === undefined || !this.canMoveOrSize(id)) {
+      return
+    }
+    this.finishMenuInteraction(false)
+    this.activateWindow(id)
+    this.pointer = this.canvasPoint(this.clientPointer)
+    const startRect = this.shownGeometry(window)
+    const edges = nearestEdges(startRect, this.pointer)
+    const previous = this.resizeOverrides.get(window.id)
+    clearTimeout(previous?.settleTimer)
+    this.resizeOverrides.set(window.id, { rect: startRect, edges })
+    this.interaction = {
+      mode: 'resize',
+      window: id,
+      edges,
+      startPointer: this.pointer,
+      startRect,
+      menu: { ...this.menuInteraction(), original: startRect },
+    }
+    this.canvas.style.cursor = resizeCursor(edges)
+  }
+
+  private canvasPoint(client: Point): Point {
+    const rect = this.canvas.getBoundingClientRect()
+    return { x: client.x - rect.left, y: client.y - rect.top }
+  }
+
+  /** The state of a new menu interaction, with its document listeners: the pointer anywhere, a click anywhere. */
+  private menuInteraction(): MenuInteraction {
+    const move = (event: PointerEvent) => {
+      this.clientPointer = { x: event.clientX, y: event.clientY }
+      this.pointer = this.canvasPoint(this.clientPointer)
+      if (this.interaction?.menu) {
+        this.continueInteraction()
+      }
+    }
+    const down = (event: PointerEvent) => {
+      // the click that drops the window isn't the app's, nor the shell's
+      event.stopPropagation()
+      event.preventDefault()
+      this.swallowRelease = true
+      this.finishMenuInteraction(false)
+    }
+    document.addEventListener('pointermove', move)
+    document.addEventListener('pointerdown', down, { capture: true })
+    return {
+      nudge: { x: 0, y: 0 },
+      keyChosen: false,
+      cancelled: false,
+      stop: () => {
+        document.removeEventListener('pointermove', move)
+        document.removeEventListener('pointerdown', down, { capture: true })
+      },
+    }
+  }
+
+  /** Ends the running menu interaction, if any: keeps where the window is, or (cancel) puts it back. */
+  private finishMenuInteraction(cancel: boolean) {
+    const interaction = this.interaction
+    if (interaction?.menu === undefined) {
+      return
+    }
+    interaction.menu.stop()
+    interaction.menu.cancelled = cancel
+    if (cancel && interaction.mode === 'move') {
+      this.sync.setPosition(interaction.window, interaction.startPosition)
+    }
+    this.endInteraction()
+  }
+
+  /** A key while a menu interaction runs: arrows nudge, Enter finishes, Escape cancels. */
+  private menuKey(event: KeyboardEvent, interaction: Interaction & { menu: MenuInteraction }) {
+    event.preventDefault()
+    if (event.type !== 'keydown') {
+      return
+    }
+    if (event.key === 'Escape') {
+      this.finishMenuInteraction(true)
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      this.finishMenuInteraction(false)
+    } else {
+      const arrow = arrowOf(event.key)
+      if (arrow === undefined) {
+        return
+      }
+      const step = event.shiftKey ? 1 : NUDGE_STEP
+      if (interaction.mode === 'resize') {
+        const edges = edgesAfterArrow(interaction.edges, interaction.menu.keyChosen, arrow)
+        if (edges !== interaction.edges || !interaction.menu.keyChosen) {
+          // continue from the rect shown now, with the new edges
+          const override = this.resizeOverrides.get(interaction.window)
+          if (override) {
+            interaction.startRect = override.rect
+            override.edges = edges
+          }
+          interaction.startPointer = this.pointer
+          interaction.menu.nudge = { x: 0, y: 0 }
+          interaction.edges = edges
+          interaction.menu.keyChosen = true
+          this.canvas.style.cursor = resizeCursor(edges)
+        }
+      }
+      interaction.menu.nudge = {
+        x: interaction.menu.nudge.x + arrow.x * step,
+        y: interaction.menu.nudge.y + arrow.y * step,
+      }
+      this.continueInteraction()
+    }
   }
 
   /** Bring a window to the front and give it the keyboard, restoring it if it's minimized. */
@@ -461,6 +645,7 @@ export class Desktop {
   /** A state change of the window ends a move/resize of it. */
   private interruptInteraction(id: string) {
     if (this.interaction?.window === id) {
+      this.interaction.menu?.stop()
       this.interaction = undefined
       this.applyCursor()
     }
@@ -969,6 +1154,17 @@ export class Desktop {
     const point = (event: MouseEvent): Point => ({ x: event.offsetX, y: event.offsetY })
 
     canvas.addEventListener('contextmenu', (event) => event.preventDefault())
+    // (the release of a click that dropped a window may come outside the canvas)
+    document.addEventListener('pointerup', () => {
+      this.swallowRelease = false
+    })
+    document.addEventListener(
+      'pointermove',
+      (event) => {
+        this.clientPointer = { x: event.clientX, y: event.clientY }
+      },
+      { capture: true },
+    )
 
     canvas.addEventListener('pointermove', (event) => {
       this.pointer = point(event)
@@ -1025,6 +1221,10 @@ export class Desktop {
         event.preventDefault()
       }
       this.pointer = point(event)
+      if (this.swallowRelease) {
+        this.swallowRelease = false
+        return
+      }
       if (this.interaction) {
         this.endInteraction()
       }
@@ -1043,6 +1243,7 @@ export class Desktop {
     })
 
     canvas.addEventListener('pointercancel', () => {
+      this.interaction?.menu?.stop()
       if (this.interaction) {
         this.endInteraction()
       }
@@ -1069,6 +1270,10 @@ export class Desktop {
     )
 
     const key = (event: KeyboardEvent, pressed: boolean) => {
+      if (this.interaction?.menu) {
+        this.menuKey(event, this.interaction as Interaction & { menu: MenuInteraction })
+        return
+      }
       // the client repeats keys itself (wl_keyboard.repeat_info)
       if (event.repeat) {
         event.preventDefault()
@@ -1132,8 +1337,11 @@ export class Desktop {
 
   /** The geometry rect a resize interaction shows for the current pointer position. The opposite edges stay put. */
   private resizeRect(interaction: Extract<Interaction, { mode: 'resize' }>): Rect {
-    const dx = this.pointer.x - interaction.startPointer.x
-    const dy = this.pointer.y - interaction.startPointer.y
+    if (interaction.menu?.cancelled) {
+      return interaction.menu.original ?? interaction.startRect
+    }
+    const dx = this.pointer.x - interaction.startPointer.x + (interaction.menu?.nudge.x ?? 0)
+    const dy = this.pointer.y - interaction.startPointer.y + (interaction.menu?.nudge.y ?? 0)
     const { edges, startRect } = interaction
     let { x, y, width, height } = startRect
     if (edges & EDGE_RIGHT) {
@@ -1181,8 +1389,8 @@ export class Desktop {
 
   private continueInteraction() {
     const interaction = this.interaction!
-    const dx = this.pointer.x - interaction.startPointer.x
-    const dy = this.pointer.y - interaction.startPointer.y
+    const dx = this.pointer.x - interaction.startPointer.x + (interaction.menu?.nudge.x ?? 0)
+    const dy = this.pointer.y - interaction.startPointer.y + (interaction.menu?.nudge.y ?? 0)
     if (interaction.mode === 'move') {
       const window = this.windows.find((w) => w.id === interaction.window)
       const wanted = { x: interaction.startPosition.x + dx, y: interaction.startPosition.y + dy }
