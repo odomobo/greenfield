@@ -264,6 +264,9 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
         interaction: () => desktop.debugInteraction(),
         resizing: () => desktop.debugResizing(),
         animations: () => desktop.debugAnimations(),
+        delayScenes: (ms: number) => {
+          desktop.debugSceneDelay = ms
+        },
         shellWindows: () => desktop.shellWindows(),
         readLuma: (x: number, y: number, width: number, height: number) => renderer.readLuma(x, y, width, height),
       }

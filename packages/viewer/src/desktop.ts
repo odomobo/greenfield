@@ -4,8 +4,13 @@ import { Rect, Renderer } from './gl/renderer'
 import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
 import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 import { acceptsInput, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
+import { WindowSync } from './window-sync'
 
 type Point = { x: number; y: number }
+
+/** A window change for the server, without its sequence number (added when it's sent). */
+type WindowChange = DistributiveOmit<Extract<ViewerMessage, { seq: number }>, 'seq'>
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 
 type Pick = { window: SceneWindow; surface: string; sx: number; sy: number }
 
@@ -67,16 +72,17 @@ export type ShellWindow = SceneWindow & { shownMinimized: boolean }
  */
 export class Desktop {
   private windows: SceneWindow[] = []
-  /** window positions overridden locally during an interactive move, until the server confirms them */
-  private readonly localPositions = new Map<string, Point>()
+  /**
+   * The viewer's own window positions (during a move, until the server applied it) and minimized states, reconciled
+   * with the server's by sequence numbers.
+   */
+  private readonly sync = new WindowSync()
   private readonly resizeOverrides = new Map<string, ResizeOverride>()
   private output: Size = { width: 0, height: 0 }
   private readonly placementSent = new Set<string>()
   private readonly decoders = new Map<string, SurfaceDecoder>()
   private readonly keyFrameRequested = new Set<string>()
   private cursor: Cursor = { kind: 'default' }
-  /** minimized state the viewer asked for, until the server's scene agrees */
-  private readonly localMinimized = new Map<string, boolean>()
   private readonly animations = new Map<string, WindowAnimation>()
   /** geometry of windows before they were maximized, to animate back to */
   private readonly restoreRects = new Map<string, Rect>()
@@ -166,13 +172,12 @@ export class Desktop {
     this.keyFrameRequested.clear()
     this.renderer.clearAll()
     this.windows = []
-    this.localPositions.clear()
+    this.sync.clear()
     for (const override of this.resizeOverrides.values()) {
       clearTimeout(override.settleTimer)
     }
     this.resizeOverrides.clear()
     this.placementSent.clear()
-    this.localMinimized.clear()
     this.animations.clear()
     this.restoreRects.clear()
     this.grab = undefined
@@ -213,6 +218,9 @@ export class Desktop {
     return this.resizeOverrides.size > 0
   }
 
+  /** For tests: hold every scene back this long (ms), in order, as if the server were slow. */
+  debugSceneDelay = 0
+
   /** Running state animations by window. For tests. */
   debugAnimations(): Record<string, string> {
     return Object.fromEntries([...this.animations].map(([id, { kind }]) => [id, kind]))
@@ -233,7 +241,7 @@ export class Desktop {
   /** Child windows are minimized and restored with their top level window. */
   private isMinimized(window: SceneWindow): boolean {
     const root = this.rootOf(window)
-    return this.localMinimized.get(root.id) ?? root.minimized
+    return this.sync.minimized(root.id) ?? root.minimized
   }
 
   /** Minimized and not animating anymore: not shown, not pickable. */
@@ -274,9 +282,9 @@ export class Desktop {
     if (this.isMinimized(window)) {
       const root = this.rootOf(window)
       this.startRestoreAnimation(root)
-      this.localMinimized.set(root.id, false)
+      this.sync.setMinimized(root.id, false)
     }
-    this.connection.send({ type: 'window.activate', window: id })
+    this.sendWindowChange({ type: 'window.activate', window: id })
     this.canvas.focus()
     this.notifyWindowsChanged()
     this.scheduleRender()
@@ -289,9 +297,9 @@ export class Desktop {
     }
     const window = this.rootOf(found)
     this.startMinimizeAnimation(window)
-    this.localMinimized.set(window.id, true)
+    this.sync.setMinimized(window.id, true)
     // the server moves the keyboard focus to the next window
-    this.connection.send({ type: 'window.minimize', window: window.id, minimized: true })
+    this.sendWindowChange({ type: 'window.minimize', window: window.id, minimized: true })
     this.notifyWindowsChanged()
     this.scheduleRender()
   }
@@ -305,8 +313,19 @@ export class Desktop {
       this.activateWindow(id)
     }
     // ask right away, the animation runs while the client redraws
-    this.connection.send({ type: 'window.maximize', window: id, maximized })
+    this.sendWindowChange({ type: 'window.maximize', window: id, maximized })
     this.startMaximizeAnimation(window, maximized)
+  }
+
+  /** Send a window change, numbered so its echo in the scene can be told apart from older state (see WindowSync). */
+  private sendWindowChange(change: WindowChange) {
+    this.connection.send({ ...change, seq: this.sync.nextSeq(change.window) } as ViewerMessage)
+  }
+
+  /** Show a window at a position of the viewer's choosing, and tell the server. */
+  private moveWindow(id: string, position: Point) {
+    this.sync.setPosition(id, position)
+    this.sendWindowChange({ type: 'window.move', window: id, ...position })
   }
 
   closeWindow(id: string): void {
@@ -515,7 +534,11 @@ export class Desktop {
   handleMessage(message: ServerMessage): void {
     switch (message.type) {
       case 'scene':
-        this.updateScene(message.windows)
+        if (this.debugSceneDelay > 0) {
+          setTimeout(() => this.updateScene(message.windows), this.debugSceneDelay)
+        } else {
+          this.updateScene(message.windows)
+        }
         break
       case 'cursor':
         this.cursor = message
@@ -594,27 +617,22 @@ export class Desktop {
     const previousRects = new Map(this.windows.map((window) => [window.id, this.shownGeometry(window)]))
     const windows = stackChildrenAboveParents(sceneWindows)
     this.windows = windows
+    // until the server applied the viewer's changes to a window, the viewer's state of it is shown, not the scene's
+    const shownMinimized = (window: SceneWindow) => this.sync.minimized(window.id) ?? previous.get(window.id)?.minimized
+    const minimizedBefore = new Map(windows.map((window) => [window.id, shownMinimized(window)]))
+    this.sync.sceneReceived(sceneWindows, (id) => this.interaction?.window === id)
     for (const window of windows) {
-      const local = this.localMinimized.get(window.id)
-      if (local !== undefined) {
-        if (local === window.minimized) {
-          this.localMinimized.delete(window.id)
-        }
+      if (this.sync.minimized(window.id) !== undefined) {
         continue
       }
-      // minimized or restored by the client or another viewer
-      const before = previous.get(window.id)
-      if (before && before.minimized !== window.minimized && !this.animations.has(window.id)) {
+      // minimized or restored by the client or another viewer, or the server corrected what the viewer showed
+      const before = minimizedBefore.get(window.id)
+      if (before !== undefined && before !== window.minimized && !this.animations.has(window.id)) {
         if (window.minimized) {
           this.startMinimizeAnimation(window, previousRects.get(window.id))
         } else {
           this.startRestoreAnimation(window)
         }
-      }
-    }
-    for (const id of [...this.localMinimized.keys()]) {
-      if (!windows.some((window) => window.id === id)) {
-        this.localMinimized.delete(id)
       }
     }
     for (const id of [...this.restoreRects.keys()]) {
@@ -628,18 +646,8 @@ export class Desktop {
       for (const surface of window.surfaces) {
         surfaces.add(surface.id)
       }
-      // drop local overrides the server caught up with
-      const local = this.localPositions.get(window.id)
-      if (local && local.x === window.x && local.y === window.y && this.interaction?.window !== window.id) {
-        this.localPositions.delete(window.id)
-      }
       if (window.placed) {
         placedCount++
-      }
-    }
-    for (const id of [...this.localPositions.keys()]) {
-      if (!windows.some((window) => window.id === id)) {
-        this.localPositions.delete(id)
       }
     }
     for (const [id, override] of [...this.resizeOverrides]) {
@@ -675,9 +683,10 @@ export class Desktop {
       }
       this.placementSent.add(window.id)
       const cascade = 40 + (placedCount++ % 10) * 32
-      const position = this.keepVisible(window, { x: cascade - window.geometry.x, y: cascade - window.geometry.y })
-      this.localPositions.set(window.id, position)
-      this.connection.send({ type: 'window.move', window: window.id, ...position })
+      this.moveWindow(
+        window.id,
+        this.keepVisible(window, { x: cascade - window.geometry.x, y: cascade - window.geometry.y }),
+      )
     }
     // also covers positions chosen by the server or client (e.g. dialogs) and windows coming back after a reattach
     this.keepWindowsVisible()
@@ -709,7 +718,7 @@ export class Desktop {
    * somewhere the server doesn't know about yet (a move in progress), the child is shown moved by as much.
    */
   private windowPosition(window: SceneWindow, seen = new Set<string>()): Point {
-    const local = this.localPositions.get(window.id)
+    const local = this.sync.position(window.id)
     if (local) {
       return local
     }
@@ -729,7 +738,7 @@ export class Desktop {
       seen.add(current.id)
       if (
         this.interaction?.window === current.id ||
-        this.localPositions.has(current.id) ||
+        this.sync.position(current.id) !== undefined ||
         this.resizeOverrides.has(current.id) ||
         this.animations.has(current.id)
       ) {
@@ -810,8 +819,7 @@ export class Desktop {
       const position = this.windowPosition(window)
       const visible = this.keepVisible(window, position)
       if (visible.x !== position.x || visible.y !== position.y) {
-        this.localPositions.set(window.id, visible)
-        this.connection.send({ type: 'window.move', window: window.id, ...visible })
+        this.moveWindow(window.id, visible)
         this.scheduleRender()
       }
     }
@@ -969,7 +977,7 @@ export class Desktop {
         this.pressPointer = this.pointer
         this.grab = this.pick(this.pointer)
         if (this.grab && !this.grab.window.activated) {
-          this.connection.send({ type: 'window.activate', window: this.grab.window.id })
+          this.sendWindowChange({ type: 'window.activate', window: this.grab.window.id })
         }
       }
       this.buttons = event.buttons
@@ -1138,9 +1146,7 @@ export class Desktop {
     const { geometry } = window
     const x = edges & EDGE_LEFT ? rect.x + rect.width - geometry.width : rect.x
     const y = edges & EDGE_TOP ? rect.y + rect.height - geometry.height : rect.y
-    const position = this.keepVisible(window, { x: x - geometry.x, y: y - geometry.y })
-    this.localPositions.set(window.id, position)
-    this.connection.send({ type: 'window.move', window: window.id, ...position })
+    this.moveWindow(window.id, this.keepVisible(window, { x: x - geometry.x, y: y - geometry.y }))
     this.scheduleRender()
   }
 
@@ -1152,11 +1158,12 @@ export class Desktop {
       const window = this.windows.find((w) => w.id === interaction.window)
       const wanted = { x: interaction.startPosition.x + dx, y: interaction.startPosition.y + dy }
       const position = window ? this.keepVisible(window, wanted) : wanted
-      this.localPositions.set(interaction.window, position)
+      // shown where the pointer is right away, the server is told at most every MOVE_SEND_INTERVAL
+      this.sync.setPosition(interaction.window, position)
       const now = performance.now()
       if (now - interaction.lastSent > MOVE_SEND_INTERVAL) {
         interaction.lastSent = now
-        this.connection.send({ type: 'window.move', window: interaction.window, ...position })
+        this.moveWindow(interaction.window, position)
       }
       this.scheduleRender()
     } else {
@@ -1177,7 +1184,7 @@ export class Desktop {
       if (first) {
         requestAnimationFrame(() => {
           if (this.pendingResize && this.interaction) {
-            this.connection.send({ type: 'window.resize', ...this.pendingResize, done: false })
+            this.sendWindowChange({ type: 'window.resize', ...this.pendingResize, done: false })
           }
           this.pendingResize = undefined
         })
@@ -1189,15 +1196,13 @@ export class Desktop {
     const interaction = this.interaction!
     this.interaction = undefined
     if (interaction.mode === 'move') {
-      const position = this.localPositions.get(interaction.window)
+      const position = this.sync.position(interaction.window)
       if (position) {
-        this.connection.send({ type: 'window.move', window: interaction.window, ...position })
-        // The server may have confirmed this position during the move already, then no scene update follows. A stale
-        // override would keep e.g. a dialog from following its parent.
-        const window = this.windows.find((w) => w.id === interaction.window)
-        if (window && window.x === position.x && window.y === position.y) {
-          this.localPositions.delete(interaction.window)
-        }
+        // the final position; the viewer shows it until the server's scene says it applied it
+        this.moveWindow(interaction.window, position)
+        // (the legacy compositor, without sequence numbers, may have shown this position already: then no scene
+        // update follows, and the local position would keep e.g. a dialog from following its parent)
+        this.sync.sceneReceived(this.windows, () => false)
       }
       this.applyCursor()
     } else {
@@ -1211,7 +1216,7 @@ export class Desktop {
       }
       override.rect = rect
       override.finalSize = { width: rect.width, height: rect.height }
-      this.connection.send({
+      this.sendWindowChange({
         type: 'window.resize',
         window: window.id,
         width: rect.width,
