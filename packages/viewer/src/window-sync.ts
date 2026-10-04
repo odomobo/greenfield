@@ -76,13 +76,6 @@ export class WindowSync {
     for (const window of windows) {
       present.add(window.id)
       const state = this.states.get(window.id)
-      if (window.seq === undefined) {
-        // the legacy compositor doesn't echo sequence numbers: wait until it shows what we asked for
-        if (state) {
-          this.legacySceneReceived(window, state, held(window.id))
-        }
-        continue
-      }
       if (state === undefined) {
         if (window.seq > 0) {
           this.states.set(window.id, { sent: 0, confirmed: window.seq })
@@ -104,15 +97,6 @@ export class WindowSync {
     }
   }
 
-  private legacySceneReceived(window: SceneWindow, state: WindowState, held: boolean) {
-    state.confirmed = state.sent
-    if (state.position && state.position.x === window.x && state.position.y === window.y && !held) {
-      state.position = undefined
-    }
-    if (state.minimized === window.minimized) {
-      state.minimized = undefined
-    }
-  }
 
   clear(): void {
     this.states.clear()

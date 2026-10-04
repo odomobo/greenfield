@@ -101,16 +101,4 @@ describe('WindowSync', () => {
     assert.equal(sync.nextSeq('a'), 1)
   })
 
-  it('without sequence numbers (legacy compositor), waits for the server to show what was asked', () => {
-    const sync = new WindowSync()
-    sync.setPosition('a', { x: 10, y: 10 })
-    sync.nextSeq('a')
-    sync.setMinimized('a', true)
-    sync.nextSeq('a')
-    sync.sceneReceived([window('a', { seq: undefined, x: 0, y: 0, minimized: true })], notHeld)
-    assert.deepEqual(sync.position('a'), { x: 10, y: 10 })
-    assert.equal(sync.minimized('a'), undefined)
-    sync.sceneReceived([window('a', { seq: undefined, x: 10, y: 10 })], notHeld)
-    assert.equal(sync.position('a'), undefined)
-  })
 })

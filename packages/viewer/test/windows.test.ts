@@ -18,6 +18,7 @@ function window(id: string, parent?: string): SceneWindow {
     fullscreen: false,
     minimized: false,
     placed: true,
+    seq: 0,
     x: 0,
     y: 0,
     geometry: { x: 0, y: 0, width: 10, height: 10 },

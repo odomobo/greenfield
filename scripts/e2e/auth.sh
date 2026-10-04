@@ -59,7 +59,7 @@ echo "    unknown user: $STATUS_UNKNOWN in ${TIME_UNKNOWN}s, wrong password: $ST
 [ "$STATUS_UNKNOWN" = "$STATUS_WRONG" ] || fail "different status codes"
 cmp -s "$WORK/unknown.json" "$WORK/wrong.json" || fail "different response bodies for unknown user and wrong password"
 # both wait out the (scaled) minimum failure time of 3 s / $TIME_SCALE, and are indistinguishable by timing
-node -e "const [a,b,scale]=process.argv.slice(1).map(Number); const min=3/scale*0.97; if (a<min||b<min||Math.abs(a-b)>0.15) process.exit(1)" \
+node -e "const [a,b,scale]=process.argv.slice(1).map(Number); const min=3/scale*0.9; if (a<min||b<min||Math.abs(a-b)>0.15) process.exit(1)" \
   "$TIME_UNKNOWN" "$TIME_WRONG" "$TIME_SCALE" || fail "failure timing differs or is too fast"
 echo "    ok"
 

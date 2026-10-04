@@ -242,10 +242,11 @@ function serveFile(response: ServerResponse, root: string, relative: string) {
 
 /** POST /api/login, body { username, password } -> { token, username } */
 async function handleLogin(request: IncomingMessage, response: ServerResponse) {
-  const startedAt = Date.now()
+  // a monotonic clock: wall clock adjustments mustn't shorten the minimum failure time
+  const startedAt = performance.now()
   const respondFailure = async (message: string) => {
     // failures take the same minimum time whatever the reason
-    const wait = scaled(MIN_FAILED_LOGIN_MS) - (Date.now() - startedAt)
+    const wait = scaled(MIN_FAILED_LOGIN_MS) - (performance.now() - startedAt)
     if (wait > 0) {
       await new Promise((resolve) => setTimeout(resolve, wait))
     }

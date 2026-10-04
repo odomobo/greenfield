@@ -1200,9 +1200,6 @@ export class Desktop {
       if (position) {
         // the final position; the viewer shows it until the server's scene says it applied it
         this.moveWindow(interaction.window, position)
-        // (the legacy compositor, without sequence numbers, may have shown this position already: then no scene
-        // update follows, and the local position would keep e.g. a dialog from following its parent)
-        this.sync.sceneReceived(this.windows, () => false)
       }
       this.applyCursor()
     } else {

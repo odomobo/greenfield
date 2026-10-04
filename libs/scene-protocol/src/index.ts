@@ -79,9 +79,8 @@ export type SceneWindow = {
   placed: boolean
   /**
    * The last window change sequence number the server applied for this window (0: none), see the top of this file.
-   * Absent from the legacy compositor (until it's deleted): the viewer then waits for the state it asked for instead.
    */
-  seq?: number
+  seq: number
   /** position of the main surface's origin */
   x: number
   y: number
