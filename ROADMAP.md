@@ -225,10 +225,62 @@ Other rules:
        so pasting from the local machine happens on Ctrl+V.
      - Drag and drop between remote apps, then local files into remote apps.
      - HiDPI, server side: output scale and fractional scaling (`wp_fractional_scale_v1`).
-   - Starts from the prototype (`native/wlr-core`, `src/wlroots/WlrCompositor.ts`). Estimated at 2-3 weeks of agent
-     work, in steps (swap the core first, then HiDPI, XWayland, clipboard, drag and drop, GPU buffers): see
-     `packages/compositor-proxy/native/wlr-core/README.md`.
-   - Must still pass `scripts/test-gateway.sh` and the encoding tests; GPU (dmabuf) buffers stay untested without
+   - **Starting point: the prototype** (done, verdict go; merged, opt-in). Build with
+     `yarn workspace @gfld/compositor-proxy build:wlroots`, start the gateway with `GFLD_WLROOTS=1`, and launch apps
+     by hand with the `WAYLAND_DISPLAY` the session logs (the Apps menu is empty there). `GFLD_WLR_TRACE=1` logs
+     events. It works but isn't polished. Layout:
+     - `native/wlr-core/src/wlr_core.c` (~1.1k lines): the wlroots wiring as a Node addon. It reports surfaces,
+       commits (buffer damage, input region), toplevels and their requests, and cursors to JavaScript, and takes
+       input, configures and frame callbacks from it. `wlr_core_encoder.c` compiles the existing GStreamer encoder into
+       the same addon against the system libwayland.
+     - `src/wlroots/WlrCompositor.ts` (~0.7k lines): the policy, like today's `server/scene.ts`: placement, stacking,
+       focus, minimize, maximize, child windows centred on their parent, frame pacing, one `SurfaceEncoder` per
+       surface. Frame pacing moved to `src/FramePacing.ts`, free of native code.
+     - `packages/gateway/src/session-process-wlroots.ts`: the session process the gateway starts with
+       `GFLD_WLROOTS=1`.
+     - Detailed notes: `packages/compositor-proxy/native/wlr-core/README.md`.
+   - **Verified in the prototype** (headless Chrome through the gateway): foot (typing, focus, its own decorations,
+     cursor shapes, resizing by its edge, its maximize button); gtk4-demo (its shadow and input region, its own
+     cursor, menus as popups, the About dialog centred and stacked above its parent); small surfaces as patches and
+     busy ones as video; reattach with identical pixels; no regressions on the default path. Clipboard between Wayland
+     apps should already work (wlroots' data device and primary selection) but wasn't tested.
+   - **Gotchas the prototype found** (all handled there; keep them in mind):
+     - wlroots releases each committed buffer right after the commit event, so the core keeps its own reference until
+       the next commit (video encodes hold it until encoded, like `whenIdle` today). Its per-surface "committed" flags
+       accumulate across commits, so a new buffer is detected by `current.buffer` being set.
+     - No renderer: `wlr_compositor_create(display, 5, NULL)` and `wlr_shm_create` with explicit formats, so wlroots
+       doesn't copy shared-memory buffers into textures; the headless output is enabled without
+       `wlr_output_init_render`. GPU buffers will need the GLES2 renderer.
+     - Re-entrancy: events go to JavaScript synchronously and JavaScript calls back in. Flushing clients inside an event
+       double-freed a client on app exit, so only the outermost call flushes.
+     - Event loop: wlroots' `wl_event_loop` fd is polled by the existing poll addon. Configures are scheduled as idle
+       sources, so every call from JavaScript ends with `wl_event_loop_dispatch_idle` + `wl_display_flush_clients`.
+     - Frame callbacks: wlroots sends none itself; `wlr_surface_send_frame_done`, driven by our frame pacing.
+     - One libwayland per process: the fork and the system libwayland share the `libwayland-server.so.0` name, which is
+       why the prototype is a separate session process. The migration deletes the fork, so this goes away.
+     - Build: wlroots 0.17 needs `werror=false` (assert-only variables with `b_ndebug`); its Wayland and X11 backends
+       can't be disabled in 0.17, so the addon also links libwayland-client (harmless).
+     - The encoder owns `frame_buffer.user_data` (its reference count); the held buffer travels alongside it.
+   - **Steps** (the fork's estimate: 2-3 weeks of human-paced work, likely hours per step for an agent; lines are back
+     of the envelope):
+
+     | Step | Estimate | Lines added |
+     |---|---|---|
+     | 1. Swap the core: wlroots build becomes the default (CI gets meson); the session process on `WlrCompositor` with the desktop shell (launching, client PIDs from `wl_client_get_credentials`); fullscreen, popup unconstraining, key repeat, keyboard layout from the locale, Caps/Num Lock sync; cheap globals (viewporter, presentation time, xdg-activation, single-pixel buffer, idle inhibit); unit tests for `WlrCompositor` with the addon mocked; the e2e test on it. Then delete the old stack (below). | ~1 week | 1.5-2.5k |
+     | 2. HiDPI, server side: output scale and `wp_fractional_scale_v1` from the viewer's reported scale. | 1 day | 100-200 |
+     | 3. XWayland: `wlr_xwayland` with its window manager; X11 windows (including override-redirect menus and tooltips) become scene windows. | 2-3 days | 400-700 |
+     | 4. Clipboard with the browser: a server-side data source for text from the browser (on Ctrl+V), the selection read through a pipe and sent to the viewer; primary selection the same way. X11/Wayland sync comes with `wlr_xwayland`. | ~2 days | 500-700 |
+     | 5. Drag and drop: between remote apps via wlroots' seat drags, with the drag icon shown by the viewer; then local files into remote apps (uploaded, offered as `text/uri-list`). | 2-3 days | 600-900 |
+     | 6. GPU buffers: linux-dmabuf with the GLES2 renderer, dmabuf readback for patches and import for video, ported from `native/encoding/src/pixels.c`. Needs hardware to verify. | 1-2 days | 200-400 |
+
+     Step 1 alone gives today's features on wlroots. In total about 3.5-5.5k lines added and 60k+ deleted (much of it
+     generated or vendored): the libwayland fork and its addons (~33k), `@gfld/xtsb` (~14k), `packages/compositor`
+     (~9.4k), generated protocol code (~6k), the proxy's interceptors and generators (~1-2k).
+   - **Packages**: the build needs `meson` (and ninja). XWayland needs `xwayland`, `libxcb-composite0-dev`,
+     `libxcb-ewmh-dev`, `libxcb-icccm4-dev`, `libxcb-render0-dev`, `libxcb-res0-dev`, `libxcb-xfixes0-dev`.
+     `libxcb-errors-dev` (nicer X11 error messages, optional) isn't packaged for Ubuntu 24.04. Add them to the CI
+     packages and the build docs. Clones need `git submodule update --init`.
+   - Must still pass `scripts/test-gateway.sh` and the unit tests; GPU (dmabuf) buffers stay untested without
      hardware.
 2. **Two-factor sign-in via PAM prompts.**
 3. **Viewer: one DOM element per window instead of one WebGL canvas.** Each window becomes a positioned element with

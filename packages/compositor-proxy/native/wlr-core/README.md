@@ -1,4 +1,4 @@
-# wlroots prototype (ROADMAP.md, Core item 1)
+# wlroots prototype (done; the migration is ROADMAP.md Core item 1)
 
 A session's Wayland side on wlroots 0.17.4 instead of the libwayland fork and the TypeScript protocol implementation.
 Verdict: **go**. foot and gtk4-demo run on it unchanged in the existing viewer, through the existing scene protocol,
@@ -64,7 +64,7 @@ Desktop shell (Apps menu, launching, notifications), XWayland, the browser clipb
 apps already works: data device + primary selection), drag and drop, fullscreen, popup unconstraining to the output,
 Caps/Num Lock sync, keyboard layout from the session's locale, telling apps the output scale, GPU (dmabuf) buffers.
 
-## Migration estimate (Core item 2)
+## Migration estimate (ROADMAP.md Core item 1)
 
 1. **Swap the core** (about 1 week): make the wlroots build the default (CI gets meson); session-process on
    `WlrCompositor`, with the desktop shell (app launching only needs `WAYLAND_DISPLAY`; client PIDs from
@@ -90,4 +90,4 @@ About 2-3 weeks of agent work in total; step 1 alone gives today's features on w
 
 Ubuntu 24.04, beyond what the build needs today: `meson` (installed here). XWayland (step 3) needs `xwayland`,
 `libxcb-composite0-dev`, `libxcb-ewmh-dev`, `libxcb-icccm4-dev`, `libxcb-render0-dev`, `libxcb-res0-dev`,
-`libxcb-xfixes0-dev`, and optionally `libxcb-errors-dev`.
+`libxcb-xfixes0-dev`. The optional `libxcb-errors-dev` isn't packaged for Ubuntu 24.04.
