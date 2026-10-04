@@ -22,6 +22,10 @@ class FakeCore {
   readonly keyboard: string[] = []
   readonly buttons: [number, boolean][] = []
   readonly motions: [number, number, number][] = []
+  readonly axes: [boolean, number, number, boolean | undefined][] = []
+  readonly relative: [number, number][] = []
+  readonly touches: [number, number, number, number, number][] = []
+  releases = 0
   readonly frameDone: number[] = []
   readonly closed: number[] = []
   readonly outputSizes: [number, number][] = []
@@ -53,7 +57,20 @@ class FakeCore {
     pointerButton: (button, pressed) => {
       this.buttons.push([button, pressed])
     },
-    pointerAxis: () => undefined,
+    pointerAxis: (horizontal, value, discrete, _time, finger) => {
+      this.axes.push([horizontal, value, discrete, finger])
+    },
+    pointerRelative: (dx, dy) => {
+      this.relative.push([dx, dy])
+    },
+    pointerConstraintRelease: () => {
+      this.releases++
+      // the core ends the constraint and says so
+      this.onEvent('pointer-constraint', 1, false, false)
+    },
+    touch: (phase, sid, id, sx, sy) => {
+      this.touches.push([phase, sid, id, sx, sy])
+    },
     key: (code, pressed) => {
       this.keys.push([code, pressed])
       this.keyboard.push(`key ${code} ${pressed}`)
@@ -161,6 +178,12 @@ let compositor: WlrCompositor
 let sent: ControlMessage[]
 
 const flush = () => new Promise((resolve) => setImmediate(resolve))
+const waitFor = async (condition: () => boolean) => {
+  for (let i = 0; i < 200 && !condition(); i++) {
+    await flush()
+  }
+  assert.ok(condition(), 'timed out')
+}
 const scenes = () => sent.filter((message) => message.type === 'scene')
 const lastScene = () => scenes()[scenes().length - 1]
 const windowsOf = (scene: ControlMessage) => scene.windows as any[]
@@ -681,4 +704,105 @@ test('files dragged in start a drag on the surface under the pointer, move it, a
   // over the desktop there's nothing to drop on
   compositor.handleMessage({ type: 'file-drag', over: true, surface: null, x: 5, y: 5, time: 1 })
   assert.deepEqual(core.fileDrag, ['start 1', 'cancel'])
+})
+
+test('axis: wheel clicks are v120 values, a touchpad scrolls smoothly', () => {
+  core.newWindow(1)
+  const axis = (extra: Record<string, unknown>) =>
+    compositor.handleMessage({ type: 'axis', surface: '1/1', sx: 1, sy: 1, deltaMode: 0, ...extra })
+  // Firefox: 3 lines per click
+  axis({ deltaMode: 1, deltaY: 3 })
+  axis({ deltaMode: 1, deltaY: -6 })
+  // Chromium: 100 px per click, marked as a click by the viewer
+  axis({ deltaY: 100, wheelY: 120 })
+  axis({ deltaX: -100, wheelX: -120 })
+  // touchpad
+  axis({ deltaY: 12 })
+  assert.deepEqual(core.axes, [
+    [false, 15, 120, false],
+    [false, -30, -240, false],
+    [false, 15, 120, false],
+    [true, -15, -120, false],
+    [false, 4, 0, true],
+  ])
+})
+
+test('pointer lock: the app locks the focused surface, the viewer sends relative motion and ends it', () => {
+  core.newWindow(1)
+  compositor.handleMessage({ type: 'focus', focused: true })
+  compositor.attach((message) => sent.push(message))
+  // relative motion without a lock is dropped
+  compositor.handleMessage({ type: 'pointer.relative', dx: 1, dy: 2, time: 5 })
+  assert.deepEqual(core.relative, [])
+  core.onEvent('pointer-constraint', 1, true, false)
+  assert.deepEqual(sent.filter((m) => m.type === 'pointer.lock'), [
+    { type: 'pointer.lock', surface: '1/1', locked: true, confined: false },
+  ])
+  compositor.handleMessage({ type: 'pointer.relative', dx: 3, dy: -4, time: 5 })
+  assert.deepEqual(core.relative, [[3, -4]])
+  // a viewer that attaches later hears about it
+  const late: ControlMessage[] = []
+  compositor.attach((message) => late.push(message))
+  assert.ok(late.some((m) => m.type === 'pointer.lock' && m.locked === true))
+  // the browser ended it (Escape)
+  compositor.handleMessage({ type: 'pointer.unlock' })
+  assert.equal(core.releases, 1)
+  assert.deepEqual(late.filter((m) => m.type === 'pointer.lock').at(-1), {
+    type: 'pointer.lock',
+    surface: '1/1',
+    locked: false,
+    confined: false,
+  })
+  compositor.handleMessage({ type: 'pointer.relative', dx: 1, dy: 1, time: 6 })
+  assert.equal(core.relative.length, 1)
+})
+
+test('pointer lock ends when the page loses focus, and confinement takes no relative motion', () => {
+  core.newWindow(1)
+  compositor.handleMessage({ type: 'focus', focused: true })
+  core.onEvent('pointer-constraint', 1, true, false)
+  compositor.handleMessage({ type: 'focus', focused: false })
+  assert.equal(core.releases, 1)
+  core.onEvent('pointer-constraint', 1, true, true)
+  compositor.handleMessage({ type: 'pointer.relative', dx: 1, dy: 1, time: 6 })
+  assert.deepEqual(core.relative, [])
+})
+
+test('touch points go to the core by phase, with the surface they started on', () => {
+  core.newWindow(1)
+  const touch = (phase: string, id: number, sx: number) =>
+    compositor.handleMessage({ type: 'touch', phase, id, surface: '1/1', sx, sy: 7 })
+  touch('down', 3, 10)
+  touch('move', 3, 11)
+  touch('up', 3, 11)
+  touch('bogus', 3, 11)
+  assert.deepEqual(core.touches, [
+    [0, 1, 3, 10, 7],
+    [1, 1, 3, 11, 7],
+    [2, 1, 3, 11, 7],
+  ])
+})
+
+test('X11 windows tell the app tracker their process, and their icon reaches the viewer', async () => {
+  const tracked: string[] = []
+  compositor.clientListener = {
+    clientConnected: () => undefined,
+    clientDisconnected: () => undefined,
+    x11WindowMapped: (sid, pid) => tracked.push(`mapped ${sid} ${pid}`),
+    x11WindowGone: (sid) => tracked.push(`gone ${sid}`),
+  }
+  compositor.attach((message) => sent.push(message))
+  core.onEvent('surface-new', 1, '1/1')
+  core.onEvent('toplevel-new', 1, true, 4321)
+  core.onEvent('toplevel-icon', 1, 2, 2, Buffer.alloc(16, 255))
+  await waitFor(() => sent.some((m) => m.type === 'window.icon'))
+  const icon = sent.find((m) => m.type === 'window.icon')!
+  assert.equal(icon.window, '1/1')
+  assert.match(String(icon.icon), /^data:image\/png;base64,/)
+  // sent again to a viewer that attaches later
+  const late: ControlMessage[] = []
+  compositor.attach((message) => late.push(message))
+  assert.ok(late.some((m) => m.type === 'window.icon'))
+  core.onEvent('toplevel-destroy', 1)
+  assert.deepEqual(tracked, ['mapped 1 4321', 'gone 1'])
 })

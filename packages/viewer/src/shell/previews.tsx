@@ -5,7 +5,7 @@ import { shellStore } from '../state'
 import { ShellWindow } from '../desktop'
 import { useStore } from '../store'
 import { computeGroups, Group, groupName } from './groups'
-import { AppIcon } from './icons'
+import { GroupIcon } from './icons'
 import { glyphs } from './glyphs'
 import { windowMenuItems } from './menus'
 import { cancelPreviewClose, schedulePreviewClose } from './preview'
@@ -152,7 +152,7 @@ function PreviewCard({ window, group, canvases }: PreviewCardProps) {
       }}
     >
       <div className="preview-header">
-        <AppIcon name={group.app?.icon} size={16} />
+        <GroupIcon app={group.app} windows={[window]} size={16} />
         <span className="preview-title">{window.title || groupName(group)}</span>
         <div className="preview-controls">
           <button

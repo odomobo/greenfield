@@ -21,6 +21,7 @@
 #include <wlr/xcursor.h>
 #include <wlr/xwayland.h>
 #include <xcb/xcb.h>
+#include "xwayland/xwm.h"
 #include "wlr_core_internal.h"
 
 struct x11 {
@@ -32,6 +33,7 @@ struct x11 {
 
     struct wl_listener new_surface;
     struct wl_listener ready;
+    xcb_atom_t net_wm_icon;
 };
 
 /* An X11 window (wlr_xwayland_surface), managed or override-redirect. */
@@ -90,6 +92,87 @@ report_app_id(struct xwin *xwin) {
     emit(core, "toplevel-app-id", 2, args);
 }
 
+/*
+ * _NET_WM_ICON: the app's own icon (the taskbar shows it when there's no desktop entry icon). An array of CARDINALs:
+ * width, height, then width * height ARGB pixels, for each size. The one closest to ICON_WANTED (the smallest that
+ * isn't smaller, else the largest) is sent as RGBA: toplevel-icon(sid, width, height, buffer), or without a buffer
+ * if the window has none (anymore).
+ */
+#define ICON_WANTED 48
+#define ICON_MAX_WORDS (1 << 20)
+
+static void
+report_icon(struct xwin *xwin) {
+    struct x11 *x11 = xwin->x11;
+    struct core *core = x11->core;
+    struct wlr_xwm *xwm = x11->xwayland->xwm;
+    if (xwm == NULL || !xwin->toplevel || x11->net_wm_icon == XCB_ATOM_NONE) {
+        return;
+    }
+    xcb_get_property_cookie_t cookie = xcb_get_property(xwm->xcb_conn, 0, xwin->xsurface->window_id,
+                                                        x11->net_wm_icon, XCB_ATOM_CARDINAL, 0, ICON_MAX_WORDS);
+    xcb_get_property_reply_t *reply = xcb_get_property_reply(xwm->xcb_conn, cookie, NULL);
+    const uint32_t *words = NULL;
+    uint32_t length = 0, best = 0, best_w = 0, best_h = 0;
+    if (reply && reply->format == 32) {
+        words = xcb_get_property_value(reply);
+        length = xcb_get_property_value_length(reply) / 4;
+    }
+    for (uint32_t i = 0; words && i + 2 <= length;) {
+        uint32_t w = words[i], h = words[i + 1];
+        if (w == 0 || h == 0 || w > 1024 || h > 1024 || (uint64_t) w * h > length - i - 2) {
+            break;
+        }
+        uint32_t size = w > h ? w : h, best_size = best_w > best_h ? best_w : best_h;
+        bool better = best == 0 || (best_size < ICON_WANTED ? size > best_size
+                                                            : size >= ICON_WANTED && size < best_size);
+        if (better) {
+            best = i + 2;
+            best_w = w;
+            best_h = h;
+        }
+        i += 2 + w * h;
+    }
+    napi_value args[4];
+    args[0] = u32(core, xwin->gsurf->sid);
+    args[1] = u32(core, best_w);
+    args[2] = u32(core, best_h);
+    if (best) {
+        void *data;
+        napi_create_buffer(core->env, (size_t) best_w * best_h * 4, &data, &args[3]);
+        uint8_t *out = data;
+        for (uint32_t i = 0; i < best_w * best_h; i++) {
+            uint32_t argb = words[best + i];
+            out[i * 4] = (argb >> 16) & 0xff;
+            out[i * 4 + 1] = (argb >> 8) & 0xff;
+            out[i * 4 + 2] = argb & 0xff;
+            out[i * 4 + 3] = argb >> 24;
+        }
+    } else {
+        napi_get_null(core->env, &args[3]);
+    }
+    free(reply);
+    emit(core, "toplevel-icon", 4, args);
+}
+
+/* wlroots' X11 events, before its own handling: a window's icon changed. Never handles the event itself (returns 0). */
+static int
+handle_xcb_event(struct wlr_xwm *xwm, xcb_generic_event_t *event) {
+    struct x11 *x11 = xwm->xwayland->data;
+    if (x11 && (event->response_type & 0x7f) == XCB_PROPERTY_NOTIFY) {
+        xcb_property_notify_event_t *notify = (xcb_property_notify_event_t *) event;
+        if (notify->atom == x11->net_wm_icon && notify->atom != XCB_ATOM_NONE) {
+            struct xwin *xwin;
+            wl_list_for_each(xwin, &x11->windows, link) {
+                if (xwin->xsurface->window_id == notify->window && xwin->toplevel && xwin->gsurf) {
+                    report_icon(xwin);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 /* The toplevel an X11 window is transient for (its nearest managed ancestor), NULL if none. */
 static struct xwin *
 transient_for(struct xwin *xwin) {
@@ -121,10 +204,13 @@ static void
 toplevel_start(struct xwin *xwin) {
     struct core *core = xwin->x11->core;
     xwin->toplevel = true;
-    napi_value args[] = {u32(core, xwin->gsurf->sid), boolean(core, true)};
-    emit(core, "toplevel-new", 2, args);
+    // pid: of the X11 client (XRes), so apps started from a terminal in the session are tracked like Wayland ones
+    napi_value args[] = {u32(core, xwin->gsurf->sid), boolean(core, true),
+                         u32(core, xwin->xsurface->pid > 0 ? (uint32_t) xwin->xsurface->pid : 0)};
+    emit(core, "toplevel-new", 3, args);
     report_title(xwin);
     report_app_id(xwin);
+    report_icon(xwin);
     if (transient_for(xwin)) {
         report_parent(xwin);
     }
@@ -417,6 +503,16 @@ static void
 handle_ready(struct wl_listener *listener, void *data) {
     struct x11 *x11 = wl_container_of(listener, x11, ready);
     wlr_log(WLR_INFO, "Xwayland is ready on %s", x11->xwayland->display_name);
+    if (x11->xwayland->xwm) {
+        xcb_connection_t *conn = x11->xwayland->xwm->xcb_conn;
+        static const char name[] = "_NET_WM_ICON";
+        xcb_intern_atom_reply_t *atom = xcb_intern_atom_reply(
+                conn, xcb_intern_atom(conn, 0, sizeof(name) - 1, name), NULL);
+        if (atom) {
+            x11->net_wm_icon = atom->atom;
+            free(atom);
+        }
+    }
     struct wlr_xcursor_manager *cursors = wlr_xcursor_manager_create(NULL, 24);
     if (cursors == NULL || !wlr_xcursor_manager_load(cursors, 1)) {
         wlr_xcursor_manager_destroy(cursors);
@@ -453,6 +549,8 @@ x11_create(struct core *core) {
     wl_signal_add(&x11->xwayland->events.ready, &x11->ready);
     // clipboard and primary selection between X11 and Wayland apps
     wlr_xwayland_set_seat(x11->xwayland, core->seat);
+    x11->xwayland->data = x11;
+    x11->xwayland->user_event_handler = handle_xcb_event;
     core->x11 = x11;
     return x11->xwayland->display_name;
 }

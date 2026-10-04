@@ -99,3 +99,26 @@ test('X11 apps get the session X11 display, and only when there is one', async (
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('an X11 window counts like a Wayland connection, and the app started in a terminal is ended with the session', () => {
+  // 500: an X11 app started from a terminal (400) that is one of ours
+  const apps = new Apps('wayland-test', processTree({ 500: [400, 'xeyes'], 400: [1, 'bash'] }))
+  const launched = (apps as any).apps as Map<number, any>
+  launched.set(400, { pid: 400, name: 'foot', external: false, clients: new Set(), descendants: new Map() })
+  apps.x11WindowMapped(7, 500)
+  assert.deepEqual(apps.pids, [400])
+  assert.deepEqual([...launched.get(400).descendants.values()], [500])
+  apps.x11WindowGone(7)
+  assert.equal(launched.get(400).descendants.size, 0)
+  // unknown pid: nothing
+  apps.x11WindowMapped(8, 0)
+  assert.deepEqual(apps.pids, [400])
+})
+
+test('an X11 app that nobody launched is an app while its window is', () => {
+  const apps = new Apps('wayland-test', processTree({ 500: [400, 'xeyes'], 400: [1, 'bash'] }))
+  apps.x11WindowMapped(7, 500)
+  assert.deepEqual(apps.pids, [500])
+  apps.x11WindowGone(7)
+  assert.deepEqual(apps.pids, [])
+})

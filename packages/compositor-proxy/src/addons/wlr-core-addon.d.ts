@@ -13,7 +13,7 @@ declare namespace wlrCore {
    * - surface-commit(sid, hasBuffer, newBuffer, bufferWidth, bufferHeight, bufferDamage, width, height, input,
    *   hasFrameCallbacks): damage is in buffer coordinates, input in surface coordinates (both flat x, y, w, h)
    * - surface-map(sid), surface-unmap(sid), surface-destroy(sid)
-   * - toplevel-new(sid, x11): x11 is true for an X11 window (XWayland), toplevel-destroy(sid), toplevel-title(sid, title), toplevel-app-id(sid, appId),
+   * - toplevel-new(sid, x11, pid): x11 is true for an X11 window (XWayland), pid the X11 client's, toplevel-destroy(sid), toplevel-title(sid, title), toplevel-app-id(sid, appId),
    *   toplevel-parent(sid, parentSid | 0), toplevel-request-move(sid), toplevel-request-resize(sid, edges),
    *   toplevel-request-maximize(sid, maximized), toplevel-request-fullscreen(sid, fullscreen),
    *   toplevel-request-minimize(sid), toplevel-request-activate(sid) (xdg-activation)
@@ -21,6 +21,8 @@ declare namespace wlrCore {
    * - drag-start(iconSid | 0), drag-icon(iconSid | 0, x, y) (the icon's offset from the pointer), drag-end(): a drag of
    *   a remote app (the seat's pointer drag)
    * - clipboard-text(text): an app set the clipboard selection (not one we set from the browser); its text
+   * - pointer-constraint(sid, active, confined): an app's pointer lock (or confinement) became active or ended
+   * - toplevel-icon(sid, width, height, rgba | null): an X11 window's _NET_WM_ICON
    * - x11-geometry(sid): an X11 override-redirect window (menu, tooltip) moved, the window it belongs to changed
    *
    * X11 override-redirect windows aren't toplevels: their surfaces are part of the windowSurfaces() of the X11 window
@@ -53,7 +55,26 @@ declare namespace wlrCore {
   /** button: Linux input code (BTN_LEFT, ...) */
   export function pointerButton(button: number, pressed: boolean, timeMs: number): void
 
-  export function pointerAxis(horizontal: boolean, value: number, discrete: number, timeMs: number): void
+  /**
+   * discrete: the v120 value (120 per wheel click, wl_pointer.axis_value120), 0 for smooth scrolling. finger: the
+   * source is a touchpad rather than a wheel.
+   */
+  export function pointerAxis(
+    horizontal: boolean,
+    value: number,
+    discrete: number,
+    timeMs: number,
+    finger?: boolean,
+  ): void
+
+  /** Relative motion (pointer-constraints: the pointer is locked in the viewer), in surface units. */
+  export function pointerRelative(dx: number, dy: number, timeMs: number): void
+
+  /** The viewer's lock ended: deactivate the constraint (until the pointer leaves its surface and comes back). */
+  export function pointerConstraintRelease(): void
+
+  /** A touch point: phase 0 down, 1 motion, 2 up, 3 cancel; sx, sy in the surface the point went down on. */
+  export function touch(phase: number, sid: number, id: number, sx: number, sy: number, timeMs: number): void
 
   /** evdev key code. A press of a key that's down, or a release of a key that's up, is dropped. */
   export function key(code: number, pressed: boolean, timeMs: number): void

@@ -9,7 +9,7 @@
 //   open <url>            start a fresh browser (closing any earlier one), HTTPS errors ignored, 1280x800 viewport
 //   close                 close the browser
 //   eval <function>       evaluate a function expression in the page, answer its result as JSON
-//   mousemove x y | mousedown [right] | mouseup [right] | type <text> | press <key> | keydown <key> | keyup <key>
+//   mousemove x y | mousedown [right] | mouseup [right] | wheel dx dy | type <text> | press <key> | keydown <key> | keyup <key>
 //   | resize w h
 //   scale <ratio>         change the page's devicePixelRatio (like moving the window to another monitor)
 //   cdpclick <back|forward> x y   press and release a mouse button Playwright's API doesn't have
@@ -86,6 +86,10 @@ const commands = {
   },
   async mousedown(args) {
     await current.mouse.down({ button: args === 'right' ? 'right' : 'left' })
+  },
+  async wheel(args) {
+    const [dx, dy] = args.split(' ').map(Number)
+    await current.mouse.wheel(dx, dy)
   },
   async mouseup(args) {
     await current.mouse.up({ button: args === 'right' ? 'right' : 'left' })

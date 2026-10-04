@@ -4,7 +4,7 @@ import { shellStore } from '../state'
 import { closePopup, isOpen, openPopup, usePopupStack } from '../popups'
 import { useStore, useStorePart } from '../store'
 import { computeGroups, Group, groupName } from './groups'
-import { AppIcon } from './icons'
+import { GroupIcon } from './icons'
 import { glyphs } from './glyphs'
 import { groupMenuItems } from './menus'
 import { openPreview, previewPinnedFor, schedulePreviewClose, schedulePreviewOpen } from './preview'
@@ -112,7 +112,7 @@ function TaskbarButton({ group, onClick }: TaskbarButtonProps) {
       onPointerEnter={(event) => buttonRef.current && schedulePreviewOpen(group.key, buttonRef.current, event.pointerType)}
       onPointerLeave={() => schedulePreviewClose()}
     >
-      <AppIcon name={group.app?.icon} size={24} />
+      <GroupIcon app={group.app} windows={group.windows} size={24} />
       <span className="indicator" />
     </button>
   )

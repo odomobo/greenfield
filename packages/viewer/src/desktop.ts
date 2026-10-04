@@ -6,6 +6,8 @@ import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, Vie
 import { modifiersOf } from './modifiers'
 import { ClipboardSync, isPasteChord } from './clipboard'
 import { dragHasFiles, dropAllowed, droppedFiles, uploadFiles } from './file-drop'
+import { PointerLock } from './pointer-lock'
+import { wheelClick } from './wheel'
 import { acceptsInput, cursorRect, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
 import { WindowSync } from './window-sync'
 import {
@@ -89,7 +91,8 @@ const RESIZE_SETTLE_TIMEOUT = 2000
 /** Durations of the window state animations, ms. Subtle and short. */
 const STATE_ANIMATION_MS = 150
 
-export type ShellWindow = SceneWindow & { shownMinimized: boolean }
+/** icon: the app's own icon (PNG data URL), for windows whose app has no desktop entry icon */
+export type ShellWindow = SceneWindow & { shownMinimized: boolean; icon?: string }
 
 /**
  * The viewer side of a session: shows the server's window scene and acts as its window manager. Everything that
@@ -104,6 +107,11 @@ export class Desktop {
    */
   private readonly sync = new WindowSync()
   private readonly resizeOverrides = new Map<string, ResizeOverride>()
+  /** the windows' own icons (window.icon) by window id */
+  private readonly windowIcons = new Map<string, string>()
+  /** touch points (pointer ids) that went down on a surface, with it: they stay on it until they end */
+  private readonly touches = new Map<number, Pick>()
+  private readonly pointerLock: PointerLock
   private output: Size = { width: 0, height: 0 }
   private readonly placementSent = new Set<string>()
   private readonly decoders = new Map<string, SurfaceDecoder>()
@@ -155,6 +163,16 @@ export class Desktop {
     private readonly renderer: Renderer,
     private readonly connection: Connection,
   ) {
+    this.pointerLock = new PointerLock(
+      {
+        request: () => canvas.requestPointerLock() as Promise<void> | void,
+        exit: () => document.exitPointerLock(),
+        locked: () => document.pointerLockElement === canvas,
+      },
+      (message) => connection.send(message),
+    )
+    document.addEventListener('pointerlockchange', () => this.pointerLock.changed())
+    document.addEventListener('pointerlockerror', () => this.pointerLock.failed())
     this.installInputHandlers()
     // Observing the size in device pixels also catches pixel ratio changes (zoom, another monitor) where supported.
     const resizeObserver = new ResizeObserver(() => this.outputChanged())
@@ -233,6 +251,8 @@ export class Desktop {
     this.placementSent.clear()
     this.animations.clear()
     this.restoreRects.clear()
+    this.windowIcons.clear()
+    this.touches.clear()
     this.grab = undefined
     this.interaction?.menu?.stop()
     this.interaction = undefined
@@ -335,6 +355,7 @@ export class Desktop {
         ...window,
         activated: this.windows.some((w) => w.activated && this.rootOf(w) === window),
         shownMinimized: this.isMinimized(window),
+        icon: this.windowIcons.get(window.id),
       }))
   }
 
@@ -762,6 +783,17 @@ export class Desktop {
         break
       case 'interactive':
         this.startInteraction(message)
+        break
+      case 'pointer.lock':
+        this.pointerLock.serverLock(message.locked, message.confined)
+        break
+      case 'window.icon':
+        if (message.icon) {
+          this.windowIcons.set(message.window, message.icon)
+        } else {
+          this.windowIcons.delete(message.window)
+        }
+        this.notifyWindowsChanged()
         break
       case 'maximize-requested': {
         const window = this.windows.find((w) => w.id === message.window)
@@ -1195,6 +1227,14 @@ export class Desktop {
     )
 
     canvas.addEventListener('pointermove', (event) => {
+      if (event.pointerType === 'touch') {
+        this.touchEvent(event, 'move')
+        return
+      }
+      // the pointer is locked: relative motion only
+      if (this.pointerLock.movement(event.movementX, event.movementY, event.timeStamp)) {
+        return
+      }
       this.pointer = point(event)
       if (this.cursor.kind === 'surface' || this.drag?.icon) {
         this.scheduleRender()
@@ -1215,6 +1255,11 @@ export class Desktop {
       void this.clipboard.retryPending()
       canvas.focus()
       canvas.setPointerCapture(event.pointerId)
+      this.pointerLock.gesture()
+      if (event.pointerType === 'touch') {
+        this.touchEvent(event, 'down')
+        return
+      }
       this.pointer = point(event)
       if (this.buttons === 0) {
         this.pressPointer = this.pointer
@@ -1246,6 +1291,10 @@ export class Desktop {
     }
 
     canvas.addEventListener('pointerup', (event) => {
+      if (event.pointerType === 'touch') {
+        this.touchEvent(event, 'up')
+        return
+      }
       if (event.button === 3 || event.button === 4) {
         event.preventDefault()
       }
@@ -1271,7 +1320,11 @@ export class Desktop {
       }
     })
 
-    canvas.addEventListener('pointercancel', () => {
+    canvas.addEventListener('pointercancel', (event) => {
+      if (event.pointerType === 'touch') {
+        this.touchEvent(event, 'cancel')
+        return
+      }
       this.interaction?.menu?.stop()
       if (this.interaction) {
         this.endInteraction()
@@ -1291,6 +1344,8 @@ export class Desktop {
           deltaX: event.deltaX,
           deltaY: event.deltaY,
           deltaMode: event.deltaMode,
+          wheelX: wheelClick(event.deltaMode, event.deltaX) || undefined,
+          wheelY: wheelClick(event.deltaMode, event.deltaY) || undefined,
           modifiers: modifiersOf(event),
           ...this.target(this.pointer, event.timeStamp),
         })
@@ -1413,6 +1468,65 @@ export class Desktop {
         this.keyChain = undefined
       }
     })
+  }
+
+  /**
+   * A finger (pointerType 'touch') is a wl_touch point, not a mouse: it goes down on the surface under it and stays
+   * on that surface until it lifts. A window drag the app starts with it (a client-side title bar) works like the
+   * mouse's: the finger counts as a pressed button for it.
+   */
+  private touchEvent(event: PointerEvent, phase: 'down' | 'move' | 'up' | 'cancel') {
+    const point = { x: event.offsetX, y: event.offsetY }
+    this.pointer = point
+    if (phase === 'down') {
+      const pick = this.pick(point)
+      if (pick === undefined) {
+        return
+      }
+      this.touches.set(event.pointerId, pick)
+      if (this.buttons === 0) {
+        this.pressPointer = point
+        this.buttons = 1
+      }
+      if (!pick.window.activated) {
+        this.sendWindowChange({ type: 'window.activate', window: pick.window.id })
+      }
+      event.preventDefault()
+    }
+    if (phase === 'move' && this.interaction) {
+      this.continueInteraction()
+      return
+    }
+    const grab = this.touches.get(event.pointerId)
+    if (grab === undefined) {
+      return
+    }
+    if ((phase === 'up' || phase === 'cancel') && this.interaction) {
+      this.endInteraction()
+    }
+    const placed = this.windows.find((w) => w.id === grab.window.id) &&
+      this.surfaceRects(this.windows.find((w) => w.id === grab.window.id)!).find(({ surface }) => surface.id === grab.surface)
+    const rect = placed?.rect
+    const sx = rect ? (point.x - rect.x) / placed.scaleX : grab.sx
+    const sy = rect ? (point.y - rect.y) / placed.scaleY : grab.sy
+    this.connection.send({
+      type: 'touch',
+      phase,
+      id: event.pointerId,
+      surface: grab.surface,
+      sx,
+      sy,
+      x: point.x,
+      y: point.y,
+      time: Math.round(event.timeStamp),
+      modifiers: modifiersOf(event),
+    })
+    if (phase === 'up' || phase === 'cancel') {
+      this.touches.delete(event.pointerId)
+      if (this.touches.size === 0) {
+        this.buttons = 0
+      }
+    }
   }
 
   private startInteraction(message: Extract<ServerMessage, { type: 'interactive' }>) {

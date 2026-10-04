@@ -674,6 +674,8 @@
 #output {
   position: absolute;
   inset: 0;
+  /* touch points are the apps': no panning or zooming of the page */
+  touch-action: none;
   width: 100%;
   height: 100%;
   outline: none;

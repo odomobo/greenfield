@@ -80,6 +80,7 @@ add_library(wlr-core-addon SHARED
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_dnd.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_encoder.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_xwayland.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_input.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/xwayland_sockets.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/gst_frame_encoder.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/gst_main_loop.c
