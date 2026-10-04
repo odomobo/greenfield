@@ -225,6 +225,19 @@ Other rules:
        so pasting from the local machine happens on Ctrl+V.
      - Drag and drop between remote apps, then local files into remote apps.
      - HiDPI, server side: output scale and fractional scaling (`wp_fractional_scale_v1`).
+   - **The server is the single source of truth for window state** (position, size, stacking, minimized, maximized).
+     The viewer still moves and resizes windows optimistically during a drag, and reconciles with sequence numbers so a
+     late echo of an old move can never pull a window back:
+     - The viewer numbers its window changes per window; every move or resize it sends carries the next number.
+     - Every window update from the server carries the last number it applied for that window.
+     - While a window has unconfirmed changes (the server's number is behind the last one sent) or is being dragged,
+       the viewer keeps its own position and size and ignores the server's for that window.
+     - Once the server's number catches up, the server's state wins as-is, including its corrections (e.g. clamping
+       a window back on screen).
+     - Server-initiated changes (an app maximizing itself, a dialog following its parent, another viewer moving a
+       window) need no special case: they apply as soon as the viewer has nothing unconfirmed for that window.
+     - This replaces today's "keep the local position until the server reports the same coordinates", which gets stuck
+       when the server corrects a position and ignores legitimate server moves meanwhile.
    - **Starting point: the prototype** (done, verdict go; merged, opt-in). Build with
      `yarn workspace @gfld/compositor-proxy build:wlroots`, start the gateway with `GFLD_WLROOTS=1`, and launch apps
      by hand with the `WAYLAND_DISPLAY` the session logs (the Apps menu is empty there). `GFLD_WLR_TRACE=1` logs
