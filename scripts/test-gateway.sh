@@ -6,7 +6,8 @@
 #                            per-page sign-ins, plaintext mode (curl and WebSocket probes, no browser);
 #   scripts/e2e/desktop.sh   the desktop in a headless browser: sign-in, Apps menu, taskbar, notifications, window
 #                            management, surviving the browser and reattaching, session list, logging out;
-#   scripts/e2e/x11.sh       X11 apps (XWayland) in a headless browser: their windows, input, menus, closing.
+#   scripts/e2e/x11.sh       X11 apps (XWayland) in a headless browser: their windows, input, menus, closing;
+#   scripts/e2e/hidpi.sh     the viewer's device pixel ratio (2, 1.5, back to 1) reaches apps: foot renders at that scale.
 #
 # Each can also be run on its own (they take GATEWAY_PORT). They start the gateway with --dev-auth --dev-time-scale,
 # which shortens its sign-in delays; see the header of scripts/e2e/auth.sh. Requires foot, dbus-daemon, notify-send,
@@ -14,8 +15,8 @@
 # node, and the built packages (yarn build).
 #
 #   scripts/test-gateway.sh
-# The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it and the next one, desktop
-# and x11 the ones two and four after it).
+# The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it and the next one, desktop,
+# x11 and hidpi the ones two, four and six after it).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
@@ -25,7 +26,7 @@ START="$EPOCHREALTIME"
 pids=()
 names=()
 i=0
-for part in auth desktop x11; do
+for part in auth desktop x11 hidpi; do
   port=$((BASE_PORT + i * 2))
   i=$((i + 1))
   # prefix every line with the script's name; the exit status is the script's, not sed's
@@ -51,6 +52,6 @@ done
 seconds=$(((${EPOCHREALTIME/./} - ${START/./}) / 10000))
 printf 'all end-to-end scripts took %d.%02d s\n' $((seconds / 100)) $((seconds % 100))
 if [ "$status" = 0 ]; then
-  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming, logging out and X11 apps"
+  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming, logging out, X11 apps and HiDPI"
 fi
 exit "$status"

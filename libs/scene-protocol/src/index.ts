@@ -27,10 +27,16 @@
  * Surfaces are identified by a key "<clientId>/<surfaceId>". Coordinates are in output (canvas CSS) pixels, at any
  * device pixel ratio: the viewer reports its scale (devicePixelRatio) but the output size stays in CSS pixels.
  *
+ * HiDPI: the server tells apps the viewer's scale (wl_output.scale, wp_fractional_scale_v1), so they render at device
+ * pixels. A surface's x, y, width and height (scene, input regions, cursor hotspots, input coordinates) stay logical,
+ * in CSS pixels; the content of its frames and patches is the app's buffer, at its own size, often larger (the
+ * `surfaceSize` of a patch, the size of a frame). The viewer draws that content into the logical rectangle, stretched
+ * as needed (one device pixel per buffer pixel when the scales agree). Patch rectangles are in buffer pixels.
+ *
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 6
+export const PROTOCOL_VERSION = 7
 
 export const enum EnvelopeKind {
   CONTROL = 1,
@@ -98,7 +104,17 @@ export type ServerMessage =
   | { type: 'scene'; windows: SceneWindow[]; focus: string | null }
   | { type: 'cursor'; kind: 'default' | 'hidden' }
   | { type: 'cursor'; kind: 'named'; name: string }
-  | { type: 'cursor'; kind: 'surface'; surface: string; hotspot: { x: number; y: number } }
+  /**
+   * size: the cursor surface's logical size (CSS pixels). The cursor surface isn't in the scene, and its content can
+   * be larger (an app rendering at the viewer's scale). Absent: the size of the content.
+   */
+  | {
+      type: 'cursor'
+      kind: 'surface'
+      surface: string
+      hotspot: { x: number; y: number }
+      size?: { width: number; height: number }
+    }
   /** The client asked to start an interactive move/resize (xdg_toplevel.move/resize) during the current button press. */
   | { type: 'interactive'; mode: 'move'; window: string }
   | { type: 'interactive'; mode: 'resize'; window: string; edges: number }
@@ -167,7 +183,7 @@ export type Modifiers = {
 }
 
 export type ViewerMessage =
-  /** scale: the viewer's devicePixelRatio. The server stores it; apps aren't told yet (needs the wlroots migration). */
+  /** scale: the viewer's devicePixelRatio. The server tells apps (they render at it); the output size stays in CSS pixels. */
   | { type: 'hello'; output: { width: number; height: number; scale: number } }
   | { type: 'output'; width: number; height: number; scale: number }
   | ({ type: 'pointer'; buttons: number; modifiers: Modifiers } & PointerTarget)

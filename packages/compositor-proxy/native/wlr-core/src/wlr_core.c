@@ -13,6 +13,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -26,13 +27,17 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_shm.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_viewporter.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 #include "node_api.h"
@@ -308,6 +313,13 @@ handle_surface_destroy(struct wl_listener *listener, void *data) {
     free(gsurf);
 }
 
+/* Tells a surface the scale it should render at: the integer buffer scale, and the exact one for wp_fractional_scale_v1. */
+static void
+surface_notify_scale(struct core *core, struct wlr_surface *surface) {
+    wlr_surface_set_preferred_buffer_scale(surface, core->output_scale);
+    wlr_fractional_scale_v1_notify_scale(surface, core->scale);
+}
+
 static void
 handle_new_surface(struct wl_listener *listener, void *data) {
     struct core *core = wl_container_of(listener, core, new_surface);
@@ -327,6 +339,9 @@ handle_new_surface(struct wl_listener *listener, void *data) {
     gsurf->unmap.notify = handle_surface_unmap;
     wl_signal_add(&surface->events.unmap, &gsurf->unmap);
     wl_list_insert(&core->surfaces, &gsurf->link);
+    // there is no output layout, so wlroots never enters surfaces into the output: clients need it to learn its scale
+    wlr_surface_send_enter(surface, core->output);
+    surface_notify_scale(core, surface);
 
     napi_value args[] = {u32(core, gsurf->sid), str(core, gsurf->key)};
     emit(core, "surface-new", 2, args);
@@ -523,15 +538,38 @@ flush(struct core *core) {
     wl_display_flush_clients(core->display);
 }
 
+/*
+ * The output's logical size is the viewer's size in CSS pixels. Its mode is that size times the integer scale (what
+ * wl_output tells legacy clients: the mode in pixels and the scale, so mode / scale is the logical size). The
+ * fractional scale (core->scale) is only told through wp_fractional_scale_v1.
+ */
 static bool
 set_output_size(struct core *core, int32_t width, int32_t height) {
+    core->output_width = width;
+    core->output_height = height;
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_enabled(&state, true);
-    wlr_output_state_set_custom_mode(&state, width, height, 0);
+    wlr_output_state_set_scale(&state, (float) core->output_scale);
+    wlr_output_state_set_custom_mode(&state, width * core->output_scale, height * core->output_scale, 0);
     bool ok = wlr_output_commit_state(core->output, &state);
     wlr_output_state_finish(&state);
     return ok;
+}
+
+static void
+set_output_scale(struct core *core, double scale) {
+    int integer = (int) ceil(scale);
+    if (scale == core->scale && integer == core->output_scale) {
+        return;
+    }
+    core->scale = scale;
+    core->output_scale = integer;
+    set_output_size(core, core->output_width, core->output_height);
+    struct gsurf *gsurf;
+    wl_list_for_each(gsurf, &core->surfaces, link) {
+        surface_notify_scale(core, gsurf->surface);
+    }
 }
 
 // create(onEvent, width, height) -> { socket, fd }
@@ -572,11 +610,24 @@ create(napi_env env, napi_callback_info info) {
     wlr_shm_create(core->display, 1, shm_formats, sizeof(shm_formats) / sizeof(shm_formats[0]));
     core->compositor = wlr_compositor_create(core->display, 5, NULL);
     wlr_subcompositor_create(core->display);
+    // HiDPI: apps render at the viewer's scale. Fractional scaling needs wp_viewporter (the buffer size and the logical
+    // size differ). Wave 3 D adds the viewporter too: merge to one line.
+    wlr_fractional_scale_manager_v1_create(core->display, 1);
+    wlr_viewporter_create(core->display);
     wlr_data_device_manager_create(core->display);
     wlr_primary_selection_v1_device_manager_create(core->display);
 
+    core->scale = 1;
+    core->output_scale = 1;
+    core->output_width = width;
+    core->output_height = height;
     core->output = wlr_headless_add_output(core->backend, (unsigned int) width, (unsigned int) height);
     wlr_output_create_global(core->output);
+    // xdg-output tells clients the output's logical size (its mode divided by the scale), the size that matters on a
+    // HiDPI output: Xwayland sizes the X11 screen by it, GTK and Qt use it too. Wave 3 D may add this: merge to one.
+    struct wlr_output_layout *layout = wlr_output_layout_create();
+    wlr_output_layout_add(layout, core->output, 0, 0);
+    wlr_xdg_output_manager_v1_create(core->display, layout);
 
     core->xdg_shell = wlr_xdg_shell_create(core->display, 3);
     core->new_xdg_surface.notify = handle_new_xdg_surface;
@@ -698,6 +749,21 @@ setOutputSize(napi_env env, napi_callback_info info) {
     struct core *core = core_or_throw(env);
     if (core && get_args(env, info, 2, argv)) {
         set_output_size(core, arg_i32(env, argv[0]), arg_i32(env, argv[1]));
+        flush(core);
+    }
+    return undefined(env);
+}
+
+// setOutputScale(scale): the viewer's scale (devicePixelRatio); apps are told to render at it
+static napi_value
+setOutputScale(napi_env env, napi_callback_info info) {
+    napi_value argv[1];
+    struct core *core = core_or_throw(env);
+    if (core && get_args(env, info, 1, argv)) {
+        double scale = arg_double(env, argv[0]);
+        if (scale >= 1 && scale <= 16) {
+            set_output_scale(core, scale);
+        }
         flush(core);
     }
     return undefined(env);
@@ -1287,6 +1353,7 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("create", create),
             DECLARE_NAPI_METHOD("dispatch", dispatch),
             DECLARE_NAPI_METHOD("setOutputSize", setOutputSize),
+            DECLARE_NAPI_METHOD("setOutputScale", setOutputScale),
             DECLARE_NAPI_METHOD("pointerMotion", pointerMotion),
             DECLARE_NAPI_METHOD("pointerButton", pointerButton),
             DECLARE_NAPI_METHOD("pointerAxis", pointerAxis),

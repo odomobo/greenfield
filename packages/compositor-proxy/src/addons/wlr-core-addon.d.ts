@@ -40,6 +40,9 @@ declare namespace wlrCore {
 
   export function setOutputSize(width: number, height: number): void
 
+  /** The viewer's scale (devicePixelRatio): the output's scale, and the preferred scale of every surface. */
+  export function setOutputScale(scale: number): void
+
   /** sid 0: the pointer is over nothing of ours */
   export function pointerMotion(sid: number, sx: number, sy: number, timeMs: number): void
 

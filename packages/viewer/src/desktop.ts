@@ -4,7 +4,7 @@ import { Rect, Renderer } from './gl/renderer'
 import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
 import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 import { modifiersOf } from './modifiers'
-import { acceptsInput, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
+import { acceptsInput, cursorRect, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
 import { WindowSync } from './window-sync'
 
 type Point = { x: number; y: number }
@@ -48,7 +48,7 @@ type WindowAnimation = {
 type Cursor =
   | { kind: 'default' | 'hidden' }
   | { kind: 'named'; name: string }
-  | { kind: 'surface'; surface: string; hotspot: Point }
+  | { kind: 'surface'; surface: string; hotspot: Point; size?: { width: number; height: number } }
 
 // xdg_toplevel resize edges
 const EDGE_TOP = 1
@@ -123,14 +123,24 @@ export class Desktop {
       resizeObserver.observe(canvas)
     }
     this.watchPixelRatio()
+    // zooming and moving between monitors also fire resize (the media query alone isn't reliable everywhere)
+    window.addEventListener('resize', () => {
+      if (window.devicePixelRatio !== this.reportedScale) {
+        this.outputChanged()
+      }
+    })
     setInterval(() => this.sendFeedback(), 500)
     this.measureRefreshRate()
   }
+
+  /** The scale last sent to the server. */
+  private reportedScale = 1
 
   /** The canvas was resized or the device pixel ratio changed (browser zoom, another monitor). */
   private outputChanged() {
     const { width, height, scale } = this.renderer.resize()
     this.output = { width, height }
+    this.reportedScale = scale
     this.connection.send({ type: 'output', width, height, scale })
     this.keepWindowsVisible()
     this.scheduleRender()
@@ -155,6 +165,7 @@ export class Desktop {
     this.clear()
     const { width, height, scale } = this.renderer.resize()
     this.output = { width, height }
+    this.reportedScale = scale
     this.connection.send({ type: 'hello', output: { width, height, scale } })
     if (document.hasFocus() && document.activeElement === this.canvas) {
       this.connection.send({ type: 'focus', focused: true })
@@ -869,14 +880,9 @@ export class Desktop {
     }
     if (this.cursor.kind === 'surface') {
       const { surface, hotspot } = this.cursor
-      const size = this.cursorSize(surface)
-      if (size) {
-        this.renderer.drawSurface(surface, {
-          x: this.pointer.x - hotspot.x,
-          y: this.pointer.y - hotspot.y,
-          width: size.width,
-          height: size.height,
-        })
+      const rect = cursorRect(this.pointer, hotspot, this.cursor.size, this.cursorSize(surface))
+      if (rect) {
+        this.renderer.drawSurface(surface, rect)
       }
     }
   }

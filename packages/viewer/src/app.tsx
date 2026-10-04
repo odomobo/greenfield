@@ -269,6 +269,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
           desktop.debugSceneDelay = ms
         },
         shellWindows: () => desktop.shellWindows(),
+        contentSize: (surface: string) => renderer.contentSize(surface),
         readLuma: (x: number, y: number, width: number, height: number) => renderer.readLuma(x, y, width, height),
       }
     }

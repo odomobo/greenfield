@@ -11,6 +11,7 @@
 //   eval <function>       evaluate a function expression in the page, answer its result as JSON
 //   mousemove x y | mousedown [right] | mouseup [right] | type <text> | press <key> | keydown <key> | keyup <key>
 //   | resize w h
+//   scale <ratio>         change the page's devicePixelRatio (like moving the window to another monitor)
 //   cdpclick <back|forward> x y   press and release a mouse button Playwright's API doesn't have
 //   tab-new | goto <url> | tab-close | tab-select <index>
 //   dialog                answer the text of the pending dialog ("beforeunload: ..."), or nothing
@@ -34,6 +35,7 @@ let context
 let pages = []
 let current
 let dialog
+const scaleSessions = new Map()
 
 function adopt(page) {
   pages.push(page)
@@ -105,6 +107,21 @@ const commands = {
   async resize(args) {
     const [width, height] = args.split(' ').map(Number)
     await current.setViewportSize({ width, height })
+  },
+  /** change the device pixel ratio of the open page, as moving the window to another monitor does: scale <ratio> */
+  async scale(ratio) {
+    // the override lasts as long as its session: keep it (one per page)
+    if (!scaleSessions.has(current)) scaleSessions.set(current, await context.newCDPSession(current))
+    const cdp = scaleSessions.get(current)
+    const { width, height } = current.viewportSize()
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width,
+      height,
+      deviceScaleFactor: Number(ratio),
+      mobile: false,
+    })
+    // a real browser fires resize when the ratio changes; the emulation doesn't (nor the media query)
+    await current.evaluate(() => window.dispatchEvent(new Event('resize')))
   },
   async cdpclick(args) {
     const [button, x, y] = args.split(' ')

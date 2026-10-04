@@ -26,6 +26,10 @@ struct core {
     struct wl_event_loop *loop;
     struct wlr_backend *backend;
     struct wlr_output *output;
+    /* the output's logical size (CSS pixels), the viewer's scale and its ceiling (wl_output.scale) */
+    int32_t output_width, output_height;
+    double scale;
+    int output_scale;
     struct wlr_compositor *compositor;
     struct wlr_xdg_shell *xdg_shell;
     struct wlr_seat *seat;

@@ -327,14 +327,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       }
       case 'cursor-surface': {
         const [sid, x, y] = args as [number, number, number]
-        this.send?.(
-          sid
-            ? { type: 'cursor', kind: 'surface', surface: this.keyOf(sid), hotspot: { x, y } }
-            : {
-                type: 'cursor',
-                kind: 'hidden',
-              },
-        )
+        this.cursorSurface = sid ? { sid, hotspot: { x, y } } : undefined
+        this.sendCursorSurface()
         break
       }
       case 'cursor-shape':
@@ -344,6 +338,23 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         this.scheduleScene()
         break
     }
+  }
+
+  /** The client's cursor image (the surface and its hotspot), and the logical size we last told the viewer. */
+  private cursorSurface?: { sid: number; hotspot: { x: number; y: number }; sentSize?: string }
+
+  private sendCursorSurface() {
+    const cursor = this.cursorSurface
+    if (cursor === undefined) {
+      this.send?.({ type: 'cursor', kind: 'hidden' })
+      return
+    }
+    const surface = this.surfaces.get(cursor.sid)
+    // the logical size, which differs from the image's size when the app renders at the viewer's scale
+    const size =
+      surface && surface.width > 0 && surface.height > 0 ? { width: surface.width, height: surface.height } : undefined
+    cursor.sentSize = JSON.stringify(size)
+    this.send?.({ type: 'cursor', kind: 'surface', surface: this.keyOf(cursor.sid), hotspot: cursor.hotspot, ...(size && { size }) })
   }
 
   private surfaceCommitted(
@@ -366,6 +377,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     surface.width = width
     surface.height = height
     surface.input = inputRegion(input, width, height)
+    if (this.cursorSurface?.sid === sid && this.cursorSurface.sentSize !== JSON.stringify({ width, height })) {
+      this.sendCursorSurface()
+    }
 
     if (!hasBuffer) {
       surface.buffer = undefined
@@ -746,8 +760,10 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   private updateOutput(size: { width?: unknown; height?: unknown; scale?: unknown }) {
     const scale = Number(size.scale)
-    if (scale > 0 && scale <= 16) {
+    if (scale >= 1 && scale <= 16) {
       this.viewerScale = scale
+      // apps are told to render at this scale, and the output keeps its logical size (CSS pixels)
+      this.wlr.setOutputScale(scale)
     }
     const width = Math.round(Number(size.width))
     const height = Math.round(Number(size.height))
