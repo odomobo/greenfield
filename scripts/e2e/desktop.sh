@@ -595,15 +595,16 @@ pw press Escape >/dev/null
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return !window.__viewerTest.interaction() && !window.__viewerTest.resizing() && [g.x, g.y, g.width, g.height].join(' ') === '$X2 $Y2 $W2 $H2' }" "Escape to cancel the size" 10
 echo "    ok"
 
-step "fullscreen: the window covers the output above the taskbar, and goes back"
+step "fullscreen: the window covers the output, never the taskbar, and goes back"
 read -r FX FY FW FH < <(shown_geometry; echo)
 # the key the test app binds to fullscreen
 pw press F11 >/dev/null
-wait_for "() => document.getElementById('desktop-view').classList.contains('fullscreen') && window.__viewerTest.windows()[0].fullscreen" "foot to go fullscreen" 10
-wait_for "() => { const o = window.__viewerTest.output(); const g = window.__viewerTest.windows()[0].shownGeometry; return o.width === window.innerWidth && o.height === window.innerHeight && g.x === 0 && g.y === 0 && g.width === o.width && g.height === o.height }" "the window to cover the whole page" 10
-wait_for "() => document.getElementById('taskbar').getBoundingClientRect().bottom <= 0" "the taskbar to go out of view" 5
+wait_for "() => window.__viewerTest.windows()[0].fullscreen && getComputedStyle(document.getElementById('taskbar')).display !== 'none' && document.getElementById('taskbar').getBoundingClientRect().height > 0" "foot to go fullscreen" 10
+wait_for "() => { const o = window.__viewerTest.output(); const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === 0 && g.y === 0 && g.width === o.width && g.height === o.height }" "the window to cover the output" 10
+# the taskbar is never covered: still fully in view, and the output (below it) doesn't grow over it
+wait_for "() => { const t = document.getElementById('taskbar').getBoundingClientRect(); const o = window.__viewerTest.output(); return t.top >= 0 && t.height > 0 && o.height <= window.innerHeight - t.height }" "the taskbar to stay in view" 5
 pw press F11 >/dev/null
-wait_for "() => !document.getElementById('desktop-view').classList.contains('fullscreen') && !window.__viewerTest.windows()[0].fullscreen" "foot to leave fullscreen" 10
+wait_for "() => !window.__viewerTest.windows()[0].fullscreen" "foot to leave fullscreen" 10
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return [g.x, g.y, g.width, g.height].join(' ') === '$FX $FY $FW $FH' && document.getElementById('taskbar').getBoundingClientRect().bottom > 0 }" "the window to be restored" 10
 echo "    ok"
 

@@ -214,7 +214,6 @@ export class Desktop {
     this.buttons = 0
     this.scheduleRender()
     this.onWindowsChanged([])
-    this.updateFullscreenLayout()
   }
 
   /**
@@ -309,22 +308,6 @@ export class Desktop {
 
   private notifyWindowsChanged() {
     this.onWindowsChanged(this.shellWindows())
-    this.updateFullscreenLayout()
-  }
-
-  /**
-   * While the topmost window shown is fullscreen (or a dialog of one), it covers the viewer's whole output: the output
-   * grows over the taskbar (hidden, revealed by the top edge of the page), see style.css.
-   */
-  private updateFullscreenLayout() {
-    let fullscreen = false
-    for (let i = this.windows.length - 1; i >= 0; i--) {
-      if (!this.isHidden(this.windows[i])) {
-        fullscreen = this.rootOf(this.windows[i]).fullscreen
-        break
-      }
-    }
-    this.canvas.closest('#desktop-view')?.classList.toggle('fullscreen', fullscreen)
   }
 
   /** Whether the window can be moved and sized by the user (not minimized, maximized or fullscreen). */

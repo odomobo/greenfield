@@ -163,9 +163,8 @@ XWayland (wave 2 B):
 Wave 3 D (polish):
 
 - **Fullscreen**: `toplevel-request-fullscreen` is answered with a configure to the output size (and again when the output
-  changes); the scene's `fullscreen` flag places the window at the output origin. The viewer hides its taskbar and
-  grows the output over it (class `fullscreen` on `#desktop-view`, only while the topmost window shown is fullscreen),
-  so the output size changes when entering and leaving fullscreen; the taskbar slides in at the page's top edge. foot
+  changes); the scene's `fullscreen` flag places the window at the output origin. The output excludes the taskbar,
+  so a fullscreen window fills the desktop area and never covers the taskbar (ROADMAP.md, shell principles). foot
   has no fullscreen key by default (`-o key-bindings.fullscreen=F11`, as the e2e test app does).
 - **Popups**: `setPosition` is now told for every window, not only X11 ones (the core keeps it in `gsurf.pos_x/pos_y`);
   a new `xdg_popup` is unconstrained (`wlr_xdg_popup_unconstrain_from_box`) against the output in its root toplevel's

@@ -44,7 +44,6 @@ export function DesktopView({
     <CoreContext.Provider value={core}>
       <div id="desktop-view" ref={viewRef} hidden={view.view !== 'desktop'}>
         {/* the taskbar is empty until the core is mounted (the very first render only) */}
-        <div id="taskbar-edge" />
         {core === null ? <header id="taskbar" /> : <Taskbar />}
         {/* the canvas is always there: the core is mounted behind it (app.tsx) */}
         <main id="output-container">
