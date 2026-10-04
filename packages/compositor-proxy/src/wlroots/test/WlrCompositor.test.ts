@@ -520,7 +520,7 @@ test('the input region is sent unless it is the whole surface, and as a box when
 
 test('frame callbacks are sent, paced by the viewer', async () => {
   setViewerAttached(true)
-  onViewerFeedback(16, 1)
+  onViewerFeedback(16)
   core.newWindow(1)
   core.commit(1, 400, 300, true)
   core.commit(1, 400, 300, true)
@@ -551,7 +551,19 @@ test('HiDPI: the scene stays logical when an app commits a buffer at the viewerâ
   assert.equal(core.outputScales[core.outputScales.length - 1], 2)
   core.newWindow(1, { width: 100, height: 80 })
   // a 200x160 buffer at buffer scale 2: logical size 100x80
-  core.onEvent('surface-commit', 1, true, true, 200, 160, new Int32Array([0, 0, 200, 160]), 100, 80, new Int32Array([0, 0, 100, 80]), false)
+  core.onEvent(
+    'surface-commit',
+    1,
+    true,
+    true,
+    200,
+    160,
+    new Int32Array([0, 0, 200, 160]),
+    100,
+    80,
+    new Int32Array([0, 0, 100, 80]),
+    false,
+  )
   await flush()
   const surface = windowsOf(lastScene())[0].surfaces[0]
   assert.deepEqual([surface.width, surface.height], [100, 80])
@@ -664,7 +676,10 @@ test('the size limits an app declared reach the scene; 0 (unbounded) is left out
   await flush()
   const [first, second] = windowsOf(lastScene())
   assert.deepEqual([first.minWidth, first.minHeight, first.maxWidth, first.maxHeight], [320, 200, undefined, undefined])
-  assert.deepEqual([second.minWidth, second.minHeight, second.maxWidth, second.maxHeight], [undefined, undefined, 800, 600])
+  assert.deepEqual(
+    [second.minWidth, second.minHeight, second.maxWidth, second.maxHeight],
+    [undefined, undefined, 800, 600],
+  )
   core.newWindow(3)
   await flush()
   const third = windowsOf(lastScene()).find((window) => window.id === '1/3')!
@@ -673,9 +688,10 @@ test('the size limits an app declared reach the scene; 0 (unbounded) is left out
 
 test('an app clipboard text goes to the viewer; viewer text becomes the selection', () => {
   core.onEvent('clipboard-text', 'from the app')
-  assert.deepEqual(sent.filter((message) => message.type === 'clipboard'), [
-    { type: 'clipboard', text: 'from the app' },
-  ])
+  assert.deepEqual(
+    sent.filter((message) => message.type === 'clipboard'),
+    [{ type: 'clipboard', text: 'from the app' }],
+  )
   compositor.handleMessage({ type: 'clipboard', text: 'from the browser' })
   assert.deepEqual(core.clipboard, ['from the browser'])
   // the same text again, or the text the app just set, changes nothing
@@ -701,7 +717,10 @@ test('a drag of a remote app tells the viewer, with its icon and where the icon 
   // a viewer that attaches in the middle of the drag hears about it
   const late: ControlMessage[] = []
   compositor.attach((message) => late.push(message))
-  assert.deepEqual(late.filter((message) => message.type === 'drag'), [drags()[1]])
+  assert.deepEqual(
+    late.filter((message) => message.type === 'drag'),
+    [drags()[1]],
+  )
   core.onEvent('drag-icon', 0, 0, 0)
   core.onEvent('drag-end')
   const lateDrags = () => late.filter((message) => message.type === 'drag')
@@ -709,9 +728,7 @@ test('a drag of a remote app tells the viewer, with its icon and where the icon 
   assert.equal(lateDrags()[lateDrags().length - 1].icon, undefined)
   // a drag without an icon
   core.onEvent('drag-start', 0)
-  assert.deepEqual(lateDrags().slice(-1), [
-    { type: 'drag', active: true, icon: undefined },
-  ])
+  assert.deepEqual(lateDrags().slice(-1), [{ type: 'drag', active: true, icon: undefined }])
 })
 
 test('files dragged in start a drag on the surface under the pointer, move it, and cancel it when they leave', () => {
@@ -760,9 +777,10 @@ test('pointer lock: the app locks the focused surface, the viewer sends relative
   compositor.handleMessage({ type: 'pointer.relative', dx: 1, dy: 2, time: 5 })
   assert.deepEqual(core.relative, [])
   core.onEvent('pointer-constraint', 1, true, false)
-  assert.deepEqual(sent.filter((m) => m.type === 'pointer.lock'), [
-    { type: 'pointer.lock', surface: '1/1', locked: true, confined: false },
-  ])
+  assert.deepEqual(
+    sent.filter((m) => m.type === 'pointer.lock'),
+    [{ type: 'pointer.lock', surface: '1/1', locked: true, confined: false }],
+  )
   compositor.handleMessage({ type: 'pointer.relative', dx: 3, dy: -4, time: 5 })
   assert.deepEqual(core.relative, [[3, -4]])
   // a viewer that attaches later hears about it
@@ -869,7 +887,7 @@ test('without a hardware encoder no video encoder is ever created, whatever the 
 
 test('frame callbacks are held while both of the surfaceâ€™s slots are taken, and released once one is free', async () => {
   setViewerAttached(true)
-  onViewerFeedback(16, 0)
+  onViewerFeedback(16)
   const { sink, held } = holdingSink()
   compositor.setFrameSink(sink)
   readablePixels()

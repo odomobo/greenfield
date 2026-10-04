@@ -494,6 +494,11 @@ single large item never stalls the link. Initial window before any estimate: 64 
   safety limit stays: never hand a data item to the socket while `ws.bufferedAmount` is over 256 KB (should never
   happen with the controller working; log once if it does). The kernel buffer settings stay.
 - The controller is told when the transport has nothing to send (app-limited) and when it has data waiting.
+- As implemented: `WebSocketViewerTransport` owns one `CongestionController` per connection (injectable, with the
+  clock, for tests). The scheduler asks it about the item that is next by deficit round-robin, by the item's envelope
+  size (what the viewer's acks count); a refused or empty question leaves the round-robin state as it was, as the
+  transport now asks again on every ack, pacing timer and completed send. A paced item gets a timer for when it's due;
+  one that waits for the window or the viewer's backlog waits for the next ack, which pumps the transport.
 
 ### Testing
 
@@ -802,10 +807,16 @@ single large item never stalls the link. Initial window before any estimate: 64 
       callback keeps an interactive window (foot) responsive: foot's keystroke reaches the screen within the usual
       wait while the busy client runs.
     - Report: CPU use and the busy client's frame rate with and without a busy client, by hand, not asserted.
-2b. **Our own congestion control.** Phase 1 done on branch `core2b` (not merged): the controller and its
-    simulated-link test, the scene protocol's ACK (version 11), the viewer's acks and backlog reports, the server
-    decoding them (`ViewerTransport.onAck`, unused). Phase 2, after 2a is merged: gate sends with the controller in
-    2a's scheduler, the pacing timer, the 256 KB safety limit, frame callbacks without the decode-time delay. The spec is
+2b. **Done** (branch `core2b`). The controller (`viewer/congestion.ts`, deviations from the draft at its top and in
+    [Testing](#testing)) and its simulated-link test (the eleven scenarios, three seeds each, about 0.5 s); scene
+    protocol 11 (ACK envelope, `BACKLOG_HOLD_BYTES`, `feedback` without `decodeDuration`); the viewer acks every data
+    envelope on arrival and reports its backlog (`viewer/src/acks.ts`); the transport gates data items with the
+    controller inside 2a's scheduler, with a pacing timer and the 256 KB safety limit instead of the one-in-flight /
+    64 KB gate; frame callbacks depend only on the slots. Transport-level tests: control messages are never held by
+    the window, the backlog hold or the safety limit; an ack releases data; paced items go out by timer. On the local
+    e2e link the controller stays out of the way: `scripts/test-gateway.sh` takes ~23 s as before, the busy client runs
+    at ~8.5–8.8 frames/s and foot's typing shows after ~335–360 ms (driver delays included) with and without it.
+    Untested: real slow or distant links (WSL can't shape traffic without root). The spec is
     [Transport and congestion control](#transport-and-congestion-control); this lists the work. Opus fork (subtle:
     bugs show up as random latency spikes), own branch and worktree, after 2a is merged (it plugs into 2a's send
     scheduler).

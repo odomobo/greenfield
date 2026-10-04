@@ -137,7 +137,7 @@ export class ViewerHost {
   private onMessage(transport: ViewerTransport, message: ControlMessage) {
     switch (message.type) {
       case 'feedback':
-        onViewerFeedback(Number(message.refreshInterval) || 0, Number(message.decodeDuration) || 0)
+        onViewerFeedback(Number(message.refreshInterval) || 0)
         break
       case 'keyframe':
         if (typeof message.surface === 'string') {

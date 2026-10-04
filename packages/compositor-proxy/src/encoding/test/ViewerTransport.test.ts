@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
 import { decodeEnvelope, encodeAck, encodeControl, Patch } from '@gfld/scene-protocol'
-import { WebSocketViewerTransport } from '../../viewer/ViewerTransport.js'
+import { Congestion, WebSocketViewerTransport } from '../../viewer/ViewerTransport.js'
 
 /** Just enough of a ws WebSocket: sends complete when the test says so. */
 class FakeWebSocket extends EventEmitter {
@@ -46,9 +46,23 @@ function patch(serial: number): Patch {
   }
 }
 
+/** A congestion controller that lets a data item go only while the fake socket has nothing unsent. */
+function oneAtATime(ws: { sent: unknown[] }): Congestion {
+  return {
+    canSend: () => ws.sent.length === 0,
+    // only a completed send (it pumps again) makes room
+    nextSendTime: () => Infinity,
+    onSend: () => undefined,
+    onAck: () => undefined,
+    setDataWaiting: () => undefined,
+  }
+}
+
 function setup() {
   const ws = new FakeWebSocket()
-  const transport = new WebSocketViewerTransport(ws as unknown as WebSocket)
+  // These tests are about the order of sending when the network is the bottleneck, not about congestion control: one
+  // data item at a time, the next once the socket took the last (the test's flush()).
+  const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, { congestion: oneAtATime(ws) })
   const keyFramesNeeded: string[] = []
   transport.onKeyFrameNeeded = (surface) => keyFramesNeeded.push(surface)
   /** what reached the socket: 'k1' key frame, 'd2' delta frame, 'p3' patch */
@@ -75,8 +89,20 @@ test('frames and patches of a surface are sent in order', () => {
   const done: boolean[] = []
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 's', frame: h264Frame(1, true) })
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 's', frame: h264Frame(2, false) })
-  transport.send({ priority: 'patch', surfaceClass: 'normal', surface: 's', patch: patch(3), done: (sent) => done.push(sent) })
-  transport.send({ priority: 'patch', surfaceClass: 'normal', surface: 's', patch: patch(4), done: (sent) => done.push(sent) })
+  transport.send({
+    priority: 'patch',
+    surfaceClass: 'normal',
+    surface: 's',
+    patch: patch(3),
+    done: (sent) => done.push(sent),
+  })
+  transport.send({
+    priority: 'patch',
+    surfaceClass: 'normal',
+    surface: 's',
+    patch: patch(4),
+    done: (sent) => done.push(sent),
+  })
   assert.deepEqual(delivered(), ['k1', 'd2', 'p3', 'p4'])
   assert.deepEqual(done, [true, true])
 })
@@ -85,8 +111,20 @@ test('a key frame supersedes unsent patches', () => {
   const { transport, delivered } = setup()
   const done: boolean[] = []
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 'other', frame: h264Frame(9, true) }) // occupies the socket
-  transport.send({ priority: 'patch', surfaceClass: 'normal', surface: 's', patch: patch(1), done: (sent) => done.push(sent) })
-  transport.send({ priority: 'patch', surfaceClass: 'normal', surface: 's', patch: patch(2), done: (sent) => done.push(sent) })
+  transport.send({
+    priority: 'patch',
+    surfaceClass: 'normal',
+    surface: 's',
+    patch: patch(1),
+    done: (sent) => done.push(sent),
+  })
+  transport.send({
+    priority: 'patch',
+    surfaceClass: 'normal',
+    surface: 's',
+    patch: patch(2),
+    done: (sent) => done.push(sent),
+  })
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 's', frame: h264Frame(3, true) })
   assert.deepEqual(done, [false, false])
   assert.deepEqual(delivered(), ['k9', 'k3'])
@@ -97,13 +135,25 @@ test('dropPatches keeps video, requireKeyFrame drops everything', () => {
   const done: boolean[] = []
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 'other', frame: h264Frame(9, true) })
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 's', frame: h264Frame(1, true) })
-  transport.send({ priority: 'patch', surfaceClass: 'normal', surface: 's', patch: patch(2), done: (sent) => done.push(sent) })
+  transport.send({
+    priority: 'patch',
+    surfaceClass: 'normal',
+    surface: 's',
+    patch: patch(2),
+    done: (sent) => done.push(sent),
+  })
   transport.dropPatches('s')
   assert.deepEqual(done, [false])
   assert.deepEqual(delivered(), ['k9', 'k1'])
 
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 'other', frame: h264Frame(10, false) })
-  transport.send({ priority: 'patch', surfaceClass: 'normal', surface: 's', patch: patch(3), done: (sent) => done.push(sent) })
+  transport.send({
+    priority: 'patch',
+    surfaceClass: 'normal',
+    surface: 's',
+    patch: patch(3),
+    done: (sent) => done.push(sent),
+  })
   transport.requireKeyFrame('s')
   assert.deepEqual(done, [false, false])
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 's', frame: h264Frame(4, false) })
@@ -114,7 +164,13 @@ test('closing reports unsent patches as dropped', () => {
   const { ws, transport } = setup()
   const done: boolean[] = []
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 'other', frame: h264Frame(9, true) })
-  transport.send({ priority: 'patch', surfaceClass: 'normal', surface: 's', patch: patch(1), done: (sent) => done.push(sent) })
+  transport.send({
+    priority: 'patch',
+    surfaceClass: 'normal',
+    surface: 's',
+    patch: patch(1),
+    done: (sent) => done.push(sent),
+  })
   ws.close()
   assert.deepEqual(done, [false])
 })
