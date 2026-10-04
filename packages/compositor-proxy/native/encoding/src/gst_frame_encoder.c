@@ -728,24 +728,51 @@ gst_frame_encoder_pipeline_setup_bus_listeners(struct gst_frame_encoder_pipeline
     gst_object_unref(bus);
 }
 
+/*
+ * The padding (videobox borders, the GL shader's output size) follows the size of the frames. It must be set when the
+ * new size's caps event goes by, before it reaches those elements: they negotiate their output size from it. Set only
+ * from the buffer that follows, the elements downstream first see the frame's own size (an odd size makes x264 fail to
+ * open, and the next query on it crashed the session) and renegotiate once more.
+ */
 static GstPadProbeReturn
 gst_frame_encoder_pipeline_app_src_have_data(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
     struct gst_frame_encoder_pipeline *gst_frame_encoder_pipeline = user_data;
-    GstBuffer *buffer = gst_pad_probe_info_get_buffer(info);
-    GstVideoMeta *video_meta = gst_buffer_get_video_meta(buffer);
+    uint32_t width, height;
+    if (info->type & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM) {
+        GstEvent *event = gst_pad_probe_info_get_event(info);
+        if (GST_EVENT_TYPE(event) != GST_EVENT_CAPS) {
+            return GST_PAD_PROBE_OK;
+        }
+        GstCaps *caps;
+        gst_event_parse_caps(event, &caps);
+        const GstStructure *structure = gst_caps_get_structure(caps, 0);
+        gint caps_width, caps_height;
+        if (!gst_structure_get_int(structure, "width", &caps_width) ||
+            !gst_structure_get_int(structure, "height", &caps_height)) {
+            return GST_PAD_PROBE_OK;
+        }
+        width = (uint32_t) caps_width;
+        height = (uint32_t) caps_height;
+    } else {
+        GstVideoMeta *video_meta = gst_buffer_get_video_meta(gst_pad_probe_info_get_buffer(info));
+        if (video_meta == NULL) {
+            return GST_PAD_PROBE_OK;
+        }
+        width = video_meta->width;
+        height = video_meta->height;
+    }
 
     uint32_t coded_width, coded_height;
-    gst_frame_encoder_pipeline_coded_size(gst_frame_encoder_pipeline->gst_frame_encoder->description, video_meta->width,
-                                          video_meta->height,
+    gst_frame_encoder_pipeline_coded_size(gst_frame_encoder_pipeline->gst_frame_encoder->description, width, height,
                                           &coded_width, &coded_height);
 
-    if (gst_frame_encoder_pipeline->width != video_meta->width ||
-        gst_frame_encoder_pipeline->height != video_meta->height ||
+    if (gst_frame_encoder_pipeline->width != width ||
+        gst_frame_encoder_pipeline->height != height ||
         gst_frame_encoder_pipeline->coded_width != coded_width ||
         gst_frame_encoder_pipeline->coded_height != coded_height) {
 
-        gst_frame_encoder_pipeline->width = video_meta->width;
-        gst_frame_encoder_pipeline->height = video_meta->height;
+        gst_frame_encoder_pipeline->width = width;
+        gst_frame_encoder_pipeline->height = height;
         gst_frame_encoder_pipeline->coded_width = coded_width;
         gst_frame_encoder_pipeline->coded_height = coded_height;
 
@@ -808,7 +835,7 @@ gst_frame_encoder_pipeline_create(struct gst_frame_encoder *gst_encoder, const e
 
     app_src = GST_APP_SRC(gst_bin_get_by_name(GST_BIN(gst_frame_encoder_pipeline->pipeline), "src"));
     pad = gst_element_get_static_pad(GST_ELEMENT(app_src), "src");
-    gst_frame_encoder_pipeline->app_src_pad_probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+    gst_frame_encoder_pipeline->app_src_pad_probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
                                                                       (GstPadProbeCallback) gst_frame_encoder_pipeline_app_src_have_data,
                                                                       gst_frame_encoder_pipeline, NULL);
     gst_object_unref(pad);
