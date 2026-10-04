@@ -1,13 +1,8 @@
 /**
  * The session's Wayland side (ROADMAP.md, Core item 1): wlroots 0.17 (native/wlr-core) implements the protocols; this
- * is the policy, as the TypeScript compositor's window scene (packages/compositor/src/server/scene.ts) was: window
+ * is the policy: window
  * positions, stacking, focus and minimize state, frame pacing, and the encoding of every surface's content.
- *
- * The viewer, the scene protocol, the transport and the encoding policy (SurfaceEncoder) are shared with the old stack.
- *
- * This module must not import anything that loads the libwayland fork's addons (Encoder.ts, SurfaceBufferEncoding.ts,
- * wayland-server.ts, FrameFeedback.ts, legacy.ts): the fork and the system libwayland that wlroots uses share
- * the libwayland-server.so.0 soname, so only one of them can be loaded in a process. */
+ */
 import type * as WlrCoreAddon from '../addons/wlr-core-addon'
 import { createLogger } from '../Logger.js'
 import { ProcessingDuration, scheduleFrameCallback } from '../FramePacing.js'

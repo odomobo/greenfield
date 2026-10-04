@@ -1,9 +1,7 @@
 # wlroots core
 
-A session's Wayland side on wlroots 0.17.4 instead of the libwayland fork and the TypeScript protocol implementation.
-Started as a prototype (verdict: go); since wave 1 of the migration (ROADMAP.md, Core item 1) it's the default: every
-session runs on it, with the desktop shell. The old stack is still selectable with `GFLD_LEGACY_COMPOSITOR=1` in the
-gateway's environment until wave 2 deletes it.
+A session's Wayland side on wlroots 0.17.4. It replaced the libwayland fork and the TypeScript protocol implementation
+(deleted in wave 2 C of the migration, ROADMAP.md, Core item 1): every session runs on it, with the desktop shell.
 
 ## Layout
 
@@ -15,7 +13,8 @@ gateway's environment until wave 2 deletes it.
   protocols; the addon reports clients (with their pid), surfaces, commits (buffer damage, input region), toplevels and
   their requests, and cursors to JavaScript, and takes input, configures and frame callbacks from it.
 - `native/wlr-core/src/wlr_core_encoder.c`: the existing GStreamer encoder (`native/encoding`), compiled into the same
-  addon against the system libwayland (`shim/westfield.h`), fed from wlroots buffers.
+  addon against the system libwayland (`shim/westfield.h`), fed from wlroots buffers. `src/westfield-egl.c`,
+  `westfield-dmabuf.c` and `drm_format_set.c` (with their headers) are the encoder's EGL and dmabuf helpers.
 - `src/wlroots/WlrCompositor.ts`: the policy, like the TypeScript compositor's `server/scene.ts`: window positions,
   stacking, activation and keyboard focus, minimize, maximize, child windows centered on their parent, frame pacing,
   and one `SurfaceEncoder` per surface. It is both the `WindowSceneEndpoint` and the `SurfaceContent` of a `ViewerHost`.
@@ -23,9 +22,8 @@ gateway's environment until wave 2 deletes it.
 - `src/wlroots/Apps.ts`: the session's app processes: launched by the desktop shell (with the session's
   `WAYLAND_DISPLAY`), or connected on their own (from the client's credentials; a client of a launched app's child
   process belongs to that app). Ending the session sends them SIGTERM.
-- `src/index.ts` exports only this stack; the old one is `src/legacy.ts` (it loads the fork, never import both).
 - `packages/gateway/src/session-process.ts`: the session process: `WlrCompositor`, `Apps`, the desktop shell
-  (`shell/service.ts`), the session environment (`session-environment.ts`, shared with `session-process-legacy.ts`).
+  (`shell/service.ts`), the session environment (`session-environment.ts`).
   `GFLD_WLR_TRACE=1` logs events and viewer messages; `GFLD_WLR_DEBUG=1` turns on wlroots' own debug log.
 
 ## What was verified (headless Chrome through the gateway, `--dev-auth`)
@@ -62,9 +60,6 @@ resizing, logging out ends the apps), plus a check that the session really runs 
   `wl_event_loop_dispatch_idle` + `wl_display_flush_clients`.
 - **Frame callbacks**: wlroots sends none on its own; `wlr_surface_send_frame_done` sends all of a surface's pending
   callbacks, driven by the existing frame pacing (now `src/FramePacing.ts`, free of native code).
-- **One libwayland per process**: the fork and the system libwayland share the `libwayland-server.so.0` soname. The
-  prototype's session process loads only modules without the fork: `ViewerHost` now takes its surface content as a
-  parameter, socket tuning moved into the poll addon, frame pacing out of `FrameFeedback.ts`.
 - **Build**: wlroots 0.17 with `-Db_ndebug=true` fails `-Werror` (variables only used in asserts), so it's built with
   `werror=false`. Its Wayland and X11 backends can't be disabled in 0.17; the addon links libwayland-client too
   (harmless).

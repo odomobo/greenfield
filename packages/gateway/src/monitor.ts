@@ -47,11 +47,7 @@ function sessionInfo({ id, name, createdAt }: SessionEntry): SessionInfo {
 }
 
 const pamHelperPath = path.resolve(__dirname, 'pam-helper')
-// GFLD_LEGACY_COMPOSITOR=1: sessions run on the old stack (the libwayland fork) instead of wlroots, until it's deleted
-const sessionProcessPath = path.resolve(
-  __dirname,
-  process.env.GFLD_LEGACY_COMPOSITOR === '1' ? 'session-process-legacy.js' : 'session-process.js',
-)
+const sessionProcessPath = path.resolve(__dirname, 'session-process.js')
 
 export class Monitor {
   private readonly tickets = new Map<string, Ticket>()

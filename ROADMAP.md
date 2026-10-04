@@ -202,7 +202,7 @@ Other rules:
 - wlroots migration, wave 1: every session runs on wlroots, with the desktop shell (Apps menu, launching, pinned apps,
   notifications; app processes tracked from client credentials). Built by `yarn build` (submodule + meson; CI on
   Ubuntu 24.04); `scripts/test-gateway.sh` passes on it; unit tests for `WlrCompositor` (fake core) and `Apps`. The
-  old stack stays selectable with `GFLD_LEGACY_COMPOSITOR=1` until wave 2 C deletes it.
+  old stack stayed selectable with `GFLD_LEGACY_COMPOSITOR=1` until wave 2 C deleted it.
 
 ### Core
 
@@ -243,8 +243,7 @@ Other rules:
      - This replaces today's "keep the local position until the server reports the same coordinates", which gets stuck
        when the server corrects a position and ignores legitimate server moves meanwhile.
    - **Starting point: the prototype** (done, verdict go), the default since wave 1: `yarn build` builds it, every
-     session runs on it, apps start from the Apps menu. `GFLD_WLR_TRACE=1` logs events; `GFLD_LEGACY_COMPOSITOR=1`
-     (gateway environment) runs the old stack until wave 2 C. Layout:
+     session runs on it, apps start from the Apps menu. `GFLD_WLR_TRACE=1` logs events. Layout:
      - `native/wlr-core/src/wlr_core.c` (~1.1k lines): the wlroots wiring as a Node addon. It reports surfaces,
        commits (buffer damage, input region), toplevels and their requests, and cursors to JavaScript, and takes
        input, configures and frame callbacks from it. `wlr_core_encoder.c` compiles the existing GStreamer encoder into
@@ -253,8 +252,7 @@ Other rules:
        focus, minimize, maximize, child windows centred on their parent, frame pacing, one `SurfaceEncoder` per
        surface. Frame pacing moved to `src/FramePacing.ts`, free of native code.
      - `src/wlroots/Apps.ts`: the session's app processes (launched, or connected on their own, by client pid).
-     - `packages/gateway/src/session-process.ts`: the session process (`session-process-legacy.ts`: the old one).
-       The package index exports only the wlroots stack; the old one is `src/legacy.ts`.
+     - `packages/gateway/src/session-process.ts`: the session process.
      - Detailed notes: `packages/compositor-proxy/native/wlr-core/README.md`.
    - **Verified in the prototype** (headless Chrome through the gateway): foot (typing, focus, its own decorations,
      cursor shapes, resizing by its edge, its maximize button); gtk4-demo (its shadow and input region, its own
@@ -280,7 +278,7 @@ Other rules:
      - The encoder owns `frame_buffer.user_data` (its reference count); the held buffer travels alongside it.
      - Wave 1: the session process must not have its own display in `WAYLAND_DISPLAY`, or GStreamer's GL (the
        encoder) connects to it as a client. Apps get it when launched.
-     - Wave 1: the addon compiles three files from the fork's directory (`native/wayland/src/westfield-egl.c`,
+     - Wave 1 (done in 2 C): the addon compiled three files from the fork's directory (`native/wayland/src/westfield-egl.c`,
        `westfield-dmabuf.c`, `drm_format_set.c`, with their headers, used by the encoder): wave 2 C must move them (into
        `native/encoding/src` or `native/wlr-core/src`) before deleting `native/wayland`, and drop `legacy.ts`,
        `session-process-legacy.ts` and `GFLD_LEGACY_COMPOSITOR`.
@@ -298,7 +296,7 @@ Other rules:
      | 1 | **Done.** **Make wlroots the default**: the session process on `WlrCompositor`; the desktop shell on it (Apps menu, launching, notifications; client PIDs from `wl_client_get_credentials`); CI and build docs get meson (the XWayland packages come with B); unit tests for `WlrCompositor` with the addon mocked; `scripts/test-gateway.sh` passes on it. Everything else builds on this. | Fork (tricky: session lifecycle, the prototype's gotchas) | ~1k |
      | 2 | **A. Window-state sync**: the server owns window state; sequence-number reconciliation (above) in the viewer, the scene protocol and `WlrCompositor`. | Fork (tricky: ordering and races) | 300-500 |
      | 2 | **B. XWayland**: `wlr_xwayland` with its window manager; X11 windows (including override-redirect menus and tooltips) become scene windows. | Fork (tricky: X11 quirks) | 400-700 |
-     | 2 | **C. Delete the old stack**: the libwayland fork and its addons (~33k lines), `packages/compositor` (~9.4k), `@gfld/compositor-wasm`, `@gfld/xtsb` (~14k), generated protocol code (~6k), the proxy's interceptors and generators (~1-2k), the old session process; docs and build scripts updated. Only removes what nothing else uses. | Sonnet | ~0 (60k+ deleted) |
+     | 2 | **C. Done.** **Delete the old stack**: the libwayland fork and its addons, `packages/compositor`, `@gfld/compositor-wasm`, `@gfld/xtsb`, `@gfld/common`, the compositor generators and protocol libs, `protocol/*.xml`, the proxy's interceptors, `legacy.ts`, `session-process-legacy.ts` and `GFLD_LEGACY_COMPOSITOR`; the encoder's EGL/dmabuf helpers moved into `native/wlr-core/src`. About 90k lines deleted. | Sonnet | ~0 |
      | 3 | **D. Polish**: fullscreen, popups kept on screen, key repeat, keyboard layout from the locale, Caps/Num Lock sync; cheap globals (viewporter, presentation time, xdg-activation, single-pixel buffer, idle inhibit). | Sonnet | 500-800 |
      | 3 | **E. Clipboard with the browser, then drag and drop** (in that order, one agent: drag and drop reuses the clipboard's data plumbing). Clipboard: a server-side data source for text from the browser (on Ctrl+V), the selection read through a pipe and sent to the viewer, primary selection the same way; X11/Wayland sync comes with `wlr_xwayland`. Drag and drop: between remote apps via wlroots' seat drags with the drag icon shown by the viewer, then local files into remote apps (uploaded, offered as `text/uri-list`). | Sonnet | 1.1-1.6k |
      | 3 | **F. HiDPI, server side**: output scale and `wp_fractional_scale_v1` from the viewer's reported scale. | Sonnet | 100-200 |

@@ -39,9 +39,6 @@ The first build compiles wlroots (a few minutes); after changing the submodule's
 `packages/compositor-proxy/build/wlroots` so it's rebuilt. Running sessions also needs the apps' runtime pieces:
 `dbus-daemon`, and for the end-to-end test `foot`, `notify-send` (libnotify-bin) and playwright-cli.
 
-`GFLD_LEGACY_COMPOSITOR=1` in the gateway's environment runs sessions on the old stack (the libwayland fork) instead,
-until it's deleted.
-
 ## Development (no root)
 
 ```bash

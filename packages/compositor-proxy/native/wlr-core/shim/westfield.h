@@ -1,5 +1,5 @@
 /*
- * Stand-in for native/wayland/src/westfield.h when the encoder is built into the wlroots core: the same encoder
+ * Stand-in for the old libwayland fork's westfield.h: the encoder
  * sources, but against the system libwayland instead of the libwayland fork.
  */
 #ifndef WESTFIELD_WESTFIELD_H

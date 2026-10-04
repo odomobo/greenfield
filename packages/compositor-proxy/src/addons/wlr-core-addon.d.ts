@@ -1,6 +1,6 @@
 /**
  * The wlroots core (native/wlr-core). Surfaces are identified by a session-unique sid; a toplevel by the sid of its
- * surface. Never loaded in a process that loaded the libwayland fork's addons.
+ * surface.
  */
 declare namespace wlrCore {
   export type FrameEncoder = unknown

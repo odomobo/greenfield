@@ -1,8 +1,7 @@
 import { performance } from 'node:perf_hooks'
 
 /**
- * Frame callback pacing shared by all surfaces of the session, driven by the attached viewer. No native code, so both
- * the libwayland fork path (FrameFeedback) and the wlroots prototype use it.
+ * Frame callback pacing shared by all surfaces of the session, driven by the attached viewer. No native code.
  */
 
 let tickInterval = 16.667

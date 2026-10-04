@@ -1,6 +1,5 @@
 /*
- * The GStreamer video encoder (native/encoding) fed from wlroots buffers: the same encoder as the libwayland fork
- * path, but the frame is the surface's current wlr_buffer instead of a wl_buffer resource. The buffer stays locked
+ * The GStreamer video encoder (native/encoding) fed from wlroots buffers: the frame is the surface's current wlr_buffer instead of a wl_buffer resource. The buffer stays locked
  * until the encoder is done with it, so the client gets its release only then.
  */
 #include <assert.h>
@@ -156,7 +155,7 @@ encodeFrame(napi_env env, napi_callback_info info) {
         return undefined(env);
     }
     // The mapping stays valid while the buffer is locked (wlr_shm keeps it until the last buffer of the pool is gone).
-    // Like the libwayland fork path, the encoder thread reads it without SIGBUS protection.
+    // The encoder thread reads it without SIGBUS protection.
     wlr_buffer_end_data_ptr_access(buffer);
 
     struct locked_frame_buffer *locked = calloc(1, sizeof(*locked));

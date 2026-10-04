@@ -1,4 +1,4 @@
-// The session's server side on wlroots. Nothing here loads the libwayland fork (that's legacy.ts).
+// The session's server side on wlroots.
 export { createLogger } from './Logger.js'
 export { createSessionController, SessionController } from './SessionController.js'
 export { startWlrootsCompositor, WlrCompositor } from './wlroots/WlrCompositor.js'

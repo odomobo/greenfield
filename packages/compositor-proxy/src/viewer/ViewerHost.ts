@@ -23,7 +23,7 @@ export interface WindowSceneEndpoint {
 
 /**
  * The session's surface contents (its encoders): where encoded frames and patches go, and resending a surface's whole
- * content. Implemented by SurfaceBufferEncoding.ts (libwayland fork) and wlroots/WlrCompositor.ts (prototype).
+ * content. Implemented by wlroots/WlrCompositor.ts.
  */
 export interface SurfaceContent {
   setFrameSink(sink: EncodingSink): void
