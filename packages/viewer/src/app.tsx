@@ -262,6 +262,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
         windows: () => desktop.debugWindows(),
         output: () => desktop.debugOutput(),
         interaction: () => desktop.debugInteraction(),
+        drag: () => desktop.debugDrag(),
         resizing: () => desktop.debugResizing(),
         animations: () => desktop.debugAnimations(),
         videoFrames: () => desktop.debugVideoFrames(),

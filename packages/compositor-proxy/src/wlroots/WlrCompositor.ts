@@ -17,6 +17,8 @@ import { EvDevKeyCode } from './keys.js'
 import { Apps } from './Apps.js'
 import { X11Windows } from './X11.js'
 import { KeyboardConfig, systemKeyboardConfig } from './keyboard-config.js'
+import { Clipboard } from './Clipboard.js'
+import { FileDrops } from './FileDrops.js'
 
 const logger = createLogger('wlroots')
 /** GFLD_WLR_TRACE=1: log wlroots events and viewer messages */
@@ -136,6 +138,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   /** the X11 display for X11 apps (XWayland), undefined if there's none */
   readonly x11Display?: string
   private readonly x11: X11Windows
+  private readonly clipboard: Clipboard
+  private readonly fileDrops: FileDrops
   private send?: (message: ControlMessage) => void
   private sink: EncodingSink = inactiveSink
   private readonly encoding: EncodingContext<WlrEncoder>
@@ -149,6 +153,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private active = 0
   private pageFocused = true
   private contentSerial = 0
+  /** a drag and drop between remote apps is going on; its icon surface */
+  private drag?: { icon?: { sid: number; x: number; y: number } }
   private output = { width: 1280, height: 720 }
   private lastSceneJSON = ''
   private sceneScheduled = false
@@ -159,6 +165,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     config: { h264Encoder: H264Encoder; videoStreams: number },
     private readonly wlr: WlrNative,
     watchFd: FdWatcher,
+    /** where files dropped from the user's computer are saved */
+    dropsDirectory?: string,
   ) {
     const currentSink = () => this.sink
     const forwardingSink: EncodingSink = {
@@ -175,6 +183,13 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.encoding = new EncodingContext(forwardingSink, pool, encodePng, logger)
     this.encoding.startTicking()
 
+    this.clipboard = new Clipboard((text) => this.wlr.setClipboardText(text))
+    this.fileDrops = new FileDrops(
+      this.wlr,
+      (target) => this.pointerMotion(target),
+      (surface) => (typeof surface === 'string' ? this.sids.get(surface) : undefined),
+      dropsDirectory,
+    )
     this.x11 = new X11Windows((sid, x, y) => this.wlr.setPosition(sid, x, y))
     const { socket, fd, x11Display } = this.wlr.create(
       (type, ...args) => this.onEvent(type, args),
@@ -353,6 +368,24 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       }
       case 'cursor-shape':
         this.send?.({ type: 'cursor', kind: 'named', name: args[0] })
+        break
+      case 'drag-start':
+        this.drag = { icon: args[0] ? { sid: args[0], x: 0, y: 0 } : undefined }
+        this.send?.({ type: 'cursor', kind: 'named', name: 'grabbing' })
+        this.sendDrag()
+        break
+      case 'drag-icon':
+        if (this.drag) {
+          this.drag.icon = args[0] ? { sid: args[0], x: args[1], y: args[2] } : undefined
+          this.sendDrag()
+        }
+        break
+      case 'drag-end':
+        this.drag = undefined
+        this.sendDrag()
+        break
+      case 'clipboard-text':
+        this.clipboard.remoteText(args[0])
         break
       case 'x11-geometry':
         this.scheduleScene()
@@ -544,6 +577,10 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   attach(send: (message: ControlMessage) => void): void {
     this.send = send
+    this.clipboard.attach(send)
+    if (this.drag) {
+      this.sendDrag()
+    }
     this.lastSceneJSON = ''
     this.sendSceneIfChanged()
     send({ type: 'cursor', kind: 'default' })
@@ -551,8 +588,19 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   detach(): void {
     this.send = undefined
+    this.clipboard.detach()
+    this.fileDrops.leave()
     this.wlr.releaseAllKeys()
     this.wlr.keyboardFocus(0)
+  }
+
+  private sendDrag() {
+    const icon = this.drag?.icon
+    this.send?.({
+      type: 'drag',
+      active: this.drag !== undefined,
+      icon: icon && { surface: this.keyOf(icon.sid), x: icon.x, y: icon.y },
+    })
   }
 
   private scheduleScene() {
@@ -689,6 +737,20 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         }
         break
       }
+      case 'clipboard':
+        this.clipboard.viewerText(message.text)
+        break
+      case 'file-drag':
+        this.syncModifiers(message, 0)
+        if (message.over) {
+          this.fileDrops.over(message)
+        } else {
+          this.fileDrops.leave()
+        }
+        break
+      case 'file-drop':
+        this.fileDrops.drop(message)
+        break
       case 'focus':
         this.pageFocused = Boolean(message.focused)
         if (!this.pageFocused) {
@@ -754,6 +816,10 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       default:
         logger.info(`Unhandled viewer message: ${message.type}`)
     }
+  }
+
+  handleFileChunk(id: number, data: Uint8Array): void {
+    this.fileDrops.chunk(id, data)
   }
 
   /**

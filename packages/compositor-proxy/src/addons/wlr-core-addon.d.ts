@@ -18,6 +18,9 @@ declare namespace wlrCore {
    *   toplevel-request-maximize(sid, maximized), toplevel-request-fullscreen(sid, fullscreen),
    *   toplevel-request-minimize(sid), toplevel-request-activate(sid) (xdg-activation)
    * - cursor-surface(sid | 0, hotspotX, hotspotY), cursor-shape(name)
+   * - drag-start(iconSid | 0), drag-icon(iconSid | 0, x, y) (the icon's offset from the pointer), drag-end(): a drag of
+   *   a remote app (the seat's pointer drag)
+   * - clipboard-text(text): an app set the clipboard selection (not one we set from the browser); its text
    * - x11-geometry(sid): an X11 override-redirect window (menu, tooltip) moved, the window it belongs to changed
    *
    * X11 override-redirect windows aren't toplevels: their surfaces are part of the windowSurfaces() of the X11 window
@@ -94,6 +97,29 @@ declare namespace wlrCore {
 
   /** RGBA copy of a rectangle of the surface's current buffer, undefined if it can't be read. */
   export function readPixels(sid: number, x: number, y: number, width: number, height: number): Buffer | undefined
+
+  /**
+   * Makes this text the seat's clipboard selection (a server-side data source, text mime types only), replacing the
+   * apps' selection. It is not reported back as a clipboard-text event.
+   */
+  export function setClipboardText(text: string): void
+
+  /**
+   * Files dragged in from the user's computer (see wlr_core_dnd.c): startFileDrag starts a drag, over the client of this
+   * surface, that offers text/uri-list (false if it can't: a drag is going on, no such surface); the pointer motion
+   * calls that follow move it. fileDragAccepted: the app under the pointer accepted. dropFileDrag releases it (the
+   * app gets the drop if it accepted, else the drag is over); cancelFileDrag ends it. provideFiles gives the
+   * text/uri-list the apps' receive requests are answered with (those that wait, and those to come).
+   */
+  export function startFileDrag(sid: number): boolean
+
+  export function fileDragAccepted(): boolean
+
+  export function dropFileDrag(timeMs: number): void
+
+  export function cancelFileDrag(): void
+
+  export function provideFiles(list: string): void
 
   export function createFrameEncoder(
     encoderType: 'nvh264' | 'x264' | 'vaapih264',

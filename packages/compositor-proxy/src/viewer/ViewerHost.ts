@@ -19,6 +19,9 @@ export interface WindowSceneEndpoint {
 
   /** Input, window management and output messages from the viewer. */
   handleMessage(message: ControlMessage): void
+
+  /** The next bytes of a file the viewer uploads (a file drop, see the scene protocol). */
+  handleFileChunk?(id: number, data: Uint8Array): void
 }
 
 /**
@@ -101,6 +104,7 @@ export class ViewerHost {
     this.transport = transport
     transport.onKeyFrameNeeded = (surface) => this.content.requestKeyFrame(surface)
     transport.onMessage = (message) => this.onMessage(transport, message)
+    transport.onFileChunk = (id, data) => this.scene.handleFileChunk?.(id, data)
     transport.onClose = (code, reason) => {
       if (this.transport !== transport) {
         return

@@ -4,6 +4,8 @@ import { Rect, Renderer } from './gl/renderer'
 import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
 import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 import { modifiersOf } from './modifiers'
+import { ClipboardSync, isPasteChord } from './clipboard'
+import { dragHasFiles, dropAllowed, droppedFiles, uploadFiles } from './file-drop'
 import { acceptsInput, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
 import { WindowSync } from './window-sync'
 import {
@@ -107,6 +109,8 @@ export class Desktop {
   private readonly decoders = new Map<string, SurfaceDecoder>()
   private readonly keyFrameRequested = new Set<string>()
   private cursor: Cursor = { kind: 'default' }
+  /** a drag and drop between remote apps is going on (the server says so), with its icon surface */
+  private drag?: { icon?: { surface: string; x: number; y: number } }
   private readonly animations = new Map<string, WindowAnimation>()
   /** geometry of windows before they were maximized, to animate back to */
   private readonly restoreRects = new Map<string, Rect>()
@@ -117,6 +121,16 @@ export class Desktop {
   }
   /** Where a window goes when minimized (its taskbar button), in page coordinates. */
   minimizeTarget: (window: string) => DOMRect | undefined = () => undefined
+
+  /** the clipboard text shared with the session's apps */
+  private readonly clipboard = new ClipboardSync(globalThis.navigator?.clipboard, (text) =>
+    this.connection.send({ type: 'clipboard', text }),
+  )
+  /** while a paste waits for the browser's clipboard: the key events that follow it wait too, to keep their order */
+  private keyChain?: Promise<void>
+  /** where files being dragged over the desktop were last reported, and the next id of an uploaded file */
+  private fileDragAt?: Point
+  private nextFileId = 1
 
   private pointer: Point = { x: 0, y: 0 }
   /** where the current button press started; interactions the client starts on a press are measured from here */
@@ -230,6 +244,13 @@ export class Desktop {
         hasContent: window.surfaces.every((surface) => this.renderer.hasContent(surface.id)),
       }
     })
+  }
+
+  /** The drag and drop going on between remote apps (and whether its icon has content). For tests. */
+  debugDrag(): { icon?: { surface: string; x: number; y: number; width: number; height: number } } | null {
+    const icon = this.drag?.icon
+    const size = icon && this.frameSizes.get(icon.surface)
+    return this.drag ? { icon: icon && size && { ...icon, ...size } } : null
   }
 
   /** The output size the viewer reports. For tests. */
@@ -717,6 +738,13 @@ export class Desktop {
           this.updateScene(message.windows)
         }
         break
+      case 'clipboard':
+        this.clipboard.remoteText(message.text)
+        break
+      case 'drag':
+        this.drag = message.active ? { icon: message.icon } : undefined
+        this.scheduleRender()
+        break
       case 'cursor':
         this.cursor = message
         this.applyCursor()
@@ -872,7 +900,7 @@ export class Desktop {
     // also covers positions chosen by the server or client (e.g. dialogs) and windows coming back after a reattach
     this.keepWindowsVisible()
     // Content of surfaces that are gone. The cursor surface isn't part of any window.
-    const cursorSurface = this.cursor.kind === 'surface' ? this.cursor.surface : undefined
+    const cursorSurface = this.cursor.kind === 'surface' ? this.cursor.surface : this.drag?.icon?.surface
     for (const surface of [...this.decoders.keys()]) {
       if (!surfaces.has(surface) && surface !== cursorSurface && !this.isLiveSurface(surface)) {
         this.decoders.get(surface)?.close()
@@ -1047,6 +1075,16 @@ export class Desktop {
         })
       }
     }
+    const icon = this.drag?.icon
+    const iconSize = icon && this.cursorSize(icon.surface)
+    if (icon && iconSize) {
+      this.renderer.drawSurface(icon.surface, {
+        x: this.pointer.x + icon.x,
+        y: this.pointer.y + icon.y,
+        width: iconSize.width,
+        height: iconSize.height,
+      })
+    }
   }
 
   /**
@@ -1121,7 +1159,8 @@ export class Desktop {
   }
 
   private target(point: Point, time: number) {
-    const pick = this.grab ? this.grabTarget(point) : this.pick(point)
+    // (a drag and drop goes to whatever is under the pointer, not to the surface the press started on)
+    const pick = this.grab && !this.drag ? this.grabTarget(point) : this.pick(point)
     return {
       surface: pick?.surface ?? null,
       sx: pick?.sx,
@@ -1151,7 +1190,7 @@ export class Desktop {
 
     canvas.addEventListener('pointermove', (event) => {
       this.pointer = point(event)
-      if (this.cursor.kind === 'surface') {
+      if (this.cursor.kind === 'surface' || this.drag?.icon) {
         this.scheduleRender()
       }
       if (this.interaction) {
@@ -1167,6 +1206,7 @@ export class Desktop {
     })
 
     canvas.addEventListener('pointerdown', (event) => {
+      void this.clipboard.retryPending()
       canvas.focus()
       canvas.setPointerCapture(event.pointerId)
       this.pointer = point(event)
@@ -1252,6 +1292,57 @@ export class Desktop {
       { passive: false },
     )
 
+    // Files dragged in from the user's computer: the browser sends drag events, not pointer events, until the drop.
+    // The server runs a drag of its own meanwhile, so apps under the pointer show their drop targets.
+    const fileDragOver = (event: DragEvent) => {
+      if (!dragHasFiles(event.dataTransfer)) {
+        return
+      }
+      event.preventDefault()
+      event.dataTransfer!.dropEffect = 'copy'
+      const at = point(event)
+      if (this.fileDragAt?.x !== at.x || this.fileDragAt?.y !== at.y) {
+        this.fileDragAt = at
+        this.connection.send({
+          type: 'file-drag',
+          over: true,
+          ...this.target(at, event.timeStamp),
+        })
+      }
+    }
+    canvas.addEventListener('dragenter', fileDragOver)
+    canvas.addEventListener('dragover', fileDragOver)
+    canvas.addEventListener('dragleave', (event) => {
+      if (this.fileDragAt && dragHasFiles(event.dataTransfer)) {
+        this.fileDragAt = undefined
+        this.connection.send({ type: 'file-drag', over: false, ...this.target(point(event), event.timeStamp) })
+      }
+    })
+    canvas.addEventListener('drop', (event) => {
+      if (!dragHasFiles(event.dataTransfer)) {
+        return
+      }
+      event.preventDefault()
+      this.fileDragAt = undefined
+      const files = droppedFiles(event.dataTransfer!)
+      const target = this.target(point(event), event.timeStamp)
+      if (!dropAllowed(files)) {
+        console.warn('These files are too many or too big to upload to the session.')
+        this.connection.send({ type: 'file-drag', over: false, ...target })
+        return
+      }
+      const uploads = files.map((file) => ({ id: this.nextFileId++, file }))
+      this.connection.send({
+        type: 'file-drop',
+        files: uploads.map(({ id, file }) => ({ id, name: file.name, size: file.size })),
+        ...target,
+      })
+      void uploadFiles(uploads, {
+        chunk: (id, bytes) => this.connection.sendFileChunk(id, bytes),
+        buffered: () => this.connection.buffered,
+      })
+    })
+
     const key = (event: KeyboardEvent, pressed: boolean) => {
       if (this.interaction?.menu) {
         this.menuKey(event, this.interaction as Interaction & { menu: MenuInteraction })
@@ -1262,15 +1353,32 @@ export class Desktop {
         event.preventDefault()
         return
       }
-      event.preventDefault()
-      this.connection.send({
+      const message: ViewerMessage = {
         type: 'key',
         code: event.code,
         pressed,
         modifiers: modifiersOf(event),
         time: Math.round(event.timeStamp),
-      })
+      }
+      if (pressed && isPasteChord(event)) {
+        // the browser's clipboard goes to the session before the key: the app handles the paste against the new
+        // selection. (Without readText the key's default action, a paste event, brings the text instead.)
+        if (this.clipboard.canRead) {
+          event.preventDefault()
+        }
+        this.afterPaste(this.clipboard.beforePaste(), () => this.connection.send(message))
+        return
+      }
+      event.preventDefault()
+      if (pressed) {
+        void this.clipboard.retryPending()
+      }
+      this.afterPaste(undefined, () => this.connection.send(message))
     }
+    document.addEventListener('paste', (event) => {
+      this.clipboard.onPasteEvent(event.clipboardData?.getData('text/plain'))
+    })
+    window.addEventListener('focus', () => void this.clipboard.retryPending())
     canvas.addEventListener('keydown', (event) => key(event, true))
     canvas.addEventListener('keyup', (event) => key(event, false))
     canvas.addEventListener('focus', () => this.connection.send({ type: 'focus', focused: true }))
@@ -1282,6 +1390,21 @@ export class Desktop {
         this.connection.send({ type: 'focus', focused: false })
       } else if (document.activeElement === canvas) {
         this.connection.send({ type: 'focus', focused: true })
+      }
+    })
+  }
+
+  /** Sends in order: after a paste's clipboard transfer, and after the key events queued behind it. */
+  private afterPaste(wait: Promise<void> | undefined, send: () => void) {
+    if (wait === undefined && this.keyChain === undefined) {
+      send()
+      return
+    }
+    const next = (wait ? (this.keyChain ?? Promise.resolve()).then(() => wait) : this.keyChain!).then(send)
+    this.keyChain = next
+    void next.then(() => {
+      if (this.keyChain === next) {
+        this.keyChain = undefined
       }
     })
   }

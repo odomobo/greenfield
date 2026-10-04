@@ -27,6 +27,9 @@ class FakeCore {
   readonly outputSizes: [number, number][] = []
   readonly positions: [number, number, number][] = []
   readonly keyboardConfigs: unknown[] = []
+  readonly clipboard: string[] = []
+  /** startFileDrag, fileDragAccepted, dropFileDrag, cancelFileDrag and provideFiles calls */
+  readonly fileDrag: string[] = []
   readonly toplevels = new Map<number, Toplevel>()
   readonly children = new Map<number, [number, number, number][]>()
 
@@ -88,6 +91,23 @@ class FakeCore {
       this.frameDone.push(sid)
     },
     readPixels: () => undefined,
+    setClipboardText: (text) => {
+      this.clipboard.push(text)
+    },
+    startFileDrag: (sid) => {
+      this.fileDrag.push(`start ${sid}`)
+      return true
+    },
+    fileDragAccepted: () => true,
+    dropFileDrag: () => {
+      this.fileDrag.push('drop')
+    },
+    cancelFileDrag: () => {
+      this.fileDrag.push('cancel')
+    },
+    provideFiles: (list) => {
+      this.fileDrag.push(`provide ${JSON.stringify(list)}`)
+    },
     createFrameEncoder: () => ({}),
     destroyFrameEncoder: () => undefined,
     requestKeyUnit: () => undefined,
@@ -562,4 +582,64 @@ test('a server-initiated change is reported without touching the sequence number
   await flush()
   const [window] = windowsOf(lastScene())
   assert.deepEqual([window.seq, window.maximized, window.x, window.y], [1, true, -10, -5])
+})
+
+test('an app clipboard text goes to the viewer; viewer text becomes the selection', () => {
+  core.onEvent('clipboard-text', 'from the app')
+  assert.deepEqual(sent.filter((message) => message.type === 'clipboard'), [
+    { type: 'clipboard', text: 'from the app' },
+  ])
+  compositor.handleMessage({ type: 'clipboard', text: 'from the browser' })
+  assert.deepEqual(core.clipboard, ['from the browser'])
+  // the same text again, or the text the app just set, changes nothing
+  compositor.handleMessage({ type: 'clipboard', text: 'from the browser' })
+  core.onEvent('clipboard-text', 'again')
+  compositor.handleMessage({ type: 'clipboard', text: 'again' })
+  assert.deepEqual(core.clipboard, ['from the browser'])
+  // not text, or too much of it
+  compositor.handleMessage({ type: 'clipboard', text: 5 })
+  compositor.handleMessage({ type: 'clipboard', text: 'x'.repeat(5 * 1024 * 1024) })
+  assert.deepEqual(core.clipboard, ['from the browser'])
+})
+
+test('a drag of a remote app tells the viewer, with its icon and where the icon sits', async () => {
+  core.newWindow(1)
+  core.newWindow(2)
+  const drags = () => sent.filter((message) => message.type === 'drag')
+  core.onEvent('drag-start', 2)
+  assert.deepEqual(drags(), [{ type: 'drag', active: true, icon: { surface: '1/2', x: 0, y: 0 } }])
+  // the icon's surface offset changed
+  core.onEvent('drag-icon', 2, -4, -6)
+  assert.deepEqual(drags()[1], { type: 'drag', active: true, icon: { surface: '1/2', x: -4, y: -6 } })
+  // a viewer that attaches in the middle of the drag hears about it
+  const late: ControlMessage[] = []
+  compositor.attach((message) => late.push(message))
+  assert.deepEqual(late.filter((message) => message.type === 'drag'), [drags()[1]])
+  core.onEvent('drag-icon', 0, 0, 0)
+  core.onEvent('drag-end')
+  const lateDrags = () => late.filter((message) => message.type === 'drag')
+  assert.equal(lateDrags()[lateDrags().length - 1].active, false)
+  assert.equal(lateDrags()[lateDrags().length - 1].icon, undefined)
+  // a drag without an icon
+  core.onEvent('drag-start', 0)
+  assert.deepEqual(lateDrags().slice(-1), [
+    { type: 'drag', active: true, icon: undefined },
+  ])
+})
+
+test('files dragged in start a drag on the surface under the pointer, move it, and cancel it when they leave', () => {
+  core.newWindow(1)
+  const target = (x: number) => ({ surface: '1/1', sx: x, sy: 5, x, y: 5, time: 1 })
+  compositor.handleMessage({ type: 'file-drag', over: true, ...target(10) })
+  compositor.handleMessage({ type: 'file-drag', over: true, ...target(20) })
+  assert.deepEqual(core.fileDrag, ['start 1'])
+  assert.deepEqual(core.motions.slice(-2), [
+    [1, 10, 5],
+    [1, 20, 5],
+  ])
+  compositor.handleMessage({ type: 'file-drag', over: false })
+  assert.deepEqual(core.fileDrag, ['start 1', 'cancel'])
+  // over the desktop there's nothing to drop on
+  compositor.handleMessage({ type: 'file-drag', over: true, surface: null, x: 5, y: 5, time: 1 })
+  assert.deepEqual(core.fileDrag, ['start 1', 'cancel'])
 })

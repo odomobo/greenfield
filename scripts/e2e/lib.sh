@@ -76,10 +76,14 @@ gateway() {
 # Start a gateway in the background and wait until it answers. $1: port, $2: log file, $3...: extra arguments.
 # Sets STARTED_PID. (exec, so the pid is the gateway itself and cleanup can stop it)
 start_gateway() {
+  # the test's own cache directory (file drops land there) would make GStreamer rebuild its plugin registry in every
+  # session, which delays the video encoder by seconds: keep using the user's registry
+  local GST_REGISTRY="${GST_REGISTRY:-${XDG_CACHE_HOME:-$HOME/.cache}/gstreamer-1.0/registry.$(uname -m).bin}"
   local port="$1" log="$2" scheme=https
   shift 2
   [[ " $* " == *" --insecure-plaintext "* ]] && scheme=http
-  (exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" XDG_DATA_HOME="$WORK/data" XDG_CONFIG_HOME="$WORK/config" \
+  (exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" XDG_DATA_HOME="$WORK/data" XDG_CONFIG_HOME="$WORK/config" XDG_CACHE_HOME="$WORK/cache" \
+    GST_REGISTRY="$GST_REGISTRY" \
     node "$REPO/packages/gateway/dist/main.js" --dev-auth --dev-time-scale "$TIME_SCALE" --bind-ip 127.0.0.1 \
     --bind-port "$port" --state-dir "$WORK/state" "$@") >"$log" 2>&1 &
   STARTED_PID=$!

@@ -61,6 +61,8 @@ const commands = {
     if (browser) await browser.close().catch(() => {})
     browser = await launch()
     context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } })
+    // the clipboard tests read and write the page's clipboard (the browser would ask the user otherwise)
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'])
     pages = []
     dialog = undefined
     adopt(await context.newPage())
