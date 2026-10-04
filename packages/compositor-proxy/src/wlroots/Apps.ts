@@ -18,6 +18,8 @@ type App = {
   /** connected on its own rather than launched by us: forgotten once its last Wayland connection closes */
   external: boolean
   clients: Set<number>
+  /** processes of clients that connected from inside the app (started from its terminal): ended with it */
+  descendants: Map<number, number>
 }
 
 /** Reads a process's parent and name; injectable for tests. */
@@ -84,7 +86,7 @@ export class Apps {
           return
         }
         appLogger.info('Child process started.')
-        this.apps.set(pid, { pid, name, external: false, clients: new Set() })
+        this.apps.set(pid, { pid, name, external: false, clients: new Set(), descendants: new Map() })
         child.once('exit', (code, signal) => {
           appLogger.info(
             code !== null ? `Child process exited with code ${code}.` : `Child process ended by signal ${signal}.`,
@@ -104,12 +106,34 @@ export class Apps {
     let app = this.appOf(pid)
     if (app === undefined) {
       // not one of ours: e.g. started from a terminal inside the session (its own process, not the terminal's)
-      app = { pid, name: this.processInfo(pid)?.name ?? 'unknown', external: true, clients: new Set() }
+      app = {
+        pid,
+        name: this.processInfo(pid)?.name ?? 'unknown',
+        external: true,
+        clients: new Set(),
+        descendants: new Map(),
+      }
       this.apps.set(pid, app)
       logger.info(`App ${app.name} (${pid}) connected on its own.`)
     }
     app.clients.add(clientId)
     this.clients.set(clientId, app.pid)
+    if (pid !== app.pid) {
+      app.descendants.set(clientId, pid)
+    }
+  }
+
+  /**
+   * An X11 window was mapped: its client (the X11 app's process, from XRes) counts like a Wayland client. X11 apps
+   * connect to Xwayland, not to us, so this is how an X11 app started from a terminal in the session is known. The
+   * window's sid stands for the connection (as a negative client id: Wayland client ids are positive).
+   */
+  x11WindowMapped(sid: number, pid: number): void {
+    this.clientConnected(-sid, pid)
+  }
+
+  x11WindowGone(sid: number): void {
+    this.clientDisconnected(-sid)
   }
 
   clientDisconnected(clientId: number): void {
@@ -120,6 +144,7 @@ export class Apps {
       return
     }
     app.clients.delete(clientId)
+    app.descendants.delete(clientId)
     if (app.external && app.clients.size === 0) {
       this.apps.delete(app.pid)
     }
@@ -128,9 +153,16 @@ export class Apps {
   /** Ask every app of the session to quit; kill the ones still running a while later (if we're still here). */
   terminate(): void {
     for (const app of this.apps.values()) {
-      signal(app.pid, 'SIGTERM')
+      const pids = new Set([app.pid, ...app.descendants.values()])
+      for (const pid of pids) {
+        signal(pid, 'SIGTERM')
+      }
       // only while it's still ours: once it's gone, its pid may belong to someone else
-      setTimeout(() => this.apps.get(app.pid) === app && signal(app.pid, 'SIGKILL'), KILL_AFTER_MS).unref()
+      setTimeout(() => {
+        if (this.apps.get(app.pid) === app) {
+          pids.forEach((pid) => signal(pid, 'SIGKILL'))
+        }
+      }, KILL_AFTER_MS).unref()
     }
   }
 

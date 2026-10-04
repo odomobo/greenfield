@@ -686,7 +686,9 @@ create(napi_env env, napi_callback_info info) {
     wl_signal_add(&core->compositor->events.new_surface, &core->new_surface);
 
     core->seat = wlr_seat_create(core->display, "seat0");
-    wlr_seat_set_capabilities(core->seat, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
+    wlr_seat_set_capabilities(core->seat, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD |
+                                                    WL_SEAT_CAPABILITY_TOUCH);
+    input_create(core);
     core->request_set_cursor.notify = handle_request_set_cursor;
     wl_signal_add(&core->seat->events.request_set_cursor, &core->request_set_cursor);
     core->request_set_selection.notify = handle_request_set_selection;
@@ -794,6 +796,16 @@ arg_bool(napi_env env, napi_value value) {
     return result;
 }
 
+struct core *
+wlr_core_get(napi_env env) {
+    return core_or_throw(env);
+}
+
+void
+wlr_core_flush(struct core *core) {
+    flush(core);
+}
+
 // setOutputSize(width, height)
 static napi_value
 setOutputSize(napi_env env, napi_callback_info info) {
@@ -819,10 +831,13 @@ pointerMotion(napi_env env, napi_callback_info info) {
     uint32_t time = arg_u32(env, argv[3]);
     if (gsurf == NULL) {
         wlr_seat_pointer_notify_clear_focus(core->seat);
+        input_pointer_focus_changed(core);
     } else {
         if (core->seat->pointer_state.focused_surface != gsurf->surface) {
             wlr_seat_pointer_notify_enter(core->seat, gsurf->surface, sx, sy);
+            input_pointer_focus_changed(core);
         }
+        input_clamp_pointer(core, gsurf->surface, &sx, &sy);
         wlr_seat_pointer_notify_motion(core->seat, time, sx, sy);
     }
     wlr_seat_pointer_notify_frame(core->seat);
@@ -844,16 +859,19 @@ pointerButton(napi_env env, napi_callback_info info) {
     return undefined(env);
 }
 
-// pointerAxis(horizontal, value, discrete, timeMs)
+// pointerAxis(horizontal, value, discrete (v120 units, 0: smooth), timeMs, finger? (touchpad: source finger))
 static napi_value
 pointerAxis(napi_env env, napi_callback_info info) {
-    napi_value argv[4];
+    napi_value argv[5];
     struct core *core = core_or_throw(env);
-    if (core && get_args(env, info, 4, argv)) {
+    size_t argc = 5;
+    if (core && napi_get_cb_info(env, info, &argc, argv, NULL, NULL) == napi_ok && argc >= 4) {
+        bool finger = argc > 4 && arg_bool(env, argv[4]);
         wlr_seat_pointer_notify_axis(core->seat, arg_u32(env, argv[3]),
                                      arg_bool(env, argv[0]) ? WLR_AXIS_ORIENTATION_HORIZONTAL
                                                             : WLR_AXIS_ORIENTATION_VERTICAL,
-                                     arg_double(env, argv[1]), arg_i32(env, argv[2]), WLR_AXIS_SOURCE_WHEEL);
+                                     arg_double(env, argv[1]), arg_i32(env, argv[2]),
+                                     finger ? WLR_AXIS_SOURCE_FINGER : WLR_AXIS_SOURCE_WHEEL);
         wlr_seat_pointer_notify_frame(core->seat);
         flush(core);
     }
@@ -1422,6 +1440,7 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("readPixels", readPixels),
     };
     NAPI_CALL(env, napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc))
+    wlr_core_input_init(env, exports);
     return wlr_core_encoder_init(env, exports);
 }
 

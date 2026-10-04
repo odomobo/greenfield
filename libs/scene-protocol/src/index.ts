@@ -30,7 +30,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 6
+export const PROTOCOL_VERSION = 7
 
 export const enum EnvelopeKind {
   CONTROL = 1,
@@ -104,6 +104,15 @@ export type ServerMessage =
   | { type: 'interactive'; mode: 'resize'; window: string; edges: number }
   /** The client asked to be (un)maximized; the scene follows once it committed. Lets the viewer animate right away. */
   | { type: 'maximize-requested'; window: string; maximized: boolean }
+  /**
+   * An app locked the pointer to a surface (locked: true, confined: false): the viewer requests the browser's pointer
+   * lock and sends `pointer.relative` instead of positions, until it's unlocked (the app let go, the window lost
+   * focus) or the browser ends the lock (then it sends `pointer.unlock`). confined: the pointer is kept in a region
+   * of the surface; the server does it by clamping the viewer's positions, the viewer does nothing.
+   */
+  | { type: 'pointer.lock'; surface: string; locked: boolean; confined: boolean }
+  /** A window's own icon (X11 _NET_WM_ICON, nearest to 48 px) as a PNG data URL, null if it has none (anymore). Resent on attach. */
+  | { type: 'window.icon'; window: string; icon: string | null }
   // desktop shell (packages/gateway/src/shell/service.ts)
   /** installed applications, sorted by name; sent on attach */
   | { type: 'shell.apps'; apps: ShellApp[] }
@@ -172,7 +181,28 @@ export type ViewerMessage =
   | { type: 'output'; width: number; height: number; scale: number }
   | ({ type: 'pointer'; buttons: number; modifiers: Modifiers } & PointerTarget)
   | ({ type: 'button'; button: number; pressed: boolean; buttons: number; modifiers: Modifiers } & PointerTarget)
-  | ({ type: 'axis'; deltaX: number; deltaY: number; deltaMode: number; modifiers: Modifiers } & PointerTarget)
+  /**
+   * wheelX/wheelY: set when a pixel-mode (deltaMode 0) delta is a wheel click rather than touchpad scrolling: the
+   * signed v120 value (120 per click). Line deltas (deltaMode 1) are wheel clicks too.
+   */
+  | ({
+      type: 'axis'
+      deltaX: number
+      deltaY: number
+      deltaMode: number
+      wheelX?: number
+      wheelY?: number
+      modifiers: Modifiers
+    } & PointerTarget)
+  /** Relative pointer motion while the browser's pointer lock is on (see `pointer.lock`), in CSS pixels. */
+  | { type: 'pointer.relative'; dx: number; dy: number; time: number }
+  /** The browser ended the pointer lock (Escape, focus lost): the server deactivates the app's constraint. */
+  | { type: 'pointer.unlock' }
+  /**
+   * A touch point (pointerType 'touch'): id is the pointer event's pointerId. Coordinates are local to the surface the
+   * point went down on (it stays there until it ends); `surface` is that surface's key.
+   */
+  | ({ type: 'touch'; phase: 'down' | 'move' | 'up' | 'cancel'; id: number; modifiers: Modifiers } & PointerTarget)
   /**
    * code is KeyboardEvent.code, the server maps it to an evdev key code and owns the keymap. Keys that repeat
    * (KeyboardEvent.repeat) aren't sent: apps repeat keys themselves.

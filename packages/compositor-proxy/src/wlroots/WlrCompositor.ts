@@ -42,6 +42,11 @@ export interface ClientListener {
   clientConnected(clientId: number, pid: number): void
 
   clientDisconnected(clientId: number): void
+
+  /** An X11 window (by its surface's sid) was mapped; pid: the X11 client's process (0 if unknown). */
+  x11WindowMapped?(sid: number, pid: number): void
+
+  x11WindowGone?(sid: number): void
 }
 
 /** Input regions with more rectangles than this are sent as their bounding box. */
@@ -51,7 +56,11 @@ const MAX_INPUT_RECTS = 64
 const LINUX_BUTTONS: Record<number, number> = { 0: 0x110, 1: 0x112, 2: 0x111, 3: 0x113, 4: 0x114 }
 const DOM_DELTA_LINE = 1
 const DOM_DELTA_PAGE = 2
-const LINE_SCROLL_AMOUNT = 12
+/** Wayland's axis value of one wheel click (what libinput reports), and the v120 value of one click */
+const CLICK_AXIS_VALUE = 15
+const V120_CLICK = 120
+/** a click's DOM delta in lines (Firefox) */
+const LINES_PER_CLICK = 3
 
 /** A pooled GStreamer video encoder that encodes surfaces' current wlroots buffers. */
 class WlrEncoder {
@@ -121,6 +130,8 @@ type Window = {
   y: number
   /** the last window change sequence number from the viewer applied to this window (scene protocol) */
   seq: number
+  /** the app's own icon (X11 _NET_WM_ICON) as a PNG data URL */
+  icon?: string
 }
 
 const inactiveSink: EncodingSink = {
@@ -154,6 +165,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private sceneScheduled = false
   viewerScale = 1
   clientListener?: ClientListener
+  /** the pointer lock or confinement the app has on a surface (pointer-constraints), while it's active */
+  private constraint?: { sid: number; confined: boolean }
 
   constructor(
     config: { h264Encoder: H264Encoder; videoStreams: number },
@@ -279,11 +292,15 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         })
         if (args[1] === true) {
           this.x11.added(args[0])
+          this.clientListener?.x11WindowMapped?.(args[0], Number(args[2]) || 0)
         }
         break
       case 'toplevel-destroy': {
         const window = this.windows.get(args[0])
         this.windows.delete(args[0])
+        if (this.x11.has(args[0])) {
+          this.clientListener?.x11WindowGone?.(args[0])
+        }
         this.x11.removed(args[0])
         this.shownAt.delete(args[0])
         this.stack = this.stack.filter((sid) => sid !== args[0])
@@ -357,6 +374,15 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       case 'x11-geometry':
         this.scheduleScene()
         break
+      case 'toplevel-icon':
+        this.windowIcon(args[0], args[1], args[2], args[3])
+        break
+      case 'pointer-constraint': {
+        const [sid, active, confined] = args as [number, boolean, boolean]
+        this.constraint = active ? { sid, confined } : undefined
+        this.send?.({ type: 'pointer.lock', surface: this.keyOf(sid), locked: active, confined })
+        break
+      }
     }
   }
 
@@ -493,7 +519,47 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       this.stack.push(sid)
     }
     this.wlr.keyboardFocus(this.pageFocused ? sid : 0)
+    this.releaseConstraintIfUnfocused()
     this.scheduleScene()
+  }
+
+  /** The app's pointer lock ends when its window isn't the focused one anymore (or the page lost focus). */
+  private releaseConstraintIfUnfocused() {
+    if (!this.constraint) {
+      return
+    }
+    const focused = this.pageFocused && this.active !== 0
+    if (!focused || !this.wlr.windowSurfaces(this.active).some(([sid]) => sid === this.constraint?.sid)) {
+      this.releaseConstraint()
+    }
+  }
+
+  private releaseConstraint() {
+    if (this.constraint) {
+      // the core answers with pointer-constraint(active = false), which tells the viewer
+      this.wlr.pointerConstraintRelease()
+    }
+  }
+
+  private windowIcon(sid: number, width: number, height: number, rgba: Buffer | null) {
+    const window = this.windows.get(sid)
+    if (window === undefined) {
+      return
+    }
+    const send = (icon: string | null) => {
+      if (this.windows.get(sid) === window) {
+        window.icon = icon ?? undefined
+        this.send?.({ type: 'window.icon', window: this.keyOf(sid), icon })
+      }
+    }
+    if (rgba === null) {
+      send(null)
+      return
+    }
+    void encodePng(rgba, width, height).then(
+      (png) => send(`data:image/png;base64,${png.toString('base64')}`),
+      (error: Error) => logger.error(`Can't encode the icon of window ${sid}: ${error.message}`),
+    )
   }
 
   /** The active window went away: its parent (a dialog closed) or else the topmost window shown gets the focus. */
@@ -547,6 +613,14 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.lastSceneJSON = ''
     this.sendSceneIfChanged()
     send({ type: 'cursor', kind: 'default' })
+    for (const window of this.windows.values()) {
+      if (window.icon) {
+        send({ type: 'window.icon', window: this.keyOf(window.sid), icon: window.icon })
+      }
+    }
+    if (this.constraint) {
+      send({ type: 'pointer.lock', surface: this.keyOf(this.constraint.sid), locked: true, ...this.constraint })
+    }
   }
 
   detach(): void {
@@ -677,6 +751,20 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         this.pointerMotion(message)
         this.pointerAxis(message)
         break
+      case 'pointer.relative':
+        // the pointer is locked in the browser: movement without a position
+        if (this.constraint && !this.constraint.confined) {
+          this.wlr.pointerRelative(Number(message.dx) || 0, Number(message.dy) || 0, time(message))
+        }
+        break
+      case 'pointer.unlock':
+        // the browser ended the lock (Escape, focus lost)
+        this.releaseConstraint()
+        break
+      case 'touch':
+        this.syncModifiers(message, 0)
+        this.touch(message)
+        break
       case 'key': {
         // (a numeric enum maps numbers back to names too, and inherits toString & co.: only own numeric values)
         const value: unknown = Object.prototype.hasOwnProperty.call(EvDevKeyCode, String(message.code))
@@ -697,6 +785,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
           this.wlr.releaseAllKeys()
         }
         this.wlr.keyboardFocus(this.pageFocused ? this.active : 0)
+        this.releaseConstraintIfUnfocused()
         this.scheduleScene()
         break
       case 'window.move': {
@@ -822,29 +911,60 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   }
 
   private pointerAxis(message: ControlMessage) {
-    const mode = Number(message.deltaMode) || 0
     const surface = this.surfaces.get(this.sids.get(String(message.surface)) ?? 0)
-    const scale = (delta: number, page: number) =>
-      mode === DOM_DELTA_LINE ? delta * LINE_SCROLL_AMOUNT : mode === DOM_DELTA_PAGE ? delta * page : delta / 3
-    const deltaX = Number(message.deltaX) || 0
-    const deltaY = Number(message.deltaY) || 0
-    if (deltaX) {
-      this.wlr.pointerAxis(
-        true,
-        scale(deltaX, surface?.width ?? 0),
-        mode === DOM_DELTA_LINE ? Math.sign(deltaX) : 0,
-        time(message),
-      )
-    }
-    if (deltaY) {
-      this.wlr.pointerAxis(
-        false,
-        scale(deltaY, surface?.height ?? 0),
-        mode === DOM_DELTA_LINE ? Math.sign(deltaY) : 0,
-        time(message),
-      )
+    for (const event of axisEvents(message, surface?.width ?? 0, surface?.height ?? 0)) {
+      this.wlr.pointerAxis(event.horizontal, event.value, event.discrete, time(message), event.finger)
     }
   }
+
+  /** A touch point (pointerType 'touch'), by the surface it started on: phase down, move, up or cancel. */
+  private touch(message: ControlMessage) {
+    const phases: Record<string, number> = { down: 0, move: 1, up: 2, cancel: 3 }
+    const phase = phases[String(message.phase)]
+    if (phase === undefined) {
+      return
+    }
+    const sid = typeof message.surface === 'string' ? (this.sids.get(message.surface) ?? 0) : 0
+    this.wlr.touch(phase, sid, Number(message.id) || 0, Number(message.sx) || 0, Number(message.sy) || 0, time(message))
+  }
+}
+
+/**
+ * wl_pointer.axis events for a viewer 'axis' message. A wheel click is 15 axis units and a v120 value of 120 (what
+ * wl_pointer.axis_value120 carries, wlroots 0.17's `value_discrete`), so apps scroll by whole clicks; a touchpad
+ * (finger source) scrolls smoothly in pixels with no discrete value. The viewer says which it is: DOM line deltas are
+ * wheel clicks (Firefox: 3 lines each), and `wheelX`/`wheelY` (v120 values) mark pixel-mode clicks (Chromium).
+ */
+export function axisEvents(
+  message: ControlMessage,
+  width: number,
+  height: number,
+): { horizontal: boolean; value: number; discrete: number; finger: boolean }[] {
+  const mode = Number(message.deltaMode) || 0
+  const events = []
+  for (const horizontal of [true, false]) {
+    const delta = Number(horizontal ? message.deltaX : message.deltaY) || 0
+    if (delta === 0) {
+      continue
+    }
+    const wheel = Number(horizontal ? message.wheelX : message.wheelY) || 0
+    if (mode === DOM_DELTA_LINE) {
+      const clicks = delta / LINES_PER_CLICK
+      events.push({ horizontal, value: clicks * CLICK_AXIS_VALUE, discrete: Math.round(clicks * V120_CLICK), finger: false })
+    } else if (mode === DOM_DELTA_PAGE) {
+      events.push({
+        horizontal,
+        value: delta * (horizontal ? width : height),
+        discrete: Math.round(delta * V120_CLICK),
+        finger: false,
+      })
+    } else if (wheel !== 0) {
+      events.push({ horizontal, value: (wheel / V120_CLICK) * CLICK_AXIS_VALUE, discrete: Math.round(wheel), finger: false })
+    } else {
+      events.push({ horizontal, value: delta / 3, discrete: 0, finger: true })
+    }
+  }
+  return events
 }
 
 /** The scene protocol's Modifiers as the native core's bits, undefined if they aren't there. */

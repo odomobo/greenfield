@@ -17,6 +17,7 @@
 
 struct x11;
 struct xwin;
+struct input;
 
 struct core {
     napi_env env;
@@ -41,6 +42,8 @@ struct core {
     const char *socket;
     /* XWayland, NULL if it's disabled or couldn't be set up */
     struct x11 *x11;
+    /* pointer constraints, relative motion, touch (wlr_core_input.c) */
+    struct input *input;
 
     struct wl_list surfaces; // gsurf.link
     /* > 0 while JavaScript handles an event (and may call back in) */
@@ -132,5 +135,16 @@ WLR_CORE_INTERNAL bool x11_close(struct gsurf *gsurf);
 WLR_CORE_INTERNAL bool x11_toplevel_state(struct gsurf *gsurf, struct toplevel_state *state);
 WLR_CORE_INTERNAL bool x11_window_surfaces(struct gsurf *gsurf, wlr_surface_iterator_func_t iterator, void *data);
 WLR_CORE_INTERNAL void x11_set_position(struct gsurf *gsurf, int32_t x, int32_t y);
+
+/* Input beyond pointer and keyboard (wlr_core_input.c) */
+WLR_CORE_INTERNAL void input_create(struct core *core);
+/* the seat's pointer focus changed: constraints follow it */
+WLR_CORE_INTERNAL void input_pointer_focus_changed(struct core *core);
+/* confined pointer: keeps motion inside the constraint's region */
+WLR_CORE_INTERNAL void input_clamp_pointer(struct core *core, struct wlr_surface *surface, double *sx, double *sy);
+WLR_CORE_INTERNAL napi_value wlr_core_input_init(napi_env env, napi_value exports);
+/* the core, or NULL (throws) if it isn't created; flush what wlroots queued (not while JavaScript handles an event) */
+WLR_CORE_INTERNAL struct core *wlr_core_get(napi_env env);
+WLR_CORE_INTERNAL void wlr_core_flush(struct core *core);
 
 #endif //GFLD_WLR_CORE_INTERNAL_H

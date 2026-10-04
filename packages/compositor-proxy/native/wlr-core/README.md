@@ -182,6 +182,34 @@ Wave 3 D (polish):
   client with a token may do it: no focus-stealing prevention), xdg-output (one output at the origin, an
   `wlr_output_layout` that exists only for it).
 
+Wave 3 H (input and X11 gaps; `src/wlr_core_input.c`):
+
+- **Pointer lock**: `pointer-constraints-v1` and `relative-pointer-v1`. A constraint is activated while its surface has
+  the pointer focus (`pointer-constraint(sid, active, confined)` event, `pointer.lock` to the viewer, which requests the
+  browser's lock, retrying on the next click if refused, and sends `pointer.relative`; `pointerRelative` ->
+  `wlr_relative_pointer_manager_v1_send_relative_motion`). It ends when the app destroys it, the pointer focus or the
+  keyboard focus leaves (`WlrCompositor.releaseConstraintIfUnfocused`), or the browser ends the lock (Escape:
+  `pointer.unlock` -> `pointerConstraintRelease`, which doesn't re-activate it until the pointer has left the surface).
+  Confinement: no browser lock; the core clamps motion over the surface to the region's bounding box, and can't keep the
+  pointer from leaving the surface. Not run in a browser here (only unit tests of the message flow).
+- **Scrolling**: wlroots 0.17's `value_discrete` is the v120 value (120 per click). A click is 15 axis units (libinput's),
+  the viewer marks Chromium's 100 px pixel deltas as clicks (`wheelX`/`wheelY`), line deltas (Firefox) are clicks of 3
+  lines; the rest (touchpads) is smooth, source finger, no discrete value (`axisEvents` in WlrCompositor.ts). The old
+  code sent discrete 1, which clients got as a twelfth of a click. foot binds `wl_pointer` below version 8, so it sees
+  `axis_discrete 1`, not `axis_value120` (wlroots converts for old clients): the e2e test accepts both.
+- **Touch**: the seat has the touch capability; the viewer sends pointerType 'touch' events as `touch` messages (down, move,
+  up, cancel; a point stays on the surface it went down on), the core calls `wlr_seat_touch_notify_*`. A touch counts as a
+  pressed button for window drags the app starts. The canvas has `touch-action: none`. Pen events remain pointer events (no
+  tablet protocol). Unit tested only.
+- **X11 pid**: wlroots' xwm reads the client's pid with XRes (`xsurface->pid`); `toplevel-new` carries it and `Apps` treats an
+  X11 window like a Wayland connection (client id -sid). Processes of clients that connect from inside a launched app
+  (started from its terminal) are also SIGTERMed with the session, not only the launched app's process.
+- **X11 icons**: `_NET_WM_ICON` is read with `xcb_get_property` on xwm's connection (wlroots' internal `xwayland/xwm.h`
+  is on the include path) when the window is mapped and on PropertyNotify (`user_event_handler`). The size nearest 48 px
+  (the smallest not smaller) goes to JavaScript as RGBA (`toplevel-icon`), is PNG encoded and sent as `window.icon`
+  (resent on attach); the taskbar shows it when the window's app has no desktop entry icon (`GroupIcon`). xclock, xeyes and
+  xev set no `_NET_WM_ICON`: the e2e test sets one with xprop (which takes at most 64 values).
+
 ## Not done yet (later waves of the migration)
 
 The browser clipboard bridge (clipboard between Wayland apps already works: data device + primary selection; X11 <->
@@ -189,8 +217,7 @@ Wayland sync is wlroots', set up but not tested: no xclip or wl-clipboard here),
 scale, GPU (dmabuf) buffers. Server-owned window state with sequence numbers (wave 2 A).
 
 X11 specifically, not done: X11 apps without their own decorations (xev, xterm) can be moved only with the window menu's
-Move (taskbar button or preview card), until the viewer has title bars of its own (ROADMAP.md, decorations); X11 apps started from a terminal
-inside the session aren't tracked by `Apps` (they don't connect to Wayland; `_NET_WM_PID` would do); minimizing isn't
+Move (taskbar button or preview card), until the viewer has title bars of its own (ROADMAP.md, decorations); minimizing isn't
 told to X11 apps; activation requests (`_NET_ACTIVE_WINDOW`) and positions apps ask for (USPosition) are ignored, the
 viewer places windows; unmanaged window types that aren't override-redirect (some toolkits' menus) are ordinary
 windows.

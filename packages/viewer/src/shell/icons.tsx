@@ -78,3 +78,28 @@ export function AppIcon({ name, size }: { name: string | undefined; size: number
     </span>
   )
 }
+
+/**
+ * The icon of a taskbar group: its app's (desktop entry), else the window's own icon when it has one (X11 apps
+ * without a .desktop file set _NET_WM_ICON), else the fallback.
+ */
+export function GroupIcon({
+  app,
+  windows,
+  size,
+}: {
+  app: { icon?: string } | undefined
+  windows: { icon?: string }[]
+  size: number
+}) {
+  const own = windows.find((window) => window.icon)?.icon
+  const entryIcon = useIconUrl(app?.icon)
+  if (typeof entryIcon !== 'string' && own !== undefined) {
+    return (
+      <span className="app-icon" style={{ width: size, height: size }}>
+        <img src={own} alt="" width={size} height={size} draggable={false} />
+      </span>
+    )
+  }
+  return <AppIcon name={app?.icon} size={size} />
+}
