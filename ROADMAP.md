@@ -87,7 +87,8 @@ A stray press of the browser's back button (e.g. a mouse side button) must not t
   - For maximize and restore-from-maximized, the new size request is sent immediately and the animation runs
     concurrently, so the app has usually redrawn by the time it ends. A new frame arriving mid-animation is shown scaled
     to the animated shape.
-- Apps draw their own decorations (client-side decorations). Browser-drawn decorations via `xdg-decoration` come later.
+- Apps draw their own decorations (client-side decorations). Browser-drawn decorations via `xdg-decoration` come later
+  (Core item 4).
 - **Input regions**: clicks outside a surface's input region (`wl_surface.set_input_region`, e.g. most of a client-side
   shadow) go to whatever is underneath; the pointer and cursor follow the same hit test.
 - **Child windows** (dialogs, `xdg_toplevel.set_parent`) are separate windows in the scene with a parent. They are
@@ -296,8 +297,10 @@ Other rules:
        `xwayland_sockets.c` replaces it at link time (keep it in sync with wlroots' `xwayland/sockets.h` on upgrades).
      - Wave 2 B: X11 windows have absolute positions; `WlrCompositor` tells them where the scene shows them
        (`setPosition`, via `X11.ts`). Wave 2 A should keep calling it wherever the scene's positions are decided.
-     - Wave 2 B: X11 apps without their own decorations (xev, xterm) can't be moved by the user until the viewer has
-       title bars of its own (Lower priority, decorations) or a modifier-drag.
+     - Wave 2 B: X11 apps without their own decorations (xev, xterm, xclock) can't be moved by the user until the
+       viewer has title bars of its own (Core item 4) or a modifier-drag (wave 3 D). Most classic X11 apps (x11-apps)
+       ship no `.desktop` file, so they aren't in the Apps menu (as on any desktop); a user's own `.desktop` file in
+       `~/.local/share/applications` adds them.
    - **Work plan: three waves.** Within a wave, tasks run in parallel, each on its own branch and worktree; a wave
      starts once the previous one is merged and tested. At most about three branches at once: wave 2 and 3 tasks all
      add to `wlr_core.c` and `WlrCompositor.ts`, so more means painful merges (and each branch needs hands-on testing).
@@ -311,9 +314,10 @@ Other rules:
      | 2 | **Done.** **A. Window-state sync**: the server owns window state; sequence-number reconciliation (above) in the viewer, the scene protocol and `WlrCompositor`. Scene protocol v5: `seq` on every `window.*` change but `window.close`, echoed per scene window (a change that changes nothing is still echoed). The viewer side is `packages/viewer/src/window-sync.ts` (unit tested); the e2e test drags a window with every scene held back 300 ms (`__viewerTest.delayScenes`) and checks it never jumps back. (The legacy fallback was dropped after C.) | Fork (tricky: ordering and races) | 300-500 |
      | 2 | **Done.** **B. XWayland**: `wlr_xwayland` with its window manager; X11 windows (including override-redirect menus and tooltips) become scene windows. | Fork (tricky: X11 quirks) | 400-700 (about 700 in C and TypeScript, plus tests) |
      | 2 | **C. Done.** **Delete the old stack**: the libwayland fork and its addons, `packages/compositor`, `@gfld/compositor-wasm`, `@gfld/xtsb`, `@gfld/common`, the compositor generators and protocol libs, `protocol/*.xml`, the proxy's interceptors, `legacy.ts`, `session-process-legacy.ts` and `GFLD_LEGACY_COMPOSITOR`; the encoder's EGL/dmabuf helpers moved into `native/wlr-core/src`. About 90k lines deleted. | Sonnet | ~0 |
-     | 3 | **D. Polish**: fullscreen, popups kept on screen, key repeat, keyboard layout from the locale, Caps/Num Lock sync; cheap globals (viewporter, presentation time, xdg-activation, single-pixel buffer, idle inhibit). | Sonnet | 500-800 |
+     | 3 | **D. Polish**: fullscreen, popups kept on screen, key repeat, keyboard layout from the locale, Caps/Num Lock sync; cheap globals (viewporter, presentation time, xdg-activation, single-pixel buffer, idle inhibit, xdg-output). Stopgap until our own title bars (Core item 4): Alt+drag moves any window, Alt+right-drag resizes it (some host desktops, e.g. KDE and Xfce, take Alt+drag for the browser window itself, so make the modifier configurable). | Sonnet | 500-800 |
      | 3 | **E. Clipboard with the browser, then drag and drop** (in that order, one agent: drag and drop reuses the clipboard's data plumbing). Clipboard: a server-side data source for text from the browser (on Ctrl+V), the selection read through a pipe and sent to the viewer, primary selection the same way; X11/Wayland sync comes with `wlr_xwayland`. Drag and drop: between remote apps via wlroots' seat drags with the drag icon shown by the viewer, then local files into remote apps (uploaded, offered as `text/uri-list`). | Sonnet | 1.1-1.6k |
      | 3 | **F. HiDPI, server side**: output scale and `wp_fractional_scale_v1` from the viewer's reported scale. | Sonnet | 100-200 |
+     | 3 | **H. Input and X11 gaps**: browser shortcuts reach the app (Ctrl+W/T/N, Alt+Tab, ...) through the browser's Keyboard Lock API in fullscreen, with a hint on how to enter it; pointer lock and relative motion (`pointer-constraints-v1`, `relative-pointer-v1`) from the browser's Pointer Lock API, for games and 3D apps; taskbar icons for X11 windows from `_NET_WM_ICON` when there's no `.desktop` icon; X11 apps started from a terminal in the session are closed at logout like Wayland ones (wave 2 B gap); touch and pen input from pointer events if cheap (otherwise its own item); check that the viewer sends high-resolution scrolling (`axis_value120`). | Sonnet | 400-700 |
      | any time from 2 | **G. GPU buffers**: linux-dmabuf with the GLES2 renderer, dmabuf readback for patches and import for video, ported from `native/encoding/src/pixels.c`. Can't be verified here; may wait for hardware. | Sonnet | 200-400 |
 
      Wave 1 alone gives today's features on wlroots. In total about 3.5-5.5k lines added and 60k+ deleted (much of
@@ -336,15 +340,21 @@ Other rules:
    - Live resize stretching becomes a CSS scale of the window's canvas.
    - The end-to-end test's pixel checks need a new way to read window content.
    - Do this before browser-drawn decorations and shadows, which depend on it.
+4. **Browser-drawn window decorations (our own title bars)**, right after Core item 3 (moved up from lower priority:
+   classic X11 apps such as xclock and xterm draw no title bar, as X11 window managers draw them, so today they can't
+   be moved, only Alt+dragged; Qt/KDE apps prefer them too). With one DOM element per window, a frame is HTML/CSS
+   around the window's canvas: title, minimize, maximize and close buttons, move by dragging the title bar, resize
+   from the frame's edges. Offered through `xdg-decoration` (wlroots provides it) to Wayland apps that ask for
+   server-side decorations, and drawn for X11 windows the app doesn't decorate itself (`_MOTIF_WM_HINTS`); GTK apps
+   keep drawing their own. The window geometry the server reports grows by the frame, and the frame follows the
+   window's activated, maximized and minimized state.
 
 ### First extra feature
 
-4. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle.
+5. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle.
 
 ### Lower priority
 
-5. Browser-drawn window decorations via `xdg-decoration` (GTK apps will still draw their own); wlroots provides the
-   protocol.
 6. **Don't send what can't be seen: minimized, fully covered and partially covered windows**, all with one algorithm,
    computed on the server. It already has every window's position, stacking order, minimized state and opaque region
    (`wl_surface.set_opaque_region`; a translucent window on top doesn't hide what's below it).
@@ -358,10 +368,13 @@ Other rules:
    - Taskbar hover previews may show a slightly stale image of a hidden window (accepted).
    - The viewer's own state can briefly run ahead of the server's (a drag, an animation); at worst a region updates a
      few milliseconds late.
-7. Hardware video decoding in the browser.
-8. Downloadable/user-written CSS themes.
-9. WebTransport, only if the single WebSocket ever becomes a bottleneck.
-10. **Browser-drawn window shadows** (very low priority, nice-to-have). Only draw a shadow when we know the window is a
+7. **Text input methods (IME)** for Chinese, Japanese, Korean and other composed input, and dead keys and compose:
+   the browser's composition events (on a hidden input element) mapped to `text-input-v3` (wlroots provides it), so
+   the app shows the pre-edit text and receives the committed text.
+8. Hardware video decoding in the browser.
+9. Downloadable/user-written CSS themes.
+10. WebTransport, only if the single WebSocket ever becomes a bottleneck.
+11. **Browser-drawn window shadows** (very low priority, nice-to-have). Only draw a shadow when we know the window is a
     plain opaque rectangle: its `wl_surface.set_opaque_region` covers the whole surface. Such an app draws no shadow
     margin and no transparent corners of its own, so there is nothing to crop or replace.
     - Qualifying windows get a themeable shadow from us: a CSS `box-shadow` on the window's element (see Core item 3).
@@ -377,11 +390,11 @@ Other rules:
     - Verify which toolkits (GTK, Qt, Chromium) declare their opaque region reliably; ones that don't simply never
       get our shadow.
 
-11. **Viewer improvements.** Details to come from the user when this item is reached; ask before starting.
+12. **Viewer improvements.** Details to come from the user when this item is reached; ask before starting.
 
 ### Last
 
-12. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
+13. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
     is manual (see `packages/gateway` docs).
 
 ### Needs verification on other hardware
