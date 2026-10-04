@@ -1,9 +1,7 @@
+// The session's server side on wlroots. Nothing here loads the libwayland fork (that's legacy.ts).
 export { createLogger } from './Logger.js'
-export { initSurfaceBufferEncoding } from './SurfaceBufferEncoding.js'
 export { createSessionController, SessionController } from './SessionController.js'
-export { createSession, Session } from './Session.js'
-export { launchApplication, NativeAppContext } from './NativeAppContext.js'
-export { Configschema } from './config.js'
-export { startServerCompositor } from './InProcessCompositor.js'
+export { startWlrootsCompositor, WlrCompositor } from './wlroots/WlrCompositor.js'
+export { Apps } from './wlroots/Apps.js'
 export type { ShellEndpoint, ViewerHost } from './viewer/ViewerHost.js'
 export type { ControlMessage } from './viewer/ViewerTransport.js'

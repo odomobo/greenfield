@@ -1,14 +1,15 @@
 /**
- * The wlroots prototype core (native/wlr-core). Surfaces are identified by a session-unique sid; a toplevel by the sid
- * of its surface. Only built with `yarn build:wlroots`, and never loaded in a process that loaded the libwayland
- * fork's addons.
+ * The wlroots core (native/wlr-core). Surfaces are identified by a session-unique sid; a toplevel by the sid of its
+ * surface. Never loaded in a process that loaded the libwayland fork's addons.
  */
 declare namespace wlrCore {
   export type FrameEncoder = unknown
 
   /**
    * Events, called synchronously from inside the calls below (wlroots runs on this thread):
-   * - surface-new(sid, key)
+   * - client-new(clientId, pid), client-destroy(clientId): Wayland connections (pid from the socket's credentials, 0 if
+   *   unknown)
+   * - surface-new(sid, key): key is "clientId/surface object id"
    * - surface-commit(sid, hasBuffer, newBuffer, bufferWidth, bufferHeight, bufferDamage, width, height, input,
    *   hasFrameCallbacks): damage is in buffer coordinates, input in surface coordinates (both flat x, y, w, h)
    * - surface-map(sid), surface-unmap(sid), surface-destroy(sid)

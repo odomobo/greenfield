@@ -1,26 +1,39 @@
-# wlroots prototype (done; the migration is ROADMAP.md Core item 1)
+# wlroots core
 
 A session's Wayland side on wlroots 0.17.4 instead of the libwayland fork and the TypeScript protocol implementation.
-Verdict: **go**. foot and gtk4-demo run on it unchanged in the existing viewer, through the existing scene protocol,
-transport and encoders.
+Started as a prototype (verdict: go); since wave 1 of the migration (ROADMAP.md, Core item 1) it's the default: every
+session runs on it, with the desktop shell. The old stack is still selectable with `GFLD_LEGACY_COMPOSITOR=1` in the
+gateway's environment until wave 2 deletes it.
 
 ## Layout
 
-- `native/wlroots`: the wlroots submodule, pinned to the 0.17.4 tag. CMake builds it with meson as a static library
-  (headless backend only, no session, no XWayland yet) against Ubuntu 24.04's packages. Opt in with
-  `yarn workspace @gfld/compositor-proxy build:wlroots` (it sets `-DGFLD_WLROOTS=ON` in the CMake cache).
+- `native/wlroots`: the wlroots submodule, pinned to the 0.17.4 tag (`git submodule update --init`). CMake builds it
+  with meson as a static library (headless backend only, no session, no XWayland yet) against Ubuntu 24.04's packages,
+  as part of the normal build. It's only built when `build/wlroots/libwlroots.a` is missing: delete `build/wlroots`
+  after changing the submodule.
 - `native/wlr-core/src/wlr_core.c`: the wiring, as a Node addon (`wlr-core-addon.node`). wlroots implements the
-  protocols; the addon reports surfaces, commits (buffer damage, input region), toplevels and their requests, and
-  cursors to JavaScript, and takes input, configures and frame callbacks from it.
+  protocols; the addon reports clients (with their pid), surfaces, commits (buffer damage, input region), toplevels and
+  their requests, and cursors to JavaScript, and takes input, configures and frame callbacks from it.
 - `native/wlr-core/src/wlr_core_encoder.c`: the existing GStreamer encoder (`native/encoding`), compiled into the same
   addon against the system libwayland (`shim/westfield.h`), fed from wlroots buffers.
 - `src/wlroots/WlrCompositor.ts`: the policy, like the TypeScript compositor's `server/scene.ts`: window positions,
   stacking, activation and keyboard focus, minimize, maximize, child windows centered on their parent, frame pacing,
   and one `SurfaceEncoder` per surface. It is both the `WindowSceneEndpoint` and the `SurfaceContent` of a `ViewerHost`.
-- `packages/gateway/src/session-process-wlroots.ts`: a session process on it; the gateway starts it instead of
-  `session-process.js` when run with `GFLD_WLROOTS=1`. `GFLD_WLR_TRACE=1` logs events and viewer messages.
+  The native core is passed in (`WlrNative`), so `src/wlroots/test/` tests the policy against a fake core.
+- `src/wlroots/Apps.ts`: the session's app processes: launched by the desktop shell (with the session's
+  `WAYLAND_DISPLAY`), or connected on their own (from the client's credentials; a client of a launched app's child
+  process belongs to that app). Ending the session sends them SIGTERM.
+- `src/index.ts` exports only this stack; the old one is `src/legacy.ts` (it loads the fork, never import both).
+- `packages/gateway/src/session-process.ts`: the session process: `WlrCompositor`, `Apps`, the desktop shell
+  (`shell/service.ts`), the session environment (`session-environment.ts`, shared with `session-process-legacy.ts`).
+  `GFLD_WLR_TRACE=1` logs events and viewer messages; `GFLD_WLR_DEBUG=1` turns on wlroots' own debug log.
 
 ## What was verified (headless Chrome through the gateway, `--dev-auth`)
+
+Wave 1: `scripts/test-gateway.sh` passes on it unchanged (Apps menu, launching from it, pinning, taskbar minimize and
+restore, maximize, notifications, typing, mouse back button as BTN_SIDE, reattach with identical pixels, viewer-side
+resizing, logging out ends the apps), plus a check that the session really runs on wlroots. Unit tests for
+`WlrCompositor` (fake core) and `Apps`. The prototype, by hand:
 
 - foot: maps, placed by the viewer, typing `ls -l /` + Enter shows the output; click to focus; client-side decorations
   (subsurfaces) shown and clickable; cursors via cursor-shape-v1 (`text`, `default`, `e-resize`); resize by dragging
@@ -58,36 +71,26 @@ transport and encoders.
 - **Encoder**: `frame_buffer.user_data` belongs to the encoder (its reference count); the locked buffer travels
   alongside it.
 
-## Not part of the prototype (all in the migration)
+- **The session process must not have `WAYLAND_DISPLAY` set** to its own display (wave 1): GStreamer's GL (in the
+  encoder) then connects to it as a Wayland client of its own session. Apps get it when launched (`Apps`); the
+  session's environment doesn't.
+- **Activation when a window goes away** (wave 1): the prototype left nothing focused when the active window closed.
+  Now a closed dialog gives the focus back to its parent, otherwise the topmost shown (not minimized) window gets it.
 
-Desktop shell (Apps menu, launching, notifications), XWayland, the browser clipboard bridge (clipboard between Wayland
-apps already works: data device + primary selection), drag and drop, fullscreen, popup unconstraining to the output,
-Caps/Num Lock sync, keyboard layout from the session's locale, telling apps the output scale, GPU (dmabuf) buffers.
+## Not done yet (later waves of the migration)
 
-## Migration estimate (ROADMAP.md Core item 1)
+XWayland, the browser clipboard bridge (clipboard between Wayland apps already works: data device + primary selection),
+drag and drop, fullscreen, popup unconstraining to the output, Caps/Num Lock sync, keyboard layout from the session's
+locale, telling apps the output scale, GPU (dmabuf) buffers. Server-owned window state with sequence numbers (wave 2 A).
 
-1. **Swap the core** (about 1 week): make the wlroots build the default (CI gets meson); session-process on
-   `WlrCompositor`, with the desktop shell (app launching only needs `WAYLAND_DISPLAY`; client PIDs from
-   `wl_client_get_credentials`); fullscreen, popup unconstraining, key repeat, keyboard layout and lock keys; the
-   cheap wlroots globals (viewporter, presentation time, xdg-activation, single-pixel buffer, idle inhibit); unit tests
-   for `WlrCompositor` with the addon mocked; the e2e test on it. Then delete the libwayland fork, the westfield and
-   wayland-server addons, the protocol interceptors and generators, `packages/compositor`, `@gfld/compositor-wasm` and
-   `@gfld/xtsb`.
-2. **HiDPI, server side** (1 day): output scale and `wp_fractional_scale_v1` from the viewer's reported scale.
-3. **XWayland** (2-3 days): `wlr_xwayland` with its window manager; map X11 windows (including override-redirect menus
-   and tooltips) to scene windows. Needs the xcb dev packages and Xwayland (below).
-4. **Clipboard with the browser** (about 2 days): a server-side `wlr_data_source` for text from the browser (on Ctrl+V,
-   which is when the viewer may read the clipboard), and reading the selection through a pipe to send it to the
-   viewer; primary selection the same way. X11 <-> Wayland sync comes with wlr_xwayland.
-5. **Drag and drop** (2-3 days): between remote apps through wlroots' seat drags, with the drag icon shown by the
-   viewer; then local files into remote apps (upload to the session, offered as `text/uri-list`).
-6. **GPU buffers** (1-2 days, needs hardware to verify): linux-dmabuf with the GLES2 renderer, dmabuf readback for
-   patches and dmabuf import for video, ported from `native/encoding/src/pixels.c` and the fork path.
+## The migration
 
-About 2-3 weeks of agent work in total; step 1 alone gives today's features on wlroots.
+ROADMAP.md, Core item 1, "Work plan: three waves". Wave 1 (this stack as the default, with the desktop shell, CI and
+tests) is done.
 
 ## Packages
 
-Ubuntu 24.04, beyond what the build needs today: `meson` (installed here). XWayland (step 3) needs `xwayland`,
-`libxcb-composite0-dev`, `libxcb-ewmh-dev`, `libxcb-icccm4-dev`, `libxcb-render0-dev`, `libxcb-res0-dev`,
+Ubuntu 24.04: the build needs `meson`, `libwayland-dev`, `wayland-protocols`, `libpixman-1-dev`, `libxkbcommon-dev`,
+`libgbm-dev`, `libgles-dev` (the full list is in packages/gateway/README.md, "Building"). XWayland (wave 2) needs
+`xwayland`, `libxcb-composite0-dev`, `libxcb-ewmh-dev`, `libxcb-icccm4-dev`, `libxcb-render0-dev`, `libxcb-res0-dev`,
 `libxcb-xfixes0-dev`. The optional `libxcb-errors-dev` isn't packaged for Ubuntu 24.04.

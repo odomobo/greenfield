@@ -79,10 +79,13 @@ struct core {
     struct wl_listener request_set_shape;
     struct wl_listener keyboard_key;
     struct wl_listener keyboard_modifiers;
+    struct wl_listener client_created;
 };
 
+/* Our id for a Wayland client, reported to JavaScript with its process (client-new, client-destroy). */
 struct client_id {
     struct wl_listener destroy;
+    struct core *core;
     uint32_t id;
 };
 
@@ -119,10 +122,19 @@ struct gsurf {
 /* The one core of this process (there is one session per process). */
 static struct core *the_core = NULL;
 
+static void emit(struct core *core, const char *type, size_t argc, napi_value *argv);
+static napi_value u32(struct core *core, uint32_t value);
+static napi_value i32(struct core *core, int32_t value);
+
 static void
 client_id_destroy(struct wl_listener *listener, void *data) {
     struct client_id *client_id = wl_container_of(listener, client_id, destroy);
+    struct core *core = client_id->core;
+    uint32_t id = client_id->id;
+    wl_list_remove(&client_id->destroy.link);
     free(client_id);
+    napi_value args[] = {u32(core, id)};
+    emit(core, "client-destroy", 1, args);
 }
 
 static uint32_t
@@ -133,10 +145,23 @@ client_id_of(struct core *core, struct wl_client *client) {
         return client_id->id;
     }
     struct client_id *client_id = calloc(1, sizeof(*client_id));
+    client_id->core = core;
     client_id->id = ++core->next_client_id;
     client_id->destroy.notify = client_id_destroy;
     wl_client_add_destroy_listener(client, &client_id->destroy);
     return client_id->id;
+}
+
+/* A new connection: report its process (from the socket's credentials), so apps started outside the shell (from a
+ * terminal in the session) are known too. */
+static void
+handle_client_created(struct wl_listener *listener, void *data) {
+    struct core *core = wl_container_of(listener, core, client_created);
+    struct wl_client *client = data;
+    pid_t pid = 0;
+    wl_client_get_credentials(client, &pid, NULL, NULL);
+    napi_value args[] = {u32(core, client_id_of(core, client)), i32(core, pid)};
+    emit(core, "client-new", 2, args);
 }
 
 static struct gsurf *
@@ -587,6 +612,8 @@ create(napi_env env, napi_callback_info info) {
 
     core->display = wl_display_create();
     core->loop = wl_display_get_event_loop(core->display);
+    core->client_created.notify = handle_client_created;
+    wl_display_add_client_created_listener(core->display, &core->client_created);
     core->backend = wlr_headless_backend_create(core->display);
     if (core->backend == NULL) {
         napi_throw_error(env, NULL, "Can't create the wlroots headless backend.");

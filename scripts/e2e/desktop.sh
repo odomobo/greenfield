@@ -141,6 +141,9 @@ pw_eval "() => { document.querySelector('#new-session').click(); return true }" 
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection" 40
 SESSION_ID="$(pw_eval "() => window.__viewerTest.session()" | tr -d '"')"
 [ -n "$SESSION_ID" ] || fail "no session"
+# the session runs on wlroots (unless the old stack was asked for)
+[ "${GFLD_LEGACY_COMPOSITOR:-}" = 1 ] || grep -aq 'WAYLAND_DISPLAY=.*(wlroots)' "$WORK/gateway.log" ||
+  fail "the session isn't running on wlroots"
 
 TEST_APP=test-foot.desktop
 step "the Apps menu: you, the session, the installed apps"

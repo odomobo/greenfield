@@ -38,7 +38,8 @@ cleanup() {
   local pid
   for pid in "${EXTRA_PIDS[@]}"; do stop_pid "$pid"; done
   [ -n "$DBUS_PID" ] && kill "$DBUS_PID" 2>/dev/null || true
-  rm -rf "$WORK"
+  # E2E_KEEP=1: keep the logs and state for a look afterwards
+  if [ "${E2E_KEEP:-}" = 1 ]; then echo "kept: $WORK" >&2; else rm -rf "$WORK"; fi
 }
 trap cleanup EXIT
 

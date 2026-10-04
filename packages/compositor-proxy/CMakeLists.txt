@@ -236,63 +236,67 @@ install(TARGETS
         ${CMAKE_CURRENT_SOURCE_DIR}/dist/addons/shared
 )
 
-# wlroots prototype (ROADMAP.md, Core item 1): opt-in with -DGFLD_WLROOTS=ON (yarn build:wlroots). wlroots is a
-# submodule pinned to 0.17.4 and built as a static library against the system's libraries (libwayland, pixman,
-# xkbcommon, libdrm). The addon links the system libwayland, not the fork above, so a process must load either it or
-# the fork's addons, never both (they share the libwayland-server.so.0 soname).
-option(GFLD_WLROOTS "Build the wlroots prototype core" OFF)
-if (GFLD_WLROOTS)
-    set(WLR_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/native/wlroots)
-    set(WLR_BUILD ${CMAKE_BINARY_DIR}/wlroots)
-    add_custom_command(
-            OUTPUT ${WLR_BUILD}/libwlroots.a
-            COMMAND test -f ${WLR_BUILD}/build.ninja || meson setup ${WLR_BUILD} ${WLR_SOURCE}
-                --buildtype=release -Ddefault_library=static -Dwerror=false -Dexamples=false
-                -Dbackends= -Drenderers=gles2 -Dallocators=gbm -Dsession=disabled -Dxwayland=disabled
-                -Dxcb-errors=disabled
-            COMMAND ninja -C ${WLR_BUILD}
-            WORKING_DIRECTORY ${WLR_SOURCE}
-            COMMENT "Building wlroots"
-            VERBATIM
-    )
-    add_custom_target(wlroots-static DEPENDS ${WLR_BUILD}/libwlroots.a)
-
-    pkg_check_modules(WLR_DEPS REQUIRED IMPORTED_TARGET
-            wayland-server>=1.22 pixman-1>=0.42 xkbcommon libdrm>=2.4.114 gbm egl glesv2)
-
-    add_library(wlr-core-addon SHARED
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core.c
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_encoder.c
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/gst_frame_encoder.c
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/gst_main_loop.c
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src/westfield-egl.c
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src/westfield-dmabuf.c
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src/drm_format_set.c
-    )
-    add_dependencies(wlr-core-addon wlroots-static)
-    set_target_properties(wlr-core-addon PROPERTIES PREFIX "" SUFFIX ".node" C_STANDARD 11)
-    target_compile_definitions(wlr-core-addon PRIVATE WLR_USE_UNSTABLE)
-    # the shim westfield.h comes first: the encoder sources against the system libwayland
-    target_include_directories(wlr-core-addon PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/shim
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/native/node-api
-            ${WLR_SOURCE}/include
-            ${WLR_BUILD}/include
-            ${WLR_BUILD}/protocol
-    )
-    target_link_libraries(wlr-core-addon PRIVATE
-            ${WLR_BUILD}/libwlroots.a
-            PkgConfig::WLR_DEPS
-            PkgConfig::GLIB2
-            PkgConfig::GSTREAMER
-            PkgConfig::GRAPHENE
-            PkgConfig::OPENGL
-            Threads::Threads
-            rt
-            m
-    )
-    install(TARGETS wlr-core-addon DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/dist/addons)
+# The session's Wayland side (ROADMAP.md, Core item 1): wlroots is a submodule (`git submodule update --init`) pinned to
+# 0.17.4 and built with meson as a static library against the system's libraries (libwayland, pixman, xkbcommon,
+# libdrm). The addon links the system libwayland, not the fork above, so a process must load either it or the fork's
+# addons, never both (they share the libwayland-server.so.0 soname).
+set(WLR_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/native/wlroots)
+set(WLR_BUILD ${CMAKE_BINARY_DIR}/wlroots)
+if (NOT EXISTS ${WLR_SOURCE}/meson.build)
+    message(FATAL_ERROR "The wlroots submodule is missing: run `git submodule update --init`.")
 endif ()
+find_program(MESON meson)
+if (NOT MESON)
+    message(FATAL_ERROR "meson is needed to build wlroots (Ubuntu: apt install meson).")
+endif ()
+add_custom_command(
+        OUTPUT ${WLR_BUILD}/libwlroots.a
+        COMMAND test -f ${WLR_BUILD}/build.ninja || meson setup ${WLR_BUILD} ${WLR_SOURCE}
+            --buildtype=release -Ddefault_library=static -Dwerror=false -Dexamples=false
+            -Dbackends= -Drenderers=gles2 -Dallocators=gbm -Dsession=disabled -Dxwayland=disabled
+            -Dxcb-errors=disabled
+        COMMAND ninja -C ${WLR_BUILD}
+        WORKING_DIRECTORY ${WLR_SOURCE}
+        COMMENT "Building wlroots"
+        VERBATIM
+)
+add_custom_target(wlroots-static DEPENDS ${WLR_BUILD}/libwlroots.a)
+
+pkg_check_modules(WLR_DEPS REQUIRED IMPORTED_TARGET
+        wayland-server>=1.22 pixman-1>=0.42 xkbcommon libdrm>=2.4.114 gbm egl glesv2)
+
+add_library(wlr-core-addon SHARED
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_encoder.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/gst_frame_encoder.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/gst_main_loop.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src/westfield-egl.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src/westfield-dmabuf.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src/drm_format_set.c
+)
+add_dependencies(wlr-core-addon wlroots-static)
+set_target_properties(wlr-core-addon PROPERTIES PREFIX "" SUFFIX ".node" C_STANDARD 11)
+target_compile_definitions(wlr-core-addon PRIVATE WLR_USE_UNSTABLE)
+# the shim westfield.h comes first: the encoder sources against the system libwayland
+target_include_directories(wlr-core-addon PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/shim
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wayland/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/node-api
+        ${WLR_SOURCE}/include
+        ${WLR_BUILD}/include
+        ${WLR_BUILD}/protocol
+)
+target_link_libraries(wlr-core-addon PRIVATE
+        ${WLR_BUILD}/libwlroots.a
+        PkgConfig::WLR_DEPS
+        PkgConfig::GLIB2
+        PkgConfig::GSTREAMER
+        PkgConfig::GRAPHENE
+        PkgConfig::OPENGL
+        Threads::Threads
+        rt
+        m
+)
+install(TARGETS wlr-core-addon DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/dist/addons)

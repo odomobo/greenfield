@@ -3,7 +3,7 @@
  * (kept in the user's config dir) and notifications. The shell UI itself runs in the viewer; this talks to it with
  * `shell.*` control messages over the session's viewer WebSocket (see packages/viewer/src/protocol.ts).
  */
-import { ControlMessage, createLogger, launchApplication, Session, ShellEndpoint } from '@gfld/compositor-proxy'
+import { ControlMessage, createLogger, ShellEndpoint } from '@gfld/compositor-proxy'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { DesktopEntry, findProgram, loadDesktopEntries, parseExec, terminalCommand } from './desktop-entries'
@@ -39,6 +39,11 @@ function toShellApp(entry: DesktopEntry): ShellApp {
   }
 }
 
+/** Starts an app in the session (Apps in the compositor proxy). */
+export interface AppLauncher {
+  launch(name: string, executable: string, args: string[]): Promise<unknown>
+}
+
 export class ShellService implements ShellEndpoint {
   private send?: (message: ControlMessage) => void
   private entries: DesktopEntry[] = []
@@ -48,7 +53,7 @@ export class ShellService implements ShellEndpoint {
   private readonly notifications = new NotificationServer()
   private readonly pinnedFile: string
 
-  constructor(private readonly session: Session) {
+  constructor(private readonly apps: AppLauncher) {
     const env = process.env
     const configHome = env.XDG_CONFIG_HOME || path.join(env.HOME ?? '/tmp', '.config')
     this.pinnedFile = path.join(configHome, 'greenfield', 'pinned.json')
@@ -130,7 +135,7 @@ export class ShellService implements ShellEndpoint {
       return
     }
     const [executable, ...rest] = args
-    launchApplication(entry.name, executable, rest, {}, this.session).catch((e: Error) => {
+    this.apps.launch(entry.name, executable, rest).catch((e: Error) => {
       logger.error(`Launching ${entry.id} failed: ${e.message}`)
       this.send?.({ type: 'shell.launch-failed', app: entry.id, reason: 'failed' })
     })

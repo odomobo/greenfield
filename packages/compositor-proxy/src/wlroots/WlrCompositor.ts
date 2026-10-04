@@ -1,17 +1,14 @@
 /**
- * wlroots prototype (ROADMAP.md, Core item 1): a session's Wayland side on wlroots 0.17 (native/wlr-core) instead of
- * the libwayland fork and the TypeScript protocol implementation. wlroots implements the protocols; this keeps the
- * policy, as the TypeScript compositor's window scene (packages/compositor/src/server/scene.ts) does today: window
+ * The session's Wayland side (ROADMAP.md, Core item 1): wlroots 0.17 (native/wlr-core) implements the protocols; this
+ * is the policy, as the TypeScript compositor's window scene (packages/compositor/src/server/scene.ts) was: window
  * positions, stacking, focus and minimize state, frame pacing, and the encoding of every surface's content.
  *
- * The viewer, the scene protocol, the transport and the encoding policy (SurfaceEncoder) are the existing ones.
+ * The viewer, the scene protocol, the transport and the encoding policy (SurfaceEncoder) are shared with the old stack.
  *
  * This module must not import anything that loads the libwayland fork's addons (Encoder.ts, SurfaceBufferEncoding.ts,
- * wayland-server.ts, FrameFeedback.ts, the package index): the fork and the system libwayland that wlroots uses share
- * the libwayland-server.so.0 soname, so only one of them can be loaded in a process.
- */
-import wlr from '../addons/wlr-core-addon'
-import { startPoll } from '../addons/proxy-poll-addon'
+ * wayland-server.ts, FrameFeedback.ts, legacy.ts): the fork and the system libwayland that wlroots uses share
+ * the libwayland-server.so.0 soname, so only one of them can be loaded in a process. */
+import type * as WlrCoreAddon from '../addons/wlr-core-addon'
 import { createLogger } from '../Logger.js'
 import { ProcessingDuration, scheduleFrameCallback } from '../FramePacing.js'
 import { EncoderPool } from '../encoding/EncoderPool.js'
@@ -22,12 +19,28 @@ import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/Viewe
 import { ControlMessage } from '../viewer/ViewerTransport.js'
 import type { Patch, SceneRect, SceneSurface, SceneWindow } from '@gfld/scene-protocol'
 import { EvDevKeyCode } from './keys.js'
+import { Apps } from './Apps.js'
 
 const logger = createLogger('wlroots')
 /** GFLD_WLR_TRACE=1: log wlroots events and viewer messages */
 const TRACE = process.env.GFLD_WLR_TRACE === '1'
 
 type H264Encoder = 'x264' | 'nvh264' | 'vaapih264'
+
+/** The native core (native/wlr-core), injectable so the policy can be tested without wlroots. */
+export type WlrNative = Omit<typeof WlrCoreAddon, 'create'> & {
+  create(onEvent: WlrCoreAddon.EventHandler, width: number, height: number): { socket: string; fd: number }
+}
+
+/** Watches a file descriptor, calls back when it's readable (the poll addon in production). */
+export type FdWatcher = (fd: number, readable: () => void) => void
+
+/** Wayland clients coming and going, with their process (0 if unknown). */
+export interface ClientListener {
+  clientConnected(clientId: number, pid: number): void
+
+  clientDisconnected(clientId: number): void
+}
 
 /** Input regions with more rectangles than this are sent as their bounding box. */
 const MAX_INPUT_RECTS = 64
@@ -40,10 +53,13 @@ const LINE_SCROLL_AMOUNT = 12
 
 /** A pooled GStreamer video encoder that encodes surfaces' current wlroots buffers. */
 class WlrEncoder {
-  private readonly native: wlr.FrameEncoder
+  private readonly native: WlrCoreAddon.FrameEncoder
   private readonly queue: { resolve: (frame: Buffer) => void; reject: (error: Error) => void }[] = []
 
-  constructor(type: H264Encoder) {
+  constructor(
+    private readonly wlr: WlrNative,
+    type: H264Encoder,
+  ) {
     this.native = wlr.createFrameEncoder(type, (frame) => {
       const task = this.queue.shift()
       if (frame) {
@@ -59,7 +75,7 @@ class WlrEncoder {
       const task = { resolve, reject }
       this.queue.push(task)
       try {
-        wlr.encodeFrame(this.native, sid, contentSerial, 0)
+        this.wlr.encodeFrame(this.native, sid, contentSerial, 0)
       } catch (e: any) {
         this.queue.splice(this.queue.indexOf(task), 1)
         reject(e)
@@ -68,11 +84,11 @@ class WlrEncoder {
   }
 
   requestKeyUnit(): void {
-    wlr.requestKeyUnit(this.native)
+    this.wlr.requestKeyUnit(this.native)
   }
 
   destroy(): void {
-    wlr.destroyFrameEncoder(this.native)
+    this.wlr.destroyFrameEncoder(this.native)
   }
 }
 
@@ -128,8 +144,13 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private lastSceneJSON = ''
   private sceneScheduled = false
   viewerScale = 1
+  clientListener?: ClientListener
 
-  constructor(config: { h264Encoder: H264Encoder; videoStreams: number }) {
+  constructor(
+    config: { h264Encoder: H264Encoder; videoStreams: number },
+    private readonly wlr: WlrNative,
+    watchFd: FdWatcher,
+  ) {
     const currentSink = () => this.sink
     const forwardingSink: EncodingSink = {
       get active() {
@@ -140,18 +161,18 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       requireKeyFrame: (surface) => this.sink.requireKeyFrame(surface),
       dropPatches: (surface) => this.sink.dropPatches(surface),
     }
-    const pool = new EncoderPool(() => new WlrEncoder(config.h264Encoder), config.videoStreams)
+    const pool = new EncoderPool(() => new WlrEncoder(wlr, config.h264Encoder), config.videoStreams)
     pool.warm()
     this.encoding = new EncodingContext(forwardingSink, pool, encodePng, logger)
     this.encoding.startTicking()
 
-    const { socket, fd } = wlr.create(
+    const { socket, fd } = this.wlr.create(
       (type, ...args) => this.onEvent(type, args),
       this.output.width,
       this.output.height,
     )
     this.waylandDisplay = socket
-    startPoll(fd, () => wlr.dispatch())
+    watchFd(fd, () => this.wlr.dispatch())
     logger.info(`Listening on: WAYLAND_DISPLAY="${socket}" (wlroots).`)
   }
 
@@ -184,6 +205,12 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       logger.info(`event ${type} ${JSON.stringify(args)}`)
     }
     switch (type) {
+      case 'client-new':
+        this.clientListener?.clientConnected(args[0], args[1])
+        break
+      case 'client-destroy':
+        this.clientListener?.clientDisconnected(args[0])
+        break
       case 'surface-new': {
         const [sid, key] = args as [number, string]
         this.surfaces.set(sid, {
@@ -211,7 +238,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         if (window && type === 'surface-map') {
           this.windowMapped(window)
         } else if (window && this.active === window.sid) {
-          this.activate(0)
+          this.activateNext(window)
         }
         this.scheduleScene()
         break
@@ -228,14 +255,16 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       case 'toplevel-new':
         this.windows.set(args[0], { sid: args[0], title: '', appId: '', placed: false, minimized: false, x: 0, y: 0 })
         break
-      case 'toplevel-destroy':
+      case 'toplevel-destroy': {
+        const window = this.windows.get(args[0])
         this.windows.delete(args[0])
         this.stack = this.stack.filter((sid) => sid !== args[0])
-        if (this.active === args[0]) {
-          this.activate(this.stack[this.stack.length - 1] ?? 0)
+        if (window && this.active === window.sid) {
+          this.activateNext(window)
         }
         this.scheduleScene()
         break
+      }
       case 'toplevel-title':
       case 'toplevel-app-id': {
         const window = this.windows.get(args[0])
@@ -265,7 +294,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         break
       case 'toplevel-request-fullscreen':
         // not part of the prototype: answer with the current state, as xdg-shell requires
-        wlr.configure(args[0], -1, -1, {})
+        this.wlr.configure(args[0], -1, -1, {})
         break
       case 'toplevel-request-minimize': {
         const window = this.windows.get(args[0])
@@ -337,7 +366,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       scheduleFrameCallback(surface.processing.average, (time) => {
         surface.frameScheduled = false
         if (this.surfaces.get(sid) === surface) {
-          wlr.sendFrameDone(sid, time)
+          this.wlr.sendFrameDone(sid, time)
         }
       })
     }
@@ -355,7 +384,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
             width: surface.buffer.width,
             height: surface.buffer.height,
           },
-        readPixels: (rect) => wlr.readPixels(surface.sid, rect.x, rect.y, rect.width, rect.height),
+        readPixels: (rect) => this.wlr.readPixels(surface.sid, rect.x, rect.y, rect.width, rect.height),
         encodeVideo: (encoder, buffer) => encoder.encode(surface.sid, buffer.contentSerial),
       }
       surface.encoder = new SurfaceEncoder(surface.key, host, this.encoding)
@@ -364,8 +393,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   }
 
   private windowMapped(window: Window) {
-    const parentState = window.parent === undefined ? undefined : wlr.toplevelState(window.parent)
-    const state = wlr.toplevelState(window.sid)
+    const parentState = window.parent === undefined ? undefined : this.wlr.toplevelState(window.parent)
+    const state = this.wlr.toplevelState(window.sid)
     if (!window.placed && parentState && state) {
       // a child window (dialog) is centered on its parent, the viewer only places top level windows
       const [px, py, pw, ph] = parentState.geometry
@@ -406,17 +435,32 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   private activate(sid: number) {
     if (this.active && this.active !== sid && this.windows.has(this.active)) {
-      wlr.configure(this.active, -1, -1, { activated: false })
+      this.wlr.configure(this.active, -1, -1, { activated: false })
     }
     this.active = sid
     if (sid) {
-      wlr.configure(sid, -1, -1, { activated: true })
+      this.wlr.configure(sid, -1, -1, { activated: true })
       // raise it, with its children above it
       this.stack = this.stack.filter((other) => other !== sid)
       this.stack.push(sid)
     }
-    wlr.keyboardFocus(this.pageFocused ? sid : 0)
+    this.wlr.keyboardFocus(this.pageFocused ? sid : 0)
     this.scheduleScene()
+  }
+
+  /** The active window went away: its parent (a dialog closed) or else the topmost window shown gets the focus. */
+  private activateNext(gone: Window) {
+    const shown = (sid: number) => {
+      const window = this.windows.get(sid)
+      return (
+        window !== undefined &&
+        sid !== gone.sid &&
+        this.surfaces.get(sid)?.mapped === true &&
+        !this.rootOf(window).minimized
+      )
+    }
+    const parent = gone.parent !== undefined && shown(gone.parent) ? gone.parent : undefined
+    this.activate(parent ?? [...this.stack].reverse().find(shown) ?? 0)
   }
 
   private setMinimized(window: Window, minimized: boolean) {
@@ -432,9 +476,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   private setMaximized(sid: number, maximized: boolean) {
     if (maximized) {
-      wlr.configure(sid, this.output.width, this.output.height, { maximized: true })
+      this.wlr.configure(sid, this.output.width, this.output.height, { maximized: true })
     } else {
-      wlr.configure(sid, 0, 0, { maximized: false })
+      this.wlr.configure(sid, 0, 0, { maximized: false })
     }
   }
 
@@ -450,7 +494,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   detach(): void {
     this.send = undefined
-    wlr.keyboardFocus(0)
+    this.wlr.keyboardFocus(0)
   }
 
   private scheduleScene() {
@@ -504,7 +548,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     const windows: SceneWindow[] = []
     for (const window of this.orderedWindows()) {
       const surface = this.surfaces.get(window.sid)
-      const state = wlr.toplevelState(window.sid)
+      const state = this.wlr.toplevelState(window.sid)
       if (surface === undefined || !surface.mapped || state === undefined) {
         continue
       }
@@ -534,7 +578,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   private windowSurfaces(sid: number): SceneSurface[] {
     const surfaces: SceneSurface[] = []
-    for (const [childSid, x, y] of wlr.windowSurfaces(sid)) {
+    for (const [childSid, x, y] of this.wlr.windowSurfaces(sid)) {
       const surface = this.surfaces.get(childSid)
       if (surface?.buffer) {
         surfaces.push({ id: surface.key, x, y, width: surface.width, height: surface.height, input: surface.input })
@@ -560,7 +604,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         break
       case 'button':
         this.pointerMotion(message)
-        wlr.pointerButton(LINUX_BUTTONS[Number(message.button)] ?? 0x110, Boolean(message.pressed), time(message))
+        this.wlr.pointerButton(LINUX_BUTTONS[Number(message.button)] ?? 0x110, Boolean(message.pressed), time(message))
         break
       case 'axis':
         this.pointerMotion(message)
@@ -569,13 +613,13 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       case 'key': {
         const code: number | undefined = EvDevKeyCode[message.code as keyof typeof EvDevKeyCode]
         if (code !== undefined) {
-          wlr.key(code, Boolean(message.pressed), time(message))
+          this.wlr.key(code, Boolean(message.pressed), time(message))
         }
         break
       }
       case 'focus':
         this.pageFocused = Boolean(message.focused)
-        wlr.keyboardFocus(this.pageFocused ? this.active : 0)
+        this.wlr.keyboardFocus(this.pageFocused ? this.active : 0)
         this.scheduleScene()
         break
       case 'window.move': {
@@ -612,7 +656,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         if (window) {
           const width = Math.max(1, Math.round(Number(message.width)))
           const height = Math.max(1, Math.round(Number(message.height)))
-          wlr.configure(window.sid, width, height, { resizing: !message.done })
+          this.wlr.configure(window.sid, width, height, { resizing: !message.done })
         }
         break
       }
@@ -626,7 +670,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       case 'window.close': {
         const window = this.windowOf(message.window)
         if (window) {
-          wlr.close(window.sid)
+          this.wlr.close(window.sid)
         }
         break
       }
@@ -651,9 +695,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       return
     }
     this.output = { width, height }
-    wlr.setOutputSize(width, height)
+    this.wlr.setOutputSize(width, height)
     for (const window of this.windows.values()) {
-      if (wlr.toplevelState(window.sid)?.maximized) {
+      if (this.wlr.toplevelState(window.sid)?.maximized) {
         this.setMaximized(window.sid, true)
       }
     }
@@ -664,7 +708,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     if (sid === 0) {
       this.send?.({ type: 'cursor', kind: 'default' })
     }
-    wlr.pointerMotion(sid, Number(message.sx) || 0, Number(message.sy) || 0, time(message))
+    this.wlr.pointerMotion(sid, Number(message.sx) || 0, Number(message.sy) || 0, time(message))
   }
 
   private pointerAxis(message: ControlMessage) {
@@ -675,7 +719,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     const deltaX = Number(message.deltaX) || 0
     const deltaY = Number(message.deltaY) || 0
     if (deltaX) {
-      wlr.pointerAxis(
+      this.wlr.pointerAxis(
         true,
         scale(deltaX, surface?.width ?? 0),
         mode === DOM_DELTA_LINE ? Math.sign(deltaX) : 0,
@@ -683,7 +727,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       )
     }
     if (deltaY) {
-      wlr.pointerAxis(
+      this.wlr.pointerAxis(
         false,
         scale(deltaY, surface?.height ?? 0),
         mode === DOM_DELTA_LINE ? Math.sign(deltaY) : 0,
@@ -716,11 +760,25 @@ function inputRegion(rects: Int32Array, width: number, height: number): SceneRec
   return boxes
 }
 
-/** Start the session's Wayland side on wlroots. */
+/** Start the session's Wayland side on wlroots, with its app processes. */
 export function startWlrootsCompositor(config: { h264Encoder: H264Encoder; videoStreams?: number }): {
   viewerHost: ViewerHost
   compositor: WlrCompositor
+  apps: Apps
 } {
-  const compositor = new WlrCompositor({ h264Encoder: config.h264Encoder, videoStreams: config.videoStreams ?? 4 })
-  return { viewerHost: new ViewerHost(compositor, compositor), compositor }
+  // loaded here, not at import: tests use the policy with a fake core
+  /* eslint-disable @typescript-eslint/no-var-requires */
+  const native = require('../addons/wlr-core-addon') as WlrNative
+  const { startPoll } = require('../addons/proxy-poll-addon') as typeof import('../addons/proxy-poll-addon')
+  /* eslint-enable @typescript-eslint/no-var-requires */
+  const compositor = new WlrCompositor(
+    { h264Encoder: config.h264Encoder, videoStreams: config.videoStreams ?? 4 },
+    native,
+    (fd, readable) => {
+      startPoll(fd, readable)
+    },
+  )
+  const apps = new Apps(compositor.waylandDisplay)
+  compositor.clientListener = apps
+  return { viewerHost: new ViewerHost(compositor, compositor), compositor, apps }
 }

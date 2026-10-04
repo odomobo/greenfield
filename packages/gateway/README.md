@@ -12,13 +12,35 @@ gateway (monitor)          root in PAM mode. Not network-facing. Authenticates u
 │                          user's session socket. Gets the listening socket and TLS key from the
 │                          monitor; asks the monitor (IPC) for everything user-related, by ticket.
 └── pam-helper session     root, tiny C. pam_open_session (pam_systemd → logind session, XDG_RUNTIME_DIR, user bus),
-    └── session-process    then drops to the user: the server compositor, the desktop shell's server side and the
-                           user's apps. Listens on /run/greenfield/sessions/<id>/viewer.sock (dir uid:webgroup
-                           2750, socket 0660).
+    └── session-process    then drops to the user: the server compositor (wlroots), the desktop shell's server side
+                           and the user's apps. Listens on /run/greenfield/sessions/<id>/viewer.sock (dir
+                           uid:webgroup 2750, socket 0660).
 ```
 
 TLS ends in the web process, so users' sessions never have access to the key. A session dies when it's ended from
 the session list or when the gateway stops; closing the browser doesn't affect it.
+
+## Building
+
+Ubuntu 24.04 (wlroots 0.17 needs its libwayland 1.22; 22.04 is too old). The session's Wayland side is wlroots, a git
+submodule built with meson as part of `yarn build`:
+
+```bash
+git submodule update --init
+sudo apt install build-essential cmake ninja-build meson pkg-config \
+  libwayland-dev wayland-protocols libpixman-1-dev libxkbcommon-dev libdrm-dev libgbm-dev libegl-dev libgles-dev \
+  libopengl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+  libgraphene-1.0-dev libudev-dev libffi-dev
+yarn install
+yarn build
+```
+
+The first build compiles wlroots (a few minutes); after changing the submodule's version, delete
+`packages/compositor-proxy/build/wlroots` so it's rebuilt. Running sessions also needs the apps' runtime pieces:
+`dbus-daemon`, and for the end-to-end test `foot`, `notify-send` (libnotify-bin) and playwright-cli.
+
+`GFLD_LEGACY_COMPOSITOR=1` in the gateway's environment runs sessions on the old stack (the libwayland fork) instead,
+until it's deleted.
 
 ## Development (no root)
 

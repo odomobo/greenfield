@@ -1,0 +1,120 @@
+/**
+ * The environment a session's apps get: everything that isn't theirs to see removed, a runtime dir, a D-Bus session
+ * bus, and the desktop portal and secrets service. Shared by the session processes.
+ */
+import { createLogger } from '@gfld/compositor-proxy'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync } from 'node:fs'
+import path from 'node:path'
+
+const logger = createLogger('session')
+
+/** Apps inherit this process's environment: drop everything that isn't theirs to see. */
+export function scrubEnvironment() {
+  for (const name of Object.keys(process.env)) {
+    if (
+      name.startsWith('GREENFIELD_') ||
+      name.startsWith('NODE_CHANNEL') ||
+      name === 'DISPLAY' ||
+      name === 'WAYLAND_DISPLAY'
+    ) {
+      delete process.env[name]
+    }
+  }
+}
+
+/**
+ * What a desktop session needs so apps behave: a runtime dir, a D-Bus session bus, and the desktop portal and a
+ * secrets service. With logind (pam_systemd) the runtime dir and bus exist already, and the portal and secrets
+ * service are started by D-Bus activation when an app first asks. Without it we start a bus ourselves. Missing
+ * services are reported, not fatal.
+ */
+export function setupSessionEnvironment() {
+  const env = process.env
+  const uid = process.getuid?.() ?? 0
+
+  if (env.XDG_RUNTIME_DIR === undefined || !existsSync(env.XDG_RUNTIME_DIR)) {
+    const fallback = `/tmp/greenfield-runtime-${uid}`
+    mkdirSync(fallback, { recursive: true, mode: 0o700 })
+    env.XDG_RUNTIME_DIR = fallback
+    logger.info(`No XDG_RUNTIME_DIR from logind; using ${fallback}.`)
+  }
+
+  env.XDG_SESSION_TYPE = 'wayland'
+  env.XDG_CURRENT_DESKTOP = 'greenfield'
+  env.XDG_SESSION_DESKTOP = 'greenfield'
+  // our portals config (prefers the gtk backend) without touching the user's own configuration
+  const configDir = path.resolve(__dirname, '../xdg')
+  env.XDG_CONFIG_DIRS = [configDir, env.XDG_CONFIG_DIRS ?? '/etc/xdg'].join(':')
+
+  if (env.DBUS_SESSION_BUS_ADDRESS === undefined) {
+    const userBus = path.join(env.XDG_RUNTIME_DIR, 'bus')
+    if (existsSync(userBus)) {
+      env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${userBus}`
+    } else {
+      try {
+        const address = startDBus()
+        env.DBUS_SESSION_BUS_ADDRESS = address
+        logger.info('Started a D-Bus session bus for this session.')
+      } catch (e: any) {
+        logger.error(`No D-Bus session bus (${e.message}); many apps will misbehave. Install dbus.`)
+      }
+    }
+  }
+
+  if (env.DBUS_SESSION_BUS_ADDRESS !== undefined) {
+    try {
+      // tell activated services (portal, keyring) about our session's environment
+      execFileSync(
+        'dbus-update-activation-environment',
+        ['--systemd', 'XDG_CURRENT_DESKTOP', 'XDG_SESSION_TYPE', 'XDG_CONFIG_DIRS'],
+        { env, stdio: 'ignore', timeout: 5000 },
+      )
+    } catch {
+      // without systemd --user, or old dbus; activation still works with the bus's own environment
+    }
+  }
+
+  const services: [string, string[]][] = [
+    ['desktop portal (xdg-desktop-portal)', ['/usr/share/dbus-1/services/org.freedesktop.portal.Desktop.service']],
+    [
+      'portal backend (xdg-desktop-portal-gtk)',
+      ['/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.gtk.service'],
+    ],
+    [
+      'secrets service (gnome-keyring)',
+      [
+        '/usr/share/dbus-1/services/org.freedesktop.secrets.service',
+        '/usr/share/dbus-1/services/org.gnome.keyring.service',
+      ],
+    ],
+  ]
+  const missing = services.filter(([, files]) => !files.some((file) => existsSync(file))).map(([name]) => name)
+  if (missing.length > 0) {
+    logger.info(`Not installed (apps lose these features): ${missing.join(', ')}.`)
+  }
+}
+
+function startDBus(): string {
+  // --fork: the parent prints the address and pid once the bus is up, then exits
+  const output = execFileSync(
+    'dbus-daemon',
+    ['--session', '--fork', '--nopidfile', '--print-address=1', '--print-pid=1'],
+    {
+      encoding: 'utf8',
+      timeout: 5000,
+    },
+  )
+  const [address, pid] = output.trim().split('\n')
+  if (!address?.startsWith('unix:')) {
+    throw new Error('dbus-daemon did not report an address')
+  }
+  process.once('exit', () => {
+    try {
+      process.kill(Number(pid))
+    } catch {
+      // already gone
+    }
+  })
+  return address
+}
