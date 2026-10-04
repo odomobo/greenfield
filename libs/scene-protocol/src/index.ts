@@ -30,7 +30,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 6
+export const PROTOCOL_VERSION = 7
 
 export const enum EnvelopeKind {
   CONTROL = 1,
@@ -99,6 +99,11 @@ export type ServerMessage =
   | { type: 'cursor'; kind: 'default' | 'hidden' }
   | { type: 'cursor'; kind: 'named'; name: string }
   | { type: 'cursor'; kind: 'surface'; surface: string; hotspot: { x: number; y: number } }
+  /**
+   * An app set the clipboard (not the primary selection, which stays between the remote apps): its text, UTF-8, at
+   * most 4 MB. The viewer writes it to the browser's clipboard. Text only for now.
+   */
+  | { type: 'clipboard'; text: string }
   /** The client asked to start an interactive move/resize (xdg_toplevel.move/resize) during the current button press. */
   | { type: 'interactive'; mode: 'move'; window: string }
   | { type: 'interactive'; mode: 'resize'; window: string; edges: number }
@@ -178,6 +183,11 @@ export type ViewerMessage =
    * (KeyboardEvent.repeat) aren't sent: apps repeat keys themselves.
    */
   | { type: 'key'; code: string; pressed: boolean; modifiers: Modifiers; time: number }
+  /**
+   * The browser's clipboard text, sent when the user pastes (Ctrl+V, Shift+Insert) and it isn't what the viewer last
+   * synchronized, before the key events of the paste. The server makes it the clipboard selection of the session.
+   */
+  | { type: 'clipboard'; text: string }
   /** the viewer page gained/lost keyboard focus (lost also when it's hidden); losing it releases every held key */
   | { type: 'focus'; focused: boolean }
   // window changes; seq: the window's next change sequence number, see the top of this file

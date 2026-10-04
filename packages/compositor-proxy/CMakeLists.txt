@@ -76,6 +76,7 @@ pkg_check_modules(WLR_DEPS REQUIRED IMPORTED_TARGET
 
 add_library(wlr-core-addon SHARED
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_clipboard.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_encoder.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_xwayland.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/xwayland_sockets.c

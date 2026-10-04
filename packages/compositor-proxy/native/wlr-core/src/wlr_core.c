@@ -523,6 +523,11 @@ flush(struct core *core) {
     wl_display_flush_clients(core->display);
 }
 
+void
+core_flush(struct core *core) {
+    flush(core);
+}
+
 static bool
 set_output_size(struct core *core, int32_t width, int32_t height) {
     struct wlr_output_state state;
@@ -593,6 +598,8 @@ create(napi_env env, napi_callback_info info) {
     core->request_set_primary_selection.notify = handle_request_set_primary_selection;
     wl_signal_add(&core->seat->events.request_set_primary_selection, &core->request_set_primary_selection);
 
+    clipboard_init(core);
+
     core->cursor_shape_manager = wlr_cursor_shape_manager_v1_create(core->display, 1);
     core->request_set_shape.notify = handle_request_set_shape;
     wl_signal_add(&core->cursor_shape_manager->events.request_set_shape, &core->request_set_shape);
@@ -635,7 +642,7 @@ create(napi_env env, napi_callback_info info) {
     return result;
 }
 
-static struct core *
+struct core *
 core_or_throw(napi_env env) {
     if (the_core == NULL) {
         napi_throw_error(env, NULL, "wlroots core not created.");
@@ -1280,6 +1287,7 @@ readPixels(napi_env env, napi_callback_info info) {
 }
 
 napi_value wlr_core_encoder_init(napi_env env, napi_value exports);
+napi_value wlr_core_clipboard_init(napi_env env, napi_value exports);
 
 static napi_value
 init(napi_env env, napi_value exports) {
@@ -1303,6 +1311,7 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("readPixels", readPixels),
     };
     NAPI_CALL(env, napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc))
+    wlr_core_clipboard_init(env, exports);
     return wlr_core_encoder_init(env, exports);
 }
 

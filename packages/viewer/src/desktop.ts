@@ -4,6 +4,7 @@ import { Rect, Renderer } from './gl/renderer'
 import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
 import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 import { modifiersOf } from './modifiers'
+import { ClipboardSync, isPasteChord } from './clipboard'
 import { acceptsInput, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
 import { WindowSync } from './window-sync'
 
@@ -94,6 +95,13 @@ export class Desktop {
   }
   /** Where a window goes when minimized (its taskbar button), in page coordinates. */
   minimizeTarget: (window: string) => DOMRect | undefined = () => undefined
+
+  /** the clipboard text shared with the session's apps */
+  private readonly clipboard = new ClipboardSync(globalThis.navigator?.clipboard, (text) =>
+    this.connection.send({ type: 'clipboard', text }),
+  )
+  /** while a paste waits for the browser's clipboard: the key events that follow it wait too, to keep their order */
+  private keyChain?: Promise<void>
 
   private pointer: Point = { x: 0, y: 0 }
   /** where the current button press started; interactions the client starts on a press are measured from here */
@@ -541,6 +549,9 @@ export class Desktop {
           this.updateScene(message.windows)
         }
         break
+      case 'clipboard':
+        this.clipboard.remoteText(message.text)
+        break
       case 'cursor':
         this.cursor = message
         this.applyCursor()
@@ -976,6 +987,7 @@ export class Desktop {
     })
 
     canvas.addEventListener('pointerdown', (event) => {
+      void this.clipboard.retryPending()
       canvas.focus()
       canvas.setPointerCapture(event.pointerId)
       this.pointer = point(event)
@@ -1062,15 +1074,32 @@ export class Desktop {
         event.preventDefault()
         return
       }
-      event.preventDefault()
-      this.connection.send({
+      const message: ViewerMessage = {
         type: 'key',
         code: event.code,
         pressed,
         modifiers: modifiersOf(event),
         time: Math.round(event.timeStamp),
-      })
+      }
+      if (pressed && isPasteChord(event)) {
+        // the browser's clipboard goes to the session before the key: the app handles the paste against the new
+        // selection. (Without readText the key's default action, a paste event, brings the text instead.)
+        if (this.clipboard.canRead) {
+          event.preventDefault()
+        }
+        this.afterPaste(this.clipboard.beforePaste(), () => this.connection.send(message))
+        return
+      }
+      event.preventDefault()
+      if (pressed) {
+        void this.clipboard.retryPending()
+      }
+      this.afterPaste(undefined, () => this.connection.send(message))
     }
+    document.addEventListener('paste', (event) => {
+      this.clipboard.onPasteEvent(event.clipboardData?.getData('text/plain'))
+    })
+    window.addEventListener('focus', () => void this.clipboard.retryPending())
     canvas.addEventListener('keydown', (event) => key(event, true))
     canvas.addEventListener('keyup', (event) => key(event, false))
     canvas.addEventListener('focus', () => this.connection.send({ type: 'focus', focused: true }))
@@ -1082,6 +1111,21 @@ export class Desktop {
         this.connection.send({ type: 'focus', focused: false })
       } else if (document.activeElement === canvas) {
         this.connection.send({ type: 'focus', focused: true })
+      }
+    })
+  }
+
+  /** Sends in order: after a paste's clipboard transfer, and after the key events queued behind it. */
+  private afterPaste(wait: Promise<void> | undefined, send: () => void) {
+    if (wait === undefined && this.keyChain === undefined) {
+      send()
+      return
+    }
+    const next = (wait ? (this.keyChain ?? Promise.resolve()).then(() => wait) : this.keyChain!).then(send)
+    this.keyChain = next
+    void next.then(() => {
+      if (this.keyChain === next) {
+        this.keyChain = undefined
       }
     })
   }

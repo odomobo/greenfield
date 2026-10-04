@@ -25,6 +25,7 @@ class FakeCore {
   readonly frameDone: number[] = []
   readonly closed: number[] = []
   readonly outputSizes: [number, number][] = []
+  readonly clipboard: string[] = []
   readonly toplevels = new Map<number, Toplevel>()
   readonly children = new Map<number, [number, number, number][]>()
 
@@ -80,6 +81,9 @@ class FakeCore {
       this.frameDone.push(sid)
     },
     readPixels: () => undefined,
+    setClipboardText: (text) => {
+      this.clipboard.push(text)
+    },
     createFrameEncoder: () => ({}),
     destroyFrameEncoder: () => undefined,
     requestKeyUnit: () => undefined,
@@ -505,4 +509,22 @@ test('a server-initiated change is reported without touching the sequence number
   await flush()
   const [window] = windowsOf(lastScene())
   assert.deepEqual([window.seq, window.maximized, window.x, window.y], [1, true, -10, -5])
+})
+
+test('an app clipboard text goes to the viewer; viewer text becomes the selection', () => {
+  core.onEvent('clipboard-text', 'from the app')
+  assert.deepEqual(sent.filter((message) => message.type === 'clipboard'), [
+    { type: 'clipboard', text: 'from the app' },
+  ])
+  compositor.handleMessage({ type: 'clipboard', text: 'from the browser' })
+  assert.deepEqual(core.clipboard, ['from the browser'])
+  // the same text again, or the text the app just set, changes nothing
+  compositor.handleMessage({ type: 'clipboard', text: 'from the browser' })
+  core.onEvent('clipboard-text', 'again')
+  compositor.handleMessage({ type: 'clipboard', text: 'again' })
+  assert.deepEqual(core.clipboard, ['from the browser'])
+  // not text, or too much of it
+  compositor.handleMessage({ type: 'clipboard', text: 5 })
+  compositor.handleMessage({ type: 'clipboard', text: 'x'.repeat(5 * 1024 * 1024) })
+  assert.deepEqual(core.clipboard, ['from the browser'])
 })

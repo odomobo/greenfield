@@ -49,6 +49,7 @@ struct core {
     struct wl_listener request_set_cursor;
     struct wl_listener request_set_selection;
     struct wl_listener request_set_primary_selection;
+    struct wl_listener set_selection;
     struct wl_listener request_set_shape;
     struct wl_listener keyboard_key;
     struct wl_listener keyboard_modifiers;
@@ -107,6 +108,13 @@ WLR_CORE_INTERNAL napi_value str(struct core *core, const char *value);
 WLR_CORE_INTERNAL napi_value boolean(struct core *core, bool value);
 WLR_CORE_INTERNAL struct gsurf *gsurf_from_surface(struct core *core, struct wlr_surface *surface);
 WLR_CORE_INTERNAL struct gsurf *gsurf_from_sid(struct core *core, uint32_t sid);
+/* the core of this process; throws a JavaScript error and returns NULL if there is none */
+WLR_CORE_INTERNAL struct core *core_or_throw(napi_env env);
+/* what every call from JavaScript ends with (does nothing while JavaScript handles an event) */
+WLR_CORE_INTERNAL void core_flush(struct core *core);
+
+/* The clipboard (wlr_core_clipboard.c): remote selections to JavaScript ("clipboard-text" events), setClipboardText. */
+WLR_CORE_INTERNAL void clipboard_init(struct core *core);
 
 /*
  * XWayland (wlr_core_xwayland.c). X11 windows are reported like xdg toplevels (toplevel-* events, by the sid of

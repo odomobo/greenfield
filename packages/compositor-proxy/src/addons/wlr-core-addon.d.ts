@@ -18,6 +18,7 @@ declare namespace wlrCore {
    *   toplevel-request-maximize(sid, maximized), toplevel-request-fullscreen(sid, fullscreen),
    *   toplevel-request-minimize(sid)
    * - cursor-surface(sid | 0, hotspotX, hotspotY), cursor-shape(name)
+   * - clipboard-text(text): an app set the clipboard selection (not one we set from the browser); its text
    * - x11-geometry(sid): an X11 override-redirect window (menu, tooltip) moved, the window it belongs to changed
    *
    * X11 override-redirect windows aren't toplevels: their surfaces are part of the windowSurfaces() of the X11 window
@@ -93,6 +94,12 @@ declare namespace wlrCore {
 
   /** RGBA copy of a rectangle of the surface's current buffer, undefined if it can't be read. */
   export function readPixels(sid: number, x: number, y: number, width: number, height: number): Buffer | undefined
+
+  /**
+   * Makes this text the seat's clipboard selection (a server-side data source, text mime types only), replacing the
+   * apps' selection. It is not reported back as a clipboard-text event.
+   */
+  export function setClipboardText(text: string): void
 
   export function createFrameEncoder(
     encoderType: 'nvh264' | 'x264' | 'vaapih264',

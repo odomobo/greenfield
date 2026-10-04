@@ -16,6 +16,7 @@ import type { Patch, SceneRect, SceneSurface, SceneWindow } from '@gfld/scene-pr
 import { EvDevKeyCode } from './keys.js'
 import { Apps } from './Apps.js'
 import { X11Windows } from './X11.js'
+import { Clipboard } from './Clipboard.js'
 
 const logger = createLogger('wlroots')
 /** GFLD_WLR_TRACE=1: log wlroots events and viewer messages */
@@ -134,6 +135,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   /** the X11 display for X11 apps (XWayland), undefined if there's none */
   readonly x11Display?: string
   private readonly x11: X11Windows
+  private readonly clipboard: Clipboard
   private send?: (message: ControlMessage) => void
   private sink: EncodingSink = inactiveSink
   private readonly encoding: EncodingContext<WlrEncoder>
@@ -171,6 +173,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.encoding = new EncodingContext(forwardingSink, pool, encodePng, logger)
     this.encoding.startTicking()
 
+    this.clipboard = new Clipboard((text) => this.wlr.setClipboardText(text))
     this.x11 = new X11Windows((sid, x, y) => this.wlr.setPosition(sid, x, y))
     const { socket, fd, x11Display } = this.wlr.create(
       (type, ...args) => this.onEvent(type, args),
@@ -339,6 +342,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       }
       case 'cursor-shape':
         this.send?.({ type: 'cursor', kind: 'named', name: args[0] })
+        break
+      case 'clipboard-text':
+        this.clipboard.remoteText(args[0])
         break
       case 'x11-geometry':
         this.scheduleScene()
@@ -512,6 +518,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   attach(send: (message: ControlMessage) => void): void {
     this.send = send
+    this.clipboard.attach(send)
     this.lastSceneJSON = ''
     this.sendSceneIfChanged()
     send({ type: 'cursor', kind: 'default' })
@@ -519,6 +526,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   detach(): void {
     this.send = undefined
+    this.clipboard.detach()
     this.wlr.releaseAllKeys()
     this.wlr.keyboardFocus(0)
   }
@@ -654,6 +662,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         }
         break
       }
+      case 'clipboard':
+        this.clipboard.viewerText(message.text)
+        break
       case 'focus':
         this.pageFocused = Boolean(message.focused)
         if (!this.pageFocused) {
