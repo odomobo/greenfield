@@ -79,7 +79,7 @@ const positionsOf = (sid: number) => core.positions.filter(([of]) => of === sid)
 
 beforeEach(() => {
   core = new FakeCore()
-  compositor = new WlrCompositor({ h264Encoder: 'x264', videoStreams: 1 }, core.native, () => undefined)
+  compositor = new WlrCompositor({ videoStreams: 1 }, core.native, () => undefined)
   sent = []
   compositor.attach((message) => sent.push(message))
 })

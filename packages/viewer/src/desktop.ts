@@ -317,6 +317,12 @@ export class Desktop {
 
   private videoFramesDecoded = 0
   private videoFramesFailed = 0
+  private patchesApplied = 0
+
+  /** How many lossless patches were drawn, in all. For tests. */
+  debugPatches(): number {
+    return this.patchesApplied
+  }
 
   /** How many video frames decoded and how many failed to, in all. For tests. */
   debugVideoFrames(): { decoded: number; failed: number } {
@@ -871,6 +877,7 @@ export class Desktop {
         (decoded) => {
           this.recordDecodeDuration(performance.now() - start)
           this.keyFrameRequested.delete(surface)
+          this.patchesApplied++
           this.renderer.patch(surface, decoded)
           this.scheduleRender()
         },

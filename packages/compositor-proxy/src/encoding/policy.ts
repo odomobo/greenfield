@@ -1,85 +1,139 @@
 /**
  * The per-surface encoding policy (see "Encoding policy" in ROADMAP.md). Pure, no Node or native dependencies.
  *
- * A surface is either in fast mode (whole surface as H.264 video, damage only decides whether a frame is sent) or in
- * slow mode (lossless PNG patches of the damaged areas). Which one follows from how many pixels it changes per second.
+ * A surface has a priority class: normal, or streaming when it is relentless (it keeps sending new data before its old
+ * data has gone out). Whether a surface is sent as video or as PNG patches is decided separately, by the surface
+ * encoder (video only for streaming surfaces, with a hardware encoder, when the surface isn't small).
  */
 import { boundingBox, clip, disjoint, Rect, splitRect, subtract } from './region.js'
 
-export type EncodingMode = 'fast' | 'slow'
+export type SurfaceClass = 'normal' | 'streaming'
 
-/** Length of the sliding period the changed pixels per second are measured over. */
-export const MEASURE_PERIOD_MS = 1500
-/** Slow -> fast above this many changed pixels per second. */
-export const FAST_ABOVE_PIXELS_PER_SECOND = 1_500_000
-/** Fast -> slow below this many changed pixels per second. */
-export const SLOW_BELOW_PIXELS_PER_SECOND = 500_000
+/** Surfaces are judged on fixed, back-to-back periods of this length. */
+export const CLASS_PERIOD_MS = 750
 /**
- * New surfaces start in fast mode and stay in it at least this long, so the first decision is based on some data
- * (their first frame alone is always ignored as the largest damage).
+ * Normal -> streaming at the end of a period in which the surface was backlogged at least this share of the time. Also
+ * the busy share the previous period needs for a commit to count as backlogged.
  */
-export const INITIAL_FAST_MS = 300
+export const PROMOTE_FRACTION = 0.6
+/** Streaming -> normal at the end of a period in which the backlogged share was below this. */
+export const DEMOTE_FRACTION = 0.15
 /** Max pixels per PNG patch, larger areas are split. */
 export const MAX_PATCH_PIXELS = 64 * 1024
 /** A commit's damage in more pieces than this is sent as its bounding box instead (fewer, larger patches). */
 export const MAX_PATCH_RECTS = 32
 
+export type PeriodFractions = { busy: number; backlogged: number }
+
 /**
- * Changed pixels per second of one surface over a sliding period. The single largest damage within the period is
- * ignored, so a one-off full repaint (a new window, an app switching to another view) doesn't make a surface look busy,
- * and every quiet surface can make an occasional large update.
+ * Measures how relentless a surface is, on discrete periods, and decides its class from that. Times are in ms.
+ *
+ * - Busy: the surface has unsent work (`markBusyStart` / `markBusyEnd`).
+ * - Backlogged: a commit with new damage (`markBackloggedStart`) counts if the previous completed period's busy share
+ *   was at least PROMOTE_FRACTION; the surface then stays backlogged until it is no longer busy. Backlogged implies busy.
+ *
+ * At the end of each period its two shares are kept and the counters start again. Only whole periods count: nothing
+ * changes before two have completed.
  */
-export class DamageMeter {
-  private samples: { time: number; pixels: number }[] = []
+export class RelentlessMeter {
+  private periodStart: number
+  private busySince?: number
+  private backloggedSince?: number
+  private busyMs = 0
+  private backloggedMs = 0
+  private previous?: PeriodFractions
+  private completed = 0
+  private _class: SurfaceClass = 'normal'
+
+  constructor(
+    startTime = 0,
+    private readonly periodMs = CLASS_PERIOD_MS,
+  ) {
+    this.periodStart = startTime
+  }
+
+  get surfaceClass(): SurfaceClass {
+    return this._class
+  }
+
+  get busy(): boolean {
+    return this.busySince !== undefined
+  }
+
+  get backlogged(): boolean {
+    return this.backloggedSince !== undefined
+  }
+
+  /** The shares of the last completed period, if there is one. */
+  get lastPeriod(): PeriodFractions | undefined {
+    return this.previous
+  }
+
+  markBusyStart(now: number): void {
+    this.advance(now)
+    this.busySince ??= now
+  }
+
+  /** The surface has no unsent work anymore: it is not busy, and so not backlogged. */
+  markBusyEnd(now: number): void {
+    this.advance(now)
+    if (this.backloggedSince !== undefined) {
+      this.backloggedMs += now - this.backloggedSince
+      this.backloggedSince = undefined
+    }
+    if (this.busySince !== undefined) {
+      this.busyMs += now - this.busySince
+      this.busySince = undefined
+    }
+  }
 
   /**
-   * @param startTime when the surface appeared: until a full period has passed, the rate is measured over the time
-   * since then instead (but at least INITIAL_FAST_MS), so a young surface isn't judged by mostly empty history.
+   * A commit with non-empty damage arrived (its work makes the surface busy): it becomes backlogged if the previous
+   * completed period was busy enough. Idempotent.
    */
-  constructor(
-    private readonly startTime = -Infinity,
-    private readonly periodMs = MEASURE_PERIOD_MS,
-  ) {}
-
-  record(time: number, pixels: number): void {
-    if (pixels > 0) {
-      this.samples.push({ time, pixels })
+  markBackloggedStart(now: number): void {
+    this.advance(now)
+    if (this.previous !== undefined && this.previous.busy >= PROMOTE_FRACTION) {
+      this.busySince ??= now
+      this.backloggedSince ??= now
     }
   }
 
-  pixelsPerSecond(now: number): number {
-    const since = now - this.periodMs
-    this.samples = this.samples.filter((sample) => sample.time > since)
-    let sum = 0
-    let largest = 0
-    for (const { pixels } of this.samples) {
-      sum += pixels
-      largest = Math.max(largest, pixels)
+  /** Close the periods that ended by `now` and decide the class. Returns the (possibly new) class. */
+  evaluate(now: number): SurfaceClass {
+    this.advance(now)
+    return this._class
+  }
+
+  private advance(now: number) {
+    while (now >= this.periodStart + this.periodMs) {
+      const end = this.periodStart + this.periodMs
+      const busy = this.busyMs + (this.busySince !== undefined ? end - this.busySince : 0)
+      const backlogged = this.backloggedMs + (this.backloggedSince !== undefined ? end - this.backloggedSince : 0)
+      this.previous = { busy: busy / this.periodMs, backlogged: backlogged / this.periodMs }
+      this.completed++
+      this.periodStart = end
+      this.busyMs = 0
+      this.backloggedMs = 0
+      if (this.busySince !== undefined) {
+        this.busySince = end
+      }
+      if (this.backloggedSince !== undefined) {
+        this.backloggedSince = end
+      }
+      if (this.completed >= 2) {
+        if (this._class === 'normal' && this.previous.backlogged >= PROMOTE_FRACTION) {
+          this._class = 'streaming'
+        } else if (this._class === 'streaming' && this.previous.backlogged < DEMOTE_FRACTION) {
+          this._class = 'normal'
+        }
+      }
     }
-    const measuredMs = Math.min(this.periodMs, Math.max(INITIAL_FAST_MS, now - this.startTime))
-    return ((sum - largest) * 1000) / measuredMs
   }
 }
 
 /**
- * The mode a surface should be in, with hysteresis between the two thresholds.
- */
-export function nextMode(
-  current: EncodingMode,
-  pixelsPerSecond: number,
-  thresholds = { fastAbove: FAST_ABOVE_PIXELS_PER_SECOND, slowBelow: SLOW_BELOW_PIXELS_PER_SECOND },
-): EncodingMode {
-  if (current === 'fast' && pixelsPerSecond < thresholds.slowBelow) {
-    return 'slow'
-  }
-  if (current === 'slow' && pixelsPerSecond > thresholds.fastAbove) {
-    return 'fast'
-  }
-  return current
-}
-
-/**
- * The patches to queue for new damage in slow mode.
+ * The patches to queue for new damage.
  *
  * `queued` are patches that are queued but whose pixels haven't been read yet: they will pick up the latest content
  * when they are encoded, so the parts of the damage they cover are left out (possibly all of it). Patches that already

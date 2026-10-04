@@ -2,6 +2,7 @@ import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { onViewerFeedback, setViewerAttached } from '../../FramePacing.js'
 import { ControlMessage } from '../../viewer/ViewerTransport.js'
+import type { EncodingSink } from '../../encoding/SurfaceEncoder.js'
 import { WlrCompositor, WlrNative } from '../WlrCompositor.js'
 
 type Configure = { sid: number; width: number; height: number; state: Record<string, boolean | undefined> }
@@ -27,6 +28,7 @@ class FakeCore {
   readonly relative: [number, number][] = []
   readonly touches: [number, number, number, number, number][] = []
   releases = 0
+  encodersCreated = 0
   readonly frameDone: number[] = []
   readonly closed: number[] = []
   readonly outputSizes: [number, number][] = []
@@ -130,7 +132,10 @@ class FakeCore {
     provideFiles: (list) => {
       this.fileDrag.push(`provide ${JSON.stringify(list)}`)
     },
-    createFrameEncoder: () => ({}),
+    createFrameEncoder: () => {
+      this.encodersCreated++
+      return {}
+    },
     destroyFrameEncoder: () => undefined,
     requestKeyUnit: () => undefined,
     encodeFrame: () => undefined,
@@ -181,8 +186,10 @@ let sent: ControlMessage[]
 
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 const waitFor = async (condition: () => boolean) => {
-  for (let i = 0; i < 200 && !condition(); i++) {
-    await flush()
+  // real time: some things (PNG encoding of icons) finish on other threads
+  const start = Date.now()
+  while (!condition() && Date.now() - start < 3000) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
   }
   assert.ok(condition(), 'timed out')
 }
@@ -193,7 +200,7 @@ const lastConfigure = (sid: number) => [...core.configures].reverse().find((conf
 
 beforeEach(() => {
   core = new FakeCore()
-  compositor = new WlrCompositor({ h264Encoder: 'x264', videoStreams: 1 }, core.native, () => undefined)
+  compositor = new WlrCompositor({ videoStreams: 1 }, core.native, () => undefined)
   sent = []
   compositor.attach((message) => sent.push(message))
 })
@@ -823,4 +830,64 @@ test('X11 windows tell the app tracker their process, and their icon reaches the
   assert.ok(late.some((m) => m.type === 'window.icon'))
   core.onEvent('toplevel-destroy', 1)
   assert.deepEqual(tracked, ['mapped 1 4321', 'gone 1'])
+})
+
+/** A sink that takes patches and frames and never sends them: the surfaces' slots stay taken until they are released. */
+function holdingSink() {
+  const held: ((sent: boolean) => void)[] = []
+  const sink: EncodingSink = {
+    active: true,
+    sendFrame: (_surface, _frame, _class, done) => held.push(done),
+    sendPatch: (_surface, _patch, _class, done) => held.push(done),
+    requireKeyFrame: () => undefined,
+    dropPatches: () => undefined,
+  }
+  return { sink, held }
+}
+
+function readablePixels() {
+  ;(core.native as any).readPixels = (_sid: number, _x: number, _y: number, width: number, height: number) =>
+    new Uint8Array(width * height * 4)
+}
+
+test('without a hardware encoder no video encoder is ever created, whatever the surfaces do', async () => {
+  const { sink, held } = holdingSink()
+  compositor.setFrameSink(sink)
+  readablePixels()
+  core.newWindow(1, { width: 800, height: 600 })
+  for (let i = 0; i < 20; i++) {
+    core.commit(1, 800, 600)
+  }
+  await waitFor(() => held.length > 0)
+  assert.equal(core.encodersCreated, 0)
+  // a buffer that can't be read can't be shown without an encoder, but still no encoder is created
+  ;(core.native as any).readPixels = () => undefined
+  core.newWindow(2, { width: 800, height: 600 })
+  await flush()
+  assert.equal(core.encodersCreated, 0)
+})
+
+test('frame callbacks are held while both of the surface’s slots are taken, and released once one is free', async () => {
+  setViewerAttached(true)
+  onViewerFeedback(16, 0)
+  const { sink, held } = holdingSink()
+  compositor.setFrameSink(sink)
+  readablePixels()
+  try {
+    core.newWindow(1, { width: 400, height: 256 })
+    await waitFor(() => held.length === 2)
+    core.commit(1, 400, 256, true)
+    // several frame clock ticks pass with no free slot: the callback is held
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.deepEqual(core.frameDone, [])
+    // the network takes the surface's items one by one; its queued patches refill the slots until they are all out
+    const start = Date.now()
+    while (core.frameDone.length === 0 && Date.now() - start < 2000) {
+      held.shift()?.(true)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.deepEqual(core.frameDone, [1])
+  } finally {
+    setViewerAttached(false)
+  }
 })

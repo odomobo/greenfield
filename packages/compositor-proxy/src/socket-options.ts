@@ -4,4 +4,4 @@
  */
 import pollAddon from './addons/proxy-poll-addon'
 
-export const { setTcpNotSentLowat, setSocketSendBuffer } = pollAddon
+export const { setTcpNotSentLowat, setSocketSendBuffer, setThreadNice } = pollAddon

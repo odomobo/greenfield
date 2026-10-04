@@ -10,6 +10,12 @@ declare namespace nodePoll {
 
   /** SO_SNDBUF, returns 0 or errno */
   export function setSocketSendBuffer(fd: number, bytes: number): number
+
+  /**
+   * Set the nice level of the calling thread only. Returns the thread's id (as in /proc/self/task/<tid>) or, on
+   * failure, minus errno. A thread can lower its priority but never raise it again.
+   */
+  export function setThreadNice(nice: number): number
 }
 
 export = nodePoll

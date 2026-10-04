@@ -84,7 +84,7 @@ start_gateway() {
   [[ " $* " == *" --insecure-plaintext "* ]] && scheme=http
   (exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" XDG_DATA_HOME="$WORK/data" XDG_CONFIG_HOME="$WORK/config" XDG_CACHE_HOME="$WORK/cache" \
     GST_REGISTRY="$GST_REGISTRY" \
-    node "$REPO/packages/gateway/dist/main.js" --dev-auth --dev-time-scale "$TIME_SCALE" --bind-ip 127.0.0.1 \
+    node "$REPO/packages/gateway/dist/main.js" --dev-auth --dev-time-scale "$TIME_SCALE" --encoder "${E2E_ENCODER:-none}" --bind-ip 127.0.0.1 \
     --bind-port "$port" --state-dir "$WORK/state" "$@") >"$log" 2>&1 &
   STARTED_PID=$!
   EXTRA_PIDS+=("$STARTED_PID")

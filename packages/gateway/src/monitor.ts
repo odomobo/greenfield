@@ -20,6 +20,7 @@ import {
   WebRequestEnvelope,
   WebStart,
 } from './ipc'
+import { resolveEncoder, SessionEncoder } from './encoder'
 import { loadTLS } from './tls'
 import { log } from './log'
 
@@ -56,6 +57,9 @@ export class Monitor {
   private webGid?: number
   private activeAuths = 0
 
+  /** what sessions get, resolved from `--encoder` when the monitor starts */
+  private encoder: SessionEncoder = 'none'
+
   constructor(private readonly config: GatewayConfig) {}
 
   async start() {
@@ -68,6 +72,8 @@ export class Monitor {
         log.warn('/etc/pam.d/greenfield is missing; PAM falls back to the "other" service. See packages/gateway/pam/.')
       }
     }
+
+    this.encoder = resolveEncoder(config.encoder, (message) => log.info(message))
 
     const web = this.lookupWebUser()
     this.webGid = web?.gid
@@ -365,7 +371,7 @@ export class Monitor {
       type: 'start',
       sessionId: id,
       socketPath,
-      encoder: this.config.encoder,
+      encoder: this.encoder,
       renderDevice: this.config.renderDevice,
     }
     child.send(start)

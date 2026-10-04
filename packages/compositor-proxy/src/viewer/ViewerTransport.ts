@@ -1,6 +1,7 @@
 import { WebSocket } from 'ws'
 import { Socket } from 'node:net'
 import { createLogger } from '../Logger.js'
+import type { SurfaceClass } from '../encoding/policy.js'
 import { setSocketSendBuffer, setTcpNotSentLowat } from '../socket-options.js'
 import { decodeViewerEnvelope, encodeControl, encodeFrame, encodePatch, isKeyFrame, Patch } from './protocol.js'
 
@@ -10,12 +11,22 @@ export type ControlMessage = { type: string; [key: string]: any }
 
 export type OutgoingMessage =
   | { readonly priority: 'control'; readonly message: ControlMessage }
-  | { readonly priority: 'frame'; readonly surface: string; readonly frame: Uint8Array }
-  /** `done` is called once: sent true when handed to the socket, false when dropped unsent. */
+  /**
+   * Video frames and patches carry their surface's priority class, and `done`, which is called once: sent true when
+   * handed to the socket, false when dropped unsent.
+   */
+  | {
+      readonly priority: 'frame'
+      readonly surface: string
+      readonly frame: Uint8Array
+      readonly surfaceClass: SurfaceClass
+      readonly done?: (sent: boolean) => void
+    }
   | {
       readonly priority: 'patch'
       readonly surface: string
       readonly patch: Patch
+      readonly surfaceClass: SurfaceClass
       readonly done?: (sent: boolean) => void
     }
 
@@ -25,8 +36,9 @@ export type OutgoingMessage =
  */
 export interface ViewerTransport {
   /**
-   * Queue a message. Control messages are always sent before pending frames. Video frames and patches of a surface
-   * are sent in order. A video key frame replaces everything unsent of its surface (it covers the whole surface),
+   * Queue a message. Control messages are always sent before pending frames and patches. Of those, the two priority
+   * classes share the link by byte-weighted deficit round-robin (normal 3 : streaming 1, work-conserving), surfaces
+   * of a class take turns, one item per visit. Video frames and patches of a surface are sent in order. A video key frame replaces everything unsent of its surface (it covers the whole surface),
    * delta frames are chained behind it up to a small limit. Patches are never coalesced or dropped, except by a later
    * key frame or the calls below.
    */
@@ -62,20 +74,31 @@ const TCP_NOTSENT_LOWAT_BYTES = 32 * 1024
 const UNIX_SEND_BUFFER_BYTES = 32 * 1024
 // Don't hand a new frame to the socket while more than this is still buffered in user space.
 const FRAME_SEND_BUFFERED_LIMIT = 64 * 1024
+// Deficit round-robin between the priority classes: each turn a class may send up to its quantum (plus what it carried
+// over) in bytes. Normal surfaces get 3 times the share of streaming ones, and the other class gets all of the link
+// when one has nothing waiting.
+const DRR_QUANTUM = 16 * 1024
+const DRR_QUANTUM_NORMAL = 3 * DRR_QUANTUM
+const DRR_QUANTUM_STREAMING = 1 * DRR_QUANTUM
 // Max unsent delta frames per surface. Beyond that the viewer is too far behind: drop them and resync with a key frame.
 const MAX_UNSENT_FRAMES_PER_SURFACE = 3
 
-type QueuedEntry =
+type QueuedEntry = { readonly surfaceClass: SurfaceClass; readonly done?: (sent: boolean) => void } & (
   | { readonly kind: 'frame'; readonly frame: Uint8Array }
-  | { readonly kind: 'patch'; readonly envelope: Uint8Array; readonly done?: (sent: boolean) => void }
+  | { readonly kind: 'patch'; readonly envelope: Uint8Array }
+)
 
 function dropEntries(entries: QueuedEntry[]) {
   for (const entry of entries) {
-    if (entry.kind === 'patch') {
-      entry.done?.(false)
-    }
+    entry.done?.(false)
   }
 }
+
+function sizeOf(entry: QueuedEntry): number {
+  return entry.kind === 'frame' ? entry.frame.length : entry.envelope.length
+}
+
+const otherClass = (surfaceClass: SurfaceClass): SurfaceClass => (surfaceClass === 'normal' ? 'streaming' : 'normal')
 
 export class WebSocketViewerTransport implements ViewerTransport {
   onMessage: (message: ControlMessage) => void = () => {
@@ -94,9 +117,14 @@ export class WebSocketViewerTransport implements ViewerTransport {
   private readonly controlQueue: Buffer[] = []
   /**
    * Unsent frames and patches per surface, in order. Video in a chain starts with a key frame or continues a stream
-   * the viewer already decodes. Map iteration order (insertion) gives a rough oldest-first fairness.
+   * the viewer already decodes. Map iteration order (insertion) is the round-robin order between surfaces: a surface
+   * goes to the back after each of its items is sent. A surface's class is that of its next item.
    */
   private readonly pendingFrames = new Map<string, QueuedEntry[]>()
+  /** deficit round-robin state: whose turn it is, whether it got its quantum for this turn, bytes carried over */
+  private drrTurn: SurfaceClass = 'normal'
+  private drrQuantumGiven = false
+  private readonly drrDeficit: Record<SurfaceClass, number> = { normal: 0, streaming: 0 }
   /**
    * Surfaces whose next frame must be a key frame because a frame was dropped.
    */
@@ -141,14 +169,22 @@ export class WebSocketViewerTransport implements ViewerTransport {
 
   send(message: OutgoingMessage): void {
     if (this._closed) {
+      if (message.priority !== 'control') {
+        message.done?.(false)
+      }
       return
     }
     if (message.priority === 'control') {
       this.controlQueue.push(Buffer.from(encodeControl(message.message)))
     } else if (message.priority === 'frame') {
-      this.queueFrame(message.surface, message.frame)
+      this.queueFrame(message.surface, message.frame, message.surfaceClass, message.done)
     } else {
-      this.queuePatch(message.surface, encodePatch(message.surface, message.patch), message.done)
+      this.queuePatch(
+        message.surface,
+        encodePatch(message.surface, message.patch),
+        message.surfaceClass,
+        message.done,
+      )
     }
     this.pump()
   }
@@ -197,11 +233,12 @@ export class WebSocketViewerTransport implements ViewerTransport {
     this.pendingFrames.clear()
   }
 
-  private queueFrame(surface: string, frame: Uint8Array) {
+  private queueFrame(surface: string, frame: Uint8Array, surfaceClass: SurfaceClass, done?: (sent: boolean) => void) {
+    const entry: QueuedEntry = { kind: 'frame', frame, surfaceClass, done }
     if (isKeyFrame(frame)) {
       // everything unsent is superseded, a key frame covers the whole surface
       this.dropQueued(surface)
-      this.pendingFrames.set(surface, [{ kind: 'frame', frame }])
+      this.pendingFrames.set(surface, [entry])
       this.needsKeyFrame.delete(surface)
       return
     }
@@ -210,30 +247,87 @@ export class WebSocketViewerTransport implements ViewerTransport {
     const decodable = !this.needsKeyFrame.has(surface) && (this.keyFrameSent.has(surface) || chain !== undefined)
     if (!decodable) {
       // the viewer can't decode this, wait for a key frame
+      done?.(false)
       this.requestKeyFrame(surface)
       return
     }
 
     const unsentVideo = chain?.filter((entry) => entry.kind === 'frame').length ?? 0
     if (chain === undefined) {
-      this.pendingFrames.set(surface, [{ kind: 'frame', frame }])
+      this.pendingFrames.set(surface, [entry])
     } else if (unsentVideo < MAX_UNSENT_FRAMES_PER_SURFACE) {
-      chain.push({ kind: 'frame', frame })
+      chain.push(entry)
     } else {
       // too far behind, resync
+      done?.(false)
       this.dropQueued(surface)
       this.requestKeyFrame(surface)
     }
   }
 
-  private queuePatch(surface: string, envelope: Uint8Array, done?: (sent: boolean) => void) {
-    const entry: QueuedEntry = { kind: 'patch', envelope, done }
+  private queuePatch(
+    surface: string,
+    envelope: Uint8Array,
+    surfaceClass: SurfaceClass,
+    done?: (sent: boolean) => void,
+  ) {
+    const entry: QueuedEntry = { kind: 'patch', envelope, surfaceClass, done }
     const chain = this.pendingFrames.get(surface)
     if (chain === undefined) {
       this.pendingFrames.set(surface, [entry])
     } else {
       chain.push(entry)
     }
+  }
+
+  /** The first surface of the class, in round-robin order, and its chain of items. */
+  private findHead(surfaceClass: SurfaceClass): { surface: string; chain: QueuedEntry[] } | undefined {
+    for (const [surface, chain] of this.pendingFrames) {
+      if (chain[0].surfaceClass === surfaceClass) {
+        return { surface, chain }
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * The next data item to send, by deficit round-robin between the classes, weighted by bytes: on its turn a class adds
+   * its quantum to its deficit and sends items while the next fits in the deficit. A class with nothing waiting loses
+   * its turn and its deficit, so the other class gets the whole link.
+   */
+  private takeNext(): { surface: string; entry: QueuedEntry } | undefined {
+    // a deficit grows every turn, so even a huge item fits eventually
+    for (let turns = 0; turns < 10_000; turns++) {
+      const turn = this.drrTurn
+      const head = this.findHead(turn)
+      if (head === undefined) {
+        this.drrDeficit[turn] = 0
+        this.drrQuantumGiven = false
+        this.drrTurn = otherClass(turn)
+        if (this.findHead(this.drrTurn) === undefined) {
+          return undefined
+        }
+        continue
+      }
+      if (!this.drrQuantumGiven) {
+        this.drrQuantumGiven = true
+        this.drrDeficit[turn] += turn === 'normal' ? DRR_QUANTUM_NORMAL : DRR_QUANTUM_STREAMING
+      }
+      const entry = head.chain[0]
+      if (sizeOf(entry) <= this.drrDeficit[turn]) {
+        this.drrDeficit[turn] -= sizeOf(entry)
+        head.chain.shift()
+        // back of the line, for fairness between surfaces
+        this.pendingFrames.delete(head.surface)
+        if (head.chain.length) {
+          this.pendingFrames.set(head.surface, head.chain)
+        }
+        return { surface: head.surface, entry }
+      }
+      this.drrQuantumGiven = false
+      this.drrTurn = otherClass(turn)
+    }
+    return undefined
   }
 
   private requestKeyFrame(surface: string) {
@@ -259,17 +353,11 @@ export class WebSocketViewerTransport implements ViewerTransport {
     if (this.framesInFlight > 0 || this.ws.bufferedAmount > FRAME_SEND_BUFFERED_LIMIT) {
       return
     }
-    const next = this.pendingFrames.entries().next()
-    if (next.done) {
+    const next = this.takeNext()
+    if (next === undefined) {
       return
     }
-    const [surface, chain] = next.value
-    const entry = chain.shift()!
-    // re-insert at the back for fairness between surfaces
-    this.pendingFrames.delete(surface)
-    if (chain.length) {
-      this.pendingFrames.set(surface, chain)
-    }
+    const { surface, entry } = next
     let data: Uint8Array
     if (entry.kind === 'frame') {
       if (isKeyFrame(entry.frame)) {
@@ -284,9 +372,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
     // actually left, so the next frame (possibly a newer one for the same surface) is picked as late as possible.
     this.ws.send(data, { binary: true }, () => {
       this.framesInFlight--
-      if (entry.kind === 'patch') {
-        entry.done?.(true)
-      }
+      entry.done?.(true)
       this.pump()
     })
   }

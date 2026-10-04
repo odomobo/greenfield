@@ -1,3 +1,5 @@
+import type { SessionEncoder } from './encoder'
+
 /**
  * Messages between the monitor (privileged in PAM mode) and the web process (unprivileged).
  *
@@ -73,6 +75,6 @@ export type SessionStart = {
   type: 'start'
   sessionId: string
   socketPath: string
-  encoder: 'x264' | 'nvh264' | 'vaapih264'
+  encoder: SessionEncoder
   renderDevice: string
 }

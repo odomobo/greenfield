@@ -83,7 +83,8 @@ sudo env -u DISPLAY /usr/local/bin/node /opt/greenfield/packages/gateway/dist/ma
 
 Options: `--cert/--key` for a real certificate (default: self-signed in /var/lib/greenfield/tls), `--hide-hostname`,
 `--allowed-origin` (behind a reverse proxy), `--insecure-plaintext` (HTTP; only on loopback/private addresses, for a
-trusted home LAN), `--encoder`, `--render-device`. `--help` lists everything.
+trusted home LAN), `--encoder <auto|none|nvh264|vaapih264>` (default `auto`: a hardware video encoder if the machine has
+one, else none, which sends everything as PNG patches), `--render-device`. `--help` lists everything.
 
 ## Desktop shell
 

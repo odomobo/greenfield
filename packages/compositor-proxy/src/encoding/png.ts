@@ -1,4 +1,4 @@
-import { deflate } from 'node:zlib'
+import { deflate, deflateSync } from 'node:zlib'
 
 /**
  * Minimal RGBA PNG encoder for patches. Row filtering runs here (cheap, a patch is at most 64k pixels), compression
@@ -92,10 +92,36 @@ export function filterRows(rgba: Uint8Array, width: number, height: number): Uin
   return out
 }
 
-/** Encode tightly packed RGBA pixels (8 bit, rows top to bottom) as a PNG. */
-export function encodePng(rgba: Uint8Array, width: number, height: number): Promise<Buffer> {
+
+function assemble(width: number, height: number, compressed: Uint8Array): Buffer {
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header[8] = 8 // bit depth
+  header[9] = 6 // color type RGBA
+  header[10] = 0 // deflate
+  header[11] = 0 // adaptive filtering
+  header[12] = 0 // no interlace
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    chunk('IHDR', header),
+    chunk('IDAT', compressed),
+    chunk('IEND', new Uint8Array(0)),
+  ])
+}
+
+function checkSize(rgba: Uint8Array, width: number, height: number) {
   if (rgba.length !== width * height * 4) {
-    return Promise.reject(new Error(`Expected ${width * height * 4} bytes of RGBA, got ${rgba.length}.`))
+    throw new Error(`Expected ${width * height * 4} bytes of RGBA, got ${rgba.length}.`)
+  }
+}
+
+/** Encode tightly packed RGBA pixels (8 bit, rows top to bottom) as a PNG, compressing on libuv's thread pool. */
+export function encodePng(rgba: Uint8Array, width: number, height: number): Promise<Buffer> {
+  try {
+    checkSize(rgba, width, height)
+  } catch (e) {
+    return Promise.reject(e)
   }
   const filtered = filterRows(rgba, width, height)
   return new Promise((resolve, reject) => {
@@ -104,22 +130,16 @@ export function encodePng(rgba: Uint8Array, width: number, height: number): Prom
         reject(error)
         return
       }
-      const header = Buffer.alloc(13)
-      header.writeUInt32BE(width, 0)
-      header.writeUInt32BE(height, 4)
-      header[8] = 8 // bit depth
-      header[9] = 6 // color type RGBA
-      header[10] = 0 // deflate
-      header[11] = 0 // adaptive filtering
-      header[12] = 0 // no interlace
-      resolve(
-        Buffer.concat([
-          PNG_SIGNATURE,
-          chunk('IHDR', header),
-          chunk('IDAT', compressed),
-          chunk('IEND', new Uint8Array(0)),
-        ]),
-      )
+      resolve(assemble(width, height, compressed))
     })
   })
+}
+
+/**
+ * The same PNG, all on the calling thread (for the streaming encode workers, whose own thread then does the work and
+ * carries their nice level).
+ */
+export function encodePngSync(rgba: Uint8Array, width: number, height: number): Buffer {
+  checkSize(rgba, width, height)
+  return assemble(width, height, deflateSync(filterRows(rgba, width, height), { level: DEFLATE_LEVEL }))
 }

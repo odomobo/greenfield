@@ -72,8 +72,9 @@ The prototype, by hand:
   size, placed at the output origin).
 - gtk4-demo: maps with its client-side shadow and input region; its own cursor surface; its menu (xdg_popup, part of the
   window's surface list); the About dialog (`set_parent`, centered on the parent, stacked above it).
-- Encoding: small surfaces as patches, busy surfaces as H.264 (86 video frames while foot scrolled, with the viewer's
-  pacing simulated); lazy patch capture unchanged (the buffer stays locked until the next commit).
+- Encoding (as of wave 1; replaced by Core 2a, see "Encoding policy" in ROADMAP.md): small surfaces as patches, busy
+  surfaces as H.264 (86 video frames while foot scrolled, with the viewer's pacing simulated); lazy patch capture
+  unchanged (the buffer stays locked until the next commit).
 - Reattach: closing the browser, signing in again and reopening the session brings back all three windows with a mean
   luma difference of 0.00.
 
@@ -177,6 +178,12 @@ XWayland (wave 2 B):
 
 ### Video encoder (`native/encoding/src/gst_frame_encoder.c`)
 
+Since Core 2a the encoder is only used with GPU acceleration (`--encoder nvh264|vaapih264`, or `auto` finding one) and
+only for streaming surfaces (see "Encoding policy" in ROADMAP.md). With `--encoder none` (what `auto` resolves to
+without a GPU) no encoder is ever created and everything is sent as PNG patches; there is no x264 fallback. The x264 CPU
+path below is still in the file, unused and untested since, until GPU acceleration is revisited (wave 4 G). The notes
+that follow describe it as it was built.
+
 - **Two paths, picked per buffer.** x264 with shared memory buffers (the case here: no GPU) takes the CPU pipelines
   (`appsrc ! videoconvert ! videobox ! x264enc`; the alpha stream is built by `shm_frame_buffer_to_new_alpha_sample`:
   alpha bytes as the luma of an I420 frame, no GL). dmabuf buffers and the hardware encoders (nvh264, vaapih264) take the
@@ -197,8 +204,9 @@ XWayland (wave 2 B):
   `has_split_alpha` is set before the first buffer is pushed (the CPU path is fast enough to race it).
 - Checked with a scratch C harness around `do_gst_frame_encoder_*` and `openh264dec` (no libav here): the decoded
   frame has the image bottom right, alpha ramp and padding right, delta frames decode, and a size change mid-stream
-  starts a new SPS (openh264dec in gst drops one frame there; the browser doesn't). The e2e checks that the viewer
-  decodes foot's video frames without failures (`__viewerTest.videoFrames()`).
+  starts a new SPS (openh264dec in gst drops one frame there; the browser doesn't). The e2e used to check that the viewer
+  decodes foot's video frames without failures (`__viewerTest.videoFrames()`); since Core 2a it runs with
+  `--encoder none` and checks patches instead, so the viewer's video decoding is only covered by its unit tests.
 
 Wave 3 D (polish):
 
