@@ -511,6 +511,14 @@ export class Desktop {
         y: interaction.menu.nudge.y + arrow.y * step,
       }
       this.continueInteraction()
+      // continue sizing from the rect shown now: presses past a minimum or maximum size are dropped, so the opposite
+      // arrow takes effect right away
+      const override = this.resizeOverrides.get(interaction.window)
+      if (interaction.mode === 'resize' && override) {
+        interaction.startRect = override.rect
+        interaction.startPointer = this.pointer
+        interaction.menu.nudge = { x: 0, y: 0 }
+      }
     }
   }
 

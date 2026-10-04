@@ -283,8 +283,8 @@ Wave 3 H (input and X11 gaps; `src/wlr_core_input.c`):
   maxW, maxH]` (0: unbounded): xdg from `toplevel->current.min_width` etc. (the committed state, so a client that changes its
   limits is picked up at its next commit), X11 from `xsurface->size_hints` (`WM_NORMAL_HINTS`, flags PMinSize bit 4 and PMaxSize
   bit 5, read by wlroots' xwm). The X11 path is only unit tested (the fake core), not by e2e. foot sets min size 12x39
-  (checked in its WAYLAND_DEBUG log; `desktop.sh` asserts the scene matches). Menu Size with arrow keys keeps accumulating the
-  nudge past a limit (the shown rect stops, releasing the arrow doesn't undo the overshoot).
+  (checked in its WAYLAND_DEBUG log; `desktop.sh` asserts the scene matches). Menu Size with arrow keys continues from the
+  rect shown after each press, so presses past a limit are dropped and the opposite arrow acts right away.
 
 ## Not done yet (later waves of the migration)
 
