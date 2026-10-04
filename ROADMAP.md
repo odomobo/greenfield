@@ -204,9 +204,8 @@ gone out. Defined precisely:
 - The surface becomes **backlogged** when a commit with non-empty damage arrives while it has unsent work from an
   earlier commit. It stays backlogged until it has no unsent work at all. (Commits while already backlogged change
   nothing: the rule is idempotent.)
-- The **backlog fraction** is the share of the last `CLASS_PERIOD_MS` = 1500 ms the surface spent backlogged. For a
-  surface younger than that, it's measured over its age instead, and no promotion happens before it is
-  `CLASS_MIN_AGE_MS` = 500 ms old.
+- The **backlog fraction** is the share of the last `CLASS_PERIOD_MS` = 1500 ms the surface spent backlogged. A
+  surface younger than `CLASS_PERIOD_MS` can't be promoted: the decision always sees a whole period.
 - **Promote** to streaming when the fraction is at least `PROMOTE_FRACTION` = 0.85.
 - **Demote** to normal once the fraction has stayed below `DEMOTE_FRACTION` = 0.40 for `DEMOTE_HOLD_MS` = 2000 ms
   without interruption.
@@ -257,17 +256,39 @@ Each surface is a source with at most **2 slots** (`SURFACE_SLOTS` = 2). An item
   handed to the socket, or dropped.
 - A surface may capture only while it has a free slot. So at most two of its items exist between capture and the
   socket; everything else waits as queued rectangles, where new damage merges into it.
-- Because a surface only encodes into free slots, its CPU use follows the send schedule: a low-priority surface
-  encodes only as fast as it's allowed to send. No process priorities are needed.
+- Because a surface only encodes into free slots, the amount it encodes follows the send schedule: a low-priority
+  surface encodes only as fast as it's allowed to send. How its encoding competes for the CPU is the next section.
 
-### Encode scheduling
+### Encode scheduling: streaming patches at low CPU priority
 
-PNG compression runs on libuv's thread pool (4 threads by default). The number of patches being encoded at once,
-across all surfaces, is limited to `MAX_CONCURRENT_ENCODES` = 4, so a streaming surface's encodes can't fill the thread
-pool's queue ahead of a normal surface's. When an encode finishes (or a slot frees), the next surface allowed to capture
-is chosen by the same class rule as sending: normal surfaces first, but every 4th capture goes to a streaming surface
-if one is waiting (3:1), round-robin between surfaces within a class. Counting captures, not bytes, is fine here:
-patches are similar in work. Video encodes happen on the GPU (hardware encoders) and are not counted.
+Relentless PNG encoding must not fight real work on the machine (the user's apps, other sessions). So streaming
+surfaces' patches are encoded on threads with a low OS priority, and the kernel's scheduler gives them only the CPU
+that nothing else wants.
+
+- **Normal surfaces**: as today. Row filtering on the main thread, deflate on libuv's thread pool (4 threads by
+  default), normal priority. At most `MAX_NORMAL_ENCODES` = 4 patches encoding at once (today's `maxInFlight` is 3).
+- **Streaming surfaces**: a separate pool of `STREAMING_ENCODE_WORKERS` = 2 Node `worker_threads`, each started with
+  its own OS thread at nice `STREAMING_ENCODE_NICE` = 19. A worker does the whole PNG encode (row filtering and
+  `zlib.deflateSync`, which runs on the worker's own thread, so the nice level applies to it), one patch at a time.
+  The captured pixels are passed as a transferred `ArrayBuffer` (no copy) and the PNG comes back the same way.
+  The libuv thread pool can't be used for this: its threads are shared with everything else in the process (file
+  I/O, DNS, normal patches), and an unprivileged process can raise a thread's nice level but never lower it back.
+- Setting the nice level: a small native function in the existing `poll` addon (next to `setTcpNotSentLowat`),
+  `setThreadNice(n)`: `setpriority(PRIO_PROCESS, gettid(), n)`, which on Linux applies to the calling thread only.
+  Each worker calls it first thing; if it fails, the worker logs once and carries on at normal priority. No
+  privileges are needed to lower one's own priority.
+- Nice 19 has a scheduler weight of 15 against 1024 for nice 0: with a busy normal-priority thread on the same core,
+  a streaming encode gets about 1.5% of it; on an idle machine it gets the full CPU. (`SCHED_IDLE` would go lower
+  still; nice 19 is enough and simpler.)
+- Where it applies: apps started by the session (and from its terminals) share the session process's scheduling
+  group, so nice works against them directly. Other users' sessions live in their own systemd slices (pam_systemd),
+  which the kernel already balances against ours; within ours, the streaming threads give way.
+- A streaming surface captures into a free slot only when a streaming worker is free (or about to be: at most one
+  patch waiting per worker), so its patches never pile up waiting for a worker. Workers are picked round-robin between
+  streaming surfaces. Normal and streaming encodes never wait for each other.
+- When a surface changes class, patches already being encoded finish where they are; only new captures go to the
+  other pool.
+- Video encodes happen on the GPU (hardware encoders) and are not affected.
 
 ### Send scheduling
 
@@ -304,8 +325,8 @@ allows it):
 - The encoder pool (warm hardware video encoders, `videoStreams`, default 4) caps the number of surfaces streamed as
   video; when it's empty, streaming surfaces stay on patches.
 - The browser uses software decode for now (no hard decoder limits).
-- Rejected: one tiled "atlas" video stream for all windows (too much trouble for the benefit); process priorities
-  (nice levels) for streaming work (not needed: slots and the encode scheduler do it inside one process); holding a
+- Rejected: one tiled "atlas" video stream for all windows (too much trouble for the benefit); lowering the
+  whole session process's priority (it also runs input, the scene and normal surfaces); holding a
   streaming surface's patches back for whole frames (latency).
 
 ## Transport and congestion control
@@ -686,9 +707,11 @@ single large item never stalls the link. Initial window before any estimate: 64 
       backlogged state as defined in the spec. Class changes as specified (with video: drop patches + key frame /
       crisp full render; without: priority only). `refresh()` (viewer attached, key frame needed) unchanged in
       effect.
-    - Replace `PatchPump`'s single round-robin set with per-surface slots (`SURFACE_SLOTS` = 2) and the encode
-      scheduler (`MAX_CONCURRENT_ENCODES` = 4, 3:1 normal to streaming by capture count, round-robin within a class).
-      Keep capture-order sending per surface (`sendTails`) and the epoch check for stale results.
+    - Replace `PatchPump`'s single round-robin set with per-surface slots (`SURFACE_SLOTS` = 2) and the two encode
+      pools: normal on libuv as today (`MAX_NORMAL_ENCODES` = 4), streaming on `STREAMING_ENCODE_WORKERS` = 2
+      `worker_threads` at nice 19 (new `setThreadNice` in the `poll` addon; the worker runs the existing `png.ts`
+      code with `deflateSync`). Keep capture-order sending per surface (`sendTails`) and the epoch check for stale
+      results.
     - `viewer/ViewerTransport.ts`: `OutgoingMessage` for patches and frames carries the class (`'normal' |
       'streaming'`); replace the single `pendingFrames` round-robin with the byte-weighted deficit round-robin between
       the classes (`DRR_QUANTUM` = 16 KB, quanta 3:1), round-robin between surfaces within a class. Control first as
@@ -700,8 +723,10 @@ single large item never stalls the link. Initial window before any estimate: 64 
     - All constants named and grouped at the top of their files, so they're easy to tune.
     - Unit tests: the measure (a one-off big repaint stays normal; a surface committing every frame callback while
       its patches queue is promoted within ~1.5 s; a throttled one stays streaming; a needy one that drains between
-      commits stays normal; demotion after 2 s below 0.40; nothing before 500 ms of age); the encode scheduler (3:1,
-      no starvation, at most 4 encodes, slots respected); the send scheduler (byte-weighted 3:1 with mixed sizes,
+      commits stays normal; demotion after 2 s below 0.40; no promotion before 1.5 s of age); the encode pools (streaming
+      patches go to the workers and normal ones to libuv, at most 4 normal encodes, slots respected, a worker's
+      thread really runs at nice 19: read its nice value from `/proc/self/task/<tid>/stat`, with the tid returned by
+      the native helper; worker PNGs identical to `png.ts` output); the send scheduler (byte-weighted 3:1 with mixed sizes,
       work-conserving when one class is empty, per-surface order kept, control first); frame callbacks held and
       released by slots; `none` never creates a video encoder; `auto` detection with mocked probes.
     - `scripts/test-gateway.sh` passes (WSL has no render node, so it runs `none`: e2e checks that expect video
