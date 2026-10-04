@@ -1,9 +1,12 @@
+import { AckTracker } from './acks'
 import {
   CLOSE_TAKEN_OVER,
   decodeEnvelope,
   DecodedEnvelope,
+  encodeAck,
   encodeControl,
   encodeFileChunk,
+  isDataEnvelope,
   ViewerMessage,
 } from './protocol'
 
@@ -26,9 +29,12 @@ const CLOSE_NOT_FOUND = 4004
  * over (then the user decides), the session ended or we're signed out.
  *
  * The first message on the socket is the sign-in token (not the URL, so it doesn't end up in logs).
+ *
+ * Data envelopes (frames, patches) are acknowledged the moment they arrive, before decoding (see acks.ts); whoever
+ * handles one calls its `applied` once it's drawn, decoded or dropped.
  */
 export class Connection {
-  onEnvelope: (envelope: DecodedEnvelope) => void = () => {
+  onEnvelope: (envelope: DecodedEnvelope, applied: () => void) => void = () => {
     /* noop */
   }
   /** a (new) WebSocket is open, the server will send a full snapshot */
@@ -40,6 +46,11 @@ export class Connection {
   }
 
   private ws?: WebSocket
+  private readonly acks = new AckTracker((ack) => {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(encodeAck(ack))
+    }
+  })
   private retryDelay = 500
   private retryTimer?: number
   private target?: { url: string; token: string }
@@ -64,6 +75,8 @@ export class Connection {
     const ws = new WebSocket(url)
     ws.binaryType = 'arraybuffer'
     this.ws = ws
+    // the server counts data envelopes per connection
+    this.acks.reset()
     ws.onopen = () => {
       ws.send(token)
       this.retryDelay = 500
@@ -71,17 +84,23 @@ export class Connection {
       this.onOpen()
     }
     ws.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer)) {
+      if (!(event.data instanceof ArrayBuffer) || this.ws !== ws) {
         return
       }
+      // acknowledge data first thing, so the server's round-trip times measure the network, not our decoding
+      const token = isDataEnvelope(new Uint8Array(event.data, 0, Math.min(2, event.data.byteLength)))
+        ? this.acks.arrived(event.data.byteLength)
+        : undefined
+      const applied = token === undefined ? noop : () => this.acks.applied(token)
       let envelope: DecodedEnvelope
       try {
         envelope = decodeEnvelope(event.data)
       } catch (e) {
         console.error('Invalid message from server', e)
+        applied()
         return
       }
-      this.onEnvelope(envelope)
+      this.onEnvelope(envelope, applied)
     }
     ws.onclose = (event) => {
       if (this.ws !== ws) {
@@ -137,4 +156,8 @@ export class Connection {
       this.ws.send(encodeControl(message))
     }
   }
+}
+
+function noop() {
+  /* nothing to acknowledge */
 }

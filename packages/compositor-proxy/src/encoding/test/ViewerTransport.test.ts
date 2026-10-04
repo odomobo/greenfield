@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
-import { decodeEnvelope, Patch } from '@gfld/scene-protocol'
+import { decodeEnvelope, encodeAck, encodeControl, Patch } from '@gfld/scene-protocol'
 import { WebSocketViewerTransport } from '../../viewer/ViewerTransport.js'
 
 /** Just enough of a ws WebSocket: sends complete when the test says so. */
@@ -151,4 +151,16 @@ test('frames held back by a full socket go out once queued control messages are 
   assert.equal(ws.sent.length, 1)
   const envelope = decodeEnvelope(new Uint8Array(ws.sent[0].data).slice().buffer)
   assert.equal(envelope.kind, 'patch')
+})
+
+test('acks from the viewer go to onAck, control messages still to onMessage', () => {
+  const { ws, transport } = setup()
+  const acks: unknown[] = []
+  const messages: unknown[] = []
+  transport.onAck = (ack) => acks.push(ack)
+  transport.onMessage = (message) => messages.push(message)
+  ws.emit('message', Buffer.from(encodeAck({ received: 7, backlogBytes: 1000, largestPendingBytes: 600 })), true)
+  ws.emit('message', Buffer.from(encodeControl({ type: 'focus', focused: true })), true)
+  assert.deepEqual(acks, [{ kind: 'ack', received: 7, backlogBytes: 1000, largestPendingBytes: 600 }])
+  assert.deepEqual(messages, [{ type: 'focus', focused: true }])
 })

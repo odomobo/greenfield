@@ -3,7 +3,15 @@ import { Socket } from 'node:net'
 import { createLogger } from '../Logger.js'
 import type { SurfaceClass } from '../encoding/policy.js'
 import { setSocketSendBuffer, setTcpNotSentLowat } from '../socket-options.js'
-import { decodeViewerEnvelope, encodeControl, encodeFrame, encodePatch, isKeyFrame, Patch } from './protocol.js'
+import {
+  decodeViewerEnvelope,
+  encodeControl,
+  encodeFrame,
+  encodePatch,
+  isKeyFrame,
+  Patch,
+  ViewerAck,
+} from './protocol.js'
 
 const logger = createLogger('viewer-transport')
 
@@ -60,6 +68,8 @@ export interface ViewerTransport {
   onMessage: (message: ControlMessage) => void
   /** The next bytes of an uploaded file (see the scene protocol's `file-drop`). */
   onFileChunk: (id: number, data: Uint8Array) => void
+  /** The viewer acknowledged data envelopes and reported its backlog (see the scene protocol's ACK). */
+  onAck: (ack: ViewerAck) => void
   onClose: (code: number, reason: string) => void
   /**
    * A frame for this surface had to be dropped and the following frames can't be decoded without a key frame.
@@ -107,6 +117,9 @@ export class WebSocketViewerTransport implements ViewerTransport {
   onFileChunk: (id: number, data: Uint8Array) => void = () => {
     /* noop */
   }
+  onAck: (ack: ViewerAck) => void = () => {
+    /* noop */
+  }
   onClose: (code: number, reason: string) => void = () => {
     /* noop */
   }
@@ -151,6 +164,8 @@ export class WebSocketViewerTransport implements ViewerTransport {
       }
       if (envelope.kind === 'file') {
         this.onFileChunk(envelope.id, envelope.data)
+      } else if (envelope.kind === 'ack') {
+        this.onAck(envelope)
       } else {
         this.onMessage(envelope.message)
       }
