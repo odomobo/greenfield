@@ -58,8 +58,6 @@
   --color-flyout-border: var(--surface-edge);
   --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
   --radius-flyout: 8px;
-  --color-connection-ok: #6ccb5f;
-  --color-connection-bad: #ff99a4;
 
   /* window frames (title bar and border drawn by the viewer; their sizes are fixed by the protocol) */
   --color-frame: var(--surface-active);

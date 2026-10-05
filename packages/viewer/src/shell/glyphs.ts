@@ -45,8 +45,6 @@ export const glyphs = {
   minimize: (size = 14) => glyph('<path d="M5 12h14"/>', size),
   maximize: (size = 14) => glyph('<rect x="5" y="5" width="14" height="14" rx="2"/>', size),
   restore: (size = 14) => glyph('<rect x="4.5" y="8.5" width="11" height="11" rx="2"/><path d="M8.5 5.5h8a2 2 0 0 1 2 2v8"/>', size),
-  signal: () => glyph('<path d="M4 18.5h1M9 18.5v-4M14 18.5v-8M19 18.5v-12"/>'),
-  signalOff: () => glyph('<path d="M4 18.5h1M9 18.5v-4M14 18.5v-2M19 18.5v-2"/><path d="m14 5 5 5m0-5-5 5"/>'),
   /** speaker with sound waves (solid) */
   speaker: (size = 22) => solid(SPEAKER, '<path d="M16 9a4.2 4.2 0 0 1 0 6M18.8 6.3a8 8 0 0 1 0 11.4"/>', size),
   /** speaker, muted: crossed out (solid) */

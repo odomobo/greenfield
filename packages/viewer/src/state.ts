@@ -54,7 +54,6 @@ export type ShellState = {
   pinned: string[]
   /** the windows as shown, published by the Desktop */
   windows: ShellWindow[]
-  connection: 'connecting' | 'connected' | 'reconnecting' | 'offline'
   notifications: ShellNotification[]
   /** the bell shows a dot until the panel was opened */
   unseen: boolean
@@ -70,7 +69,6 @@ export const shellStore = createStore<ShellState>({
   apps: [],
   pinned: [],
   windows: [],
-  connection: 'connecting',
   notifications: [],
   unseen: false,
   toasts: [],

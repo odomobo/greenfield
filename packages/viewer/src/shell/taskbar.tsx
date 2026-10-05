@@ -120,13 +120,6 @@ function TaskbarButton({ group, onClick }: TaskbarButtonProps) {
   )
 }
 
-const CONNECTION_LABELS: Record<string, string> = {
-  connecting: 'Connecting…',
-  connected: 'Connected',
-  reconnecting: 'Connection lost, reconnecting…',
-  offline: 'Not connected',
-}
-
 function audioLabel(state: { muted: boolean; available: boolean; supported: boolean; running: boolean }): string {
   if (!state.supported) {
     return 'This browser cannot play the session audio'
@@ -164,9 +157,8 @@ function MuteButton() {
   )
 }
 
-/** The right side of the taskbar: the mute toggle, the connection indicator and the clock with the notification bell. */
+/** The right side of the taskbar: the mute toggle and the clock with the notification bell. */
 function Tray() {
-  const connection = useStorePart(shellStore, (state) => state.connection)
   const unseen = useStorePart(shellStore, (state) => state.unseen)
   const count = useStorePart(shellStore, (state) => state.notifications.length)
   const { shell } = useCore()
@@ -174,17 +166,6 @@ function Tray() {
   return (
     <div id="tray">
       <MuteButton />
-      <span
-        id="connection-indicator"
-        className="tray-item"
-        role="status"
-        data-state={connection}
-        title={CONNECTION_LABELS[connection]}
-        aria-label={CONNECTION_LABELS[connection]}
-        dangerouslySetInnerHTML={{
-          __html: connection === 'connected' || connection === 'connecting' ? glyphs.signal() : glyphs.signalOff(),
-        }}
-      />
       <button
         type="button"
         id="notifications-button"

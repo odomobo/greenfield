@@ -114,19 +114,6 @@
   opacity: 0.5;
 }
 
-#connection-indicator[data-state='connected'] {
-  color: var(--color-connection-ok);
-}
-
-#connection-indicator[data-state='reconnecting'],
-#connection-indicator[data-state='offline'] {
-  color: var(--color-connection-bad);
-}
-
-#connection-indicator[data-state='connecting'] {
-  color: var(--color-text-secondary);
-}
-
 .tray-clock {
   display: inline-flex;
   align-items: center;
