@@ -3,7 +3,7 @@ import { AlphaCompositor } from './alpha-video'
 import { KeyFrameNeeded, SurfaceDecoder } from './decoder'
 import { SurfaceView } from './surface-view'
 import { WindowView } from './window-view'
-import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
+import { Animation, EASE_IN, EASE_OUT, lerpRect, reducedMotion } from './animation'
 import { FrameInsets, frameInsets, parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 import { modifiersOf } from './modifiers'
 import { ClipboardSync, isPasteChord } from './clipboard'
@@ -70,10 +70,11 @@ type ResizeOverride = { rect: Rect; edges: number; finalSize?: Size; settleTimer
 /**
  * A minimize, restore, maximize or unmaximize being animated: the window's latest content is scaled from one rect to
  * another (window geometry, output coordinates), nothing is resized on the client for it. A maximize/unmaximize keeps
- * showing the end rect after the animation until the client committed the new state (or SETTLE_TIMEOUT).
+ * showing the end rect after the animation until the client committed the new state (or SETTLE_TIMEOUT). An open
+ * (a new window's first appearance) grows and fades in around wherever the window rests, `from` and `to` are unused.
  */
 type WindowAnimation = {
-  kind: 'minimize' | 'restore' | 'maximize' | 'unmaximize'
+  kind: 'minimize' | 'restore' | 'maximize' | 'unmaximize' | 'open'
   animation: Animation
   from: Rect
   to: Rect
@@ -102,6 +103,12 @@ const RESIZE_SETTLE_TIMEOUT = 2000
 const DOUBLE_CLICK_MS = 500
 /** Durations of the window state animations, ms. Subtle and short. */
 const STATE_ANIMATION_MS = 150
+/** A new window grows from this much of its size and fades in, in this many ms; a closed one shrinks and fades out. */
+const OPEN_SCALE = 0.92
+const OPEN_ANIMATION_MS = 150
+const CLOSE_ANIMATION_MS = 130
+/** A new window is shown (and animated) once it's placed and has content, or after this long whatever it has. */
+const OPEN_WAIT_MS = 500
 
 /** icon: the app's own icon (PNG data URL), for windows whose app has no desktop entry icon */
 export type ShellWindow = SceneWindow & { shownMinimized: boolean; icon?: string }
@@ -147,6 +154,14 @@ export class Desktop {
   /** a drag and drop between remote apps is going on (the server says so), with its icon surface */
   private drag?: { icon?: { surface: string; x: number; y: number } }
   private readonly animations = new Map<string, WindowAnimation>()
+  /** windows shown since they appeared (or that were there when the session was attached): no open animation */
+  private readonly opened = new Set<string>()
+  /** when windows that aren't shown yet appeared */
+  private readonly appeared = new Map<string, number>()
+  /** a scene arrived since the last clear(): later windows are new and open animated */
+  private sceneSeen = false
+  /** what closed windows looked like, fading out (see `fadeOut`) */
+  private readonly ghostLayer = document.createElement('div')
   /** geometry of windows before they were maximized, to animate back to */
   private readonly restoreRects = new Map<string, Rect>()
 
@@ -207,9 +222,10 @@ export class Desktop {
     private readonly connection: Connection,
   ) {
     this.windowLayer.className = 'window-layer'
+    this.ghostLayer.className = 'ghost-layer'
     this.popupLayer.className = 'popup-layer'
     this.floatingLayer.className = 'floating-layer'
-    container.append(this.windowLayer, this.popupLayer, this.floatingLayer)
+    container.append(this.windowLayer, this.ghostLayer, this.popupLayer, this.floatingLayer)
     this.pointerLock = new PointerLock(
       {
         request: () => container.requestPointerLock() as Promise<void> | void,
@@ -313,6 +329,10 @@ export class Desktop {
     this.resizeOverrides.clear()
     this.placementSent.clear()
     this.animations.clear()
+    this.opened.clear()
+    this.appeared.clear()
+    this.sceneSeen = false
+    this.ghostLayer.replaceChildren()
     this.restoreRects.clear()
     this.windowIcons.clear()
     this.touches.clear()
@@ -641,6 +661,8 @@ export class Desktop {
     // ask right away, the animation runs while the client redraws
     this.sendWindowChange({ type: 'window.maximize', window: id, maximized })
     this.startMaximizeAnimation(window, maximized)
+    // (from a menu: the keyboard goes back to the session, as when a window is activated)
+    this.container.focus()
   }
 
   /** Send a window change, numbered so its echo in the scene can be told apart from older state (see WindowSync). */
@@ -813,7 +835,9 @@ export class Desktop {
     let to: Rect | undefined
     if (maximized) {
       if (!window.maximized) {
-        this.restoreRects.set(window.id, from)
+        // where it rests, not where an animation shows it now: maximizing a minimized window restores it first, and
+        // that animation starts at the taskbar button
+        this.restoreRects.set(window.id, this.restingRect(window))
       }
       // (a decorated window's title bar stays on screen: its content is the output below it)
       const { top } = frameInsets({ decorated: window.decorated, maximized: true })
@@ -837,6 +861,92 @@ export class Desktop {
       toOpacity: 1,
     })
     this.scheduleLayout()
+  }
+
+  /**
+   * New windows are shown once they're ready (placed, and all their surfaces have content), or after OPEN_WAIT_MS:
+   * until then they're transparent, so a window doesn't flash empty or at a spot it's about to leave. Shown, they grow
+   * and fade in.
+   */
+  private startOpenAnimations(now: number) {
+    for (const window of this.windows) {
+      if (this.opened.has(window.id)) {
+        continue
+      }
+      let appeared = this.appeared.get(window.id)
+      if (appeared === undefined) {
+        appeared = now
+        this.appeared.set(window.id, now)
+        setTimeout(() => this.scheduleLayout(), OPEN_WAIT_MS + 1)
+      }
+      const ready =
+        (window.placed || window.parent !== undefined || window.maximized || window.fullscreen) &&
+        window.surfaces.every((surface) => this.surfaceViews.get(surface.id)?.hasContent)
+      if (!ready && now - appeared < OPEN_WAIT_MS) {
+        continue
+      }
+      this.opened.add(window.id)
+      this.appeared.delete(window.id)
+      if (!this.isMinimized(window) && !this.animations.has(window.id) && !reducedMotion()) {
+        const rect = this.restingRect(window)
+        this.animations.set(window.id, {
+          kind: 'open',
+          animation: new Animation(OPEN_ANIMATION_MS, EASE_OUT),
+          from: rect,
+          to: rect,
+          fromOpacity: 0,
+          toOpacity: 1,
+        })
+      }
+    }
+  }
+
+  /**
+   * A closed window shrinks and fades out: a copy of its element as it was last shown (its canvases' pixels copied)
+   * in a layer of its own above the windows, gone when the animation ends. The copy takes no input and isn't a
+   * window to anyone (no data attributes).
+   */
+  private fadeOut(window: SceneWindow) {
+    const view = this.windowViews.get(window.id)
+    if (view === undefined || !this.opened.has(window.id) || this.isHidden(window) || reducedMotion()) {
+      return
+    }
+    const ghost = view.element.cloneNode(true) as HTMLElement
+    const sources = view.element.querySelectorAll('canvas')
+    const copies = ghost.querySelectorAll('canvas')
+    sources.forEach((source, i) => {
+      const copy = copies[i]
+      if (copy === undefined || source.width === 0 || source.height === 0) {
+        return
+      }
+      copy.width = source.width
+      copy.height = source.height
+      try {
+        copy.getContext('2d')?.drawImage(source, 0, 0)
+      } catch {
+        // (nothing to copy from)
+      }
+    })
+    for (const element of [ghost, ...ghost.querySelectorAll<HTMLElement>('*')]) {
+      for (const name of Object.keys(element.dataset)) {
+        delete element.dataset[name]
+      }
+    }
+    ghost.classList.add('ghost')
+    ghost.inert = true
+    this.ghostLayer.append(ghost)
+    const base = view.element.style.transform
+    const center = { x: window.geometry.x + window.geometry.width / 2, y: window.geometry.y + window.geometry.height / 2 }
+    const shrunk = `${base} translate(${center.x}px, ${center.y}px) scale(${OPEN_SCALE}) translate(${-center.x}px, ${-center.y}px)`
+    ghost
+      .animate([{ transform: base, opacity: 1 }, { transform: shrunk, opacity: 0 }], {
+        duration: CLOSE_ANIMATION_MS,
+        // accelerating out, like a minimize
+        easing: 'cubic-bezier(0.7, 0, 1, 1)',
+        fill: 'forwards',
+      })
+      .finished.catch(() => undefined)
+      .then(() => ghost.remove())
   }
 
   /** Where a window rests when it's not animating: its scene geometry (or the rect of a resize in progress). */
@@ -886,6 +996,19 @@ export class Desktop {
       }
     }
     const progress = state.animation.progress()
+    if (state.kind === 'open') {
+      const rest = this.restingRect(window)
+      const scale = OPEN_SCALE + (1 - OPEN_SCALE) * progress
+      return {
+        rect: {
+          x: rest.x + (rest.width * (1 - scale)) / 2,
+          y: rest.y + (rest.height * (1 - scale)) / 2,
+          width: rest.width * scale,
+          height: rest.height * scale,
+        },
+        opacity: progress,
+      }
+    }
     return {
       rect: lerpRect(state.from, state.to, progress),
       opacity: state.fromOpacity + (state.toOpacity - state.fromOpacity) * progress,
@@ -1086,6 +1209,25 @@ export class Desktop {
   }
 
   private updateScene(sceneWindows: SceneWindow[]) {
+    // closed windows fade out (from their elements as they are, before their content goes)
+    for (const window of this.windows) {
+      if (!sceneWindows.some((w) => w.id === window.id)) {
+        this.fadeOut(window)
+      }
+    }
+    // the windows that are there when the session is attached were shown before: they aren't animated
+    if (!this.sceneSeen) {
+      this.sceneSeen = true
+      for (const window of sceneWindows) {
+        this.opened.add(window.id)
+      }
+    }
+    for (const id of [...this.opened]) {
+      if (!sceneWindows.some((window) => window.id === id)) {
+        this.opened.delete(id)
+        this.appeared.delete(id)
+      }
+    }
     const previous = new Map(this.windows.map((window) => [window.id, window]))
     const previousRects = new Map(this.windows.map((window) => [window.id, this.shownGeometry(window)]))
     const windows = stackChildrenAboveParents(sceneWindows)
@@ -1308,6 +1450,9 @@ export class Desktop {
       let view = this.windowViews.get(window.id)
       if (view === undefined) {
         view = new WindowView(window.id)
+        // (transparent until its first layout, which decides whether it's shown yet)
+        view.element.style.opacity = '0'
+        view.popups.style.opacity = '0'
         this.windowViews.set(window.id, view)
       }
       view.setSurfaces(
@@ -1352,6 +1497,7 @@ export class Desktop {
    * included). Content isn't drawn here: that happens when it arrives.
    */
   private layout() {
+    this.startOpenAnimations(performance.now())
     const animating = this.advanceAnimations()
     this.refreshFrames()
     const pixelRatio = window.devicePixelRatio || 1
@@ -1367,14 +1513,15 @@ export class Desktop {
         y,
         scaleX,
         scaleY,
-        opacity: this.animatedState(window)?.opacity ?? 1,
+        // (a new window that isn't ready to be shown is there, transparent)
+        opacity: this.opened.has(window.id) ? (this.animatedState(window)?.opacity ?? 1) : 0,
         hidden: this.isHidden(window),
-        inert: kind === 'minimize' || kind === 'restore',
+        inert: kind === 'minimize' || kind === 'restore' || !this.opened.has(window.id),
         pixelRatio,
         surfaces: window.surfaces.map(({ x, y, width, height }) => ({ x, y, width, height })),
         geometry: window.geometry,
         insets: this.shownInsets(window),
-        frameStretches: kind === 'minimize' || kind === 'restore',
+        frameStretches: kind === 'minimize' || kind === 'restore' || this.animations.get(window.id)?.kind === 'open',
       })
     }
     if (animating) {

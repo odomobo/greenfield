@@ -8,7 +8,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--color-desktop);
+  /* the page's background picture shows through */
   color: var(--color-text);
   font-family: var(--font-family);
   font-size: var(--font-size-small);
@@ -26,6 +26,8 @@
   padding: 0 4px;
   background: var(--color-taskbar);
   border-bottom: 1px solid var(--color-taskbar-border);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
   /* always above the windows and their animations */
   position: relative;
   z-index: 2;
@@ -41,6 +43,27 @@
   background: transparent;
   border: none;
   border-radius: var(--radius-control);
+}
+
+/* an app's button has a set width, so it can grow in from none and shrink away to none (taskbar.tsx) */
+.taskbar-button.app {
+  width: calc(var(--taskbar-height) - 2px);
+}
+
+.taskbar-button.app.leaving {
+  pointer-events: none;
+  animation: taskbar-button-out 160ms var(--ease-in) forwards;
+}
+
+@keyframes taskbar-button-out {
+  to {
+    opacity: 0;
+    scale: 0.6;
+    width: 0;
+    min-width: 0;
+    padding-inline: 0;
+    margin-inline-end: -2px;
+  }
 }
 
 .taskbar-button:hover,
@@ -99,30 +122,17 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: calc(var(--taskbar-height) - 8px);
+  height: calc(var(--taskbar-height) - 8px);
+  padding: 0;
 }
 
-#audio-button.muted,
 #audio-button.unavailable {
   color: var(--color-text-secondary);
 }
 
 #audio-button:disabled {
   opacity: 0.5;
-}
-
-#connection-indicator[data-state='connected'] {
-  color: var(--color-connection-ok);
-}
-
-#connection-indicator[data-state='reconnecting'],
-#connection-indicator[data-state='offline'] {
-  color: var(--color-connection-bad);
-}
-
-#connection-indicator[data-state='connecting'] {
-  color: var(--color-text-secondary);
 }
 
 .tray-clock {
@@ -177,6 +187,8 @@
   border: 1px solid var(--color-flyout-border);
   border-radius: var(--radius-flyout);
   box-shadow: var(--shadow-flyout);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
   font-family: var(--font-family);
   font-size: var(--font-size);
   user-select: none;
@@ -208,6 +220,34 @@
   min-width: 180px;
   padding: 4px;
   z-index: 20;
+  /* drops in from where it was opened, and fades out quicker */
+  transform-origin: top left;
+  animation: menu-in 120ms var(--ease-out);
+}
+
+.context-menu.align-right {
+  transform-origin: top right;
+}
+
+.context-menu.leaving {
+  pointer-events: none;
+  animation: menu-out 100ms var(--ease-in) forwards;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    scale: 0.96;
+    translate: 0 -4px;
+  }
+}
+
+@keyframes menu-out {
+  to {
+    opacity: 0;
+    scale: 0.96;
+    translate: 0 -4px;
+  }
 }
 
 .context-menu .heading {
@@ -270,8 +310,39 @@
   display: none;
 }
 
+/*
+ * The Apps menu and the notifications panel drop in and fade in, and fade out quicker. `hidden` changes at once (the
+ * shell's state, the tests), only what's shown waits: the display change is part of the transition.
+ */
+#apps-menu,
+#notifications-panel {
+  transition:
+    opacity 150ms var(--ease-out),
+    translate 150ms var(--ease-out),
+    display 150ms allow-discrete;
+}
+
+#apps-menu[hidden],
+#notifications-panel[hidden] {
+  opacity: 0;
+  translate: 0 -8px;
+  pointer-events: none;
+  transition-duration: 100ms;
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  #apps-menu,
+  #notifications-panel {
+    opacity: 0;
+    translate: 0 -8px;
+  }
+}
+
+/* the user on the left, the session's name centered, the session menu on the right */
 .apps-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr);
   align-items: center;
   gap: 8px;
 }
@@ -280,8 +351,12 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: 40%;
   min-width: 0;
+  justify-self: start;
+}
+
+#session-menu-button {
+  justify-self: end;
 }
 
 .apps-avatar {
@@ -289,11 +364,11 @@
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  color: var(--color-text-secondary);
-  background: var(--color-subtle-hover);
+  color: var(--color-text);
+  background: var(--color-subtle-pressed);
 }
 
 .apps-username {
@@ -304,12 +379,38 @@
 }
 
 .apps-session {
-  flex: 1;
   min-width: 0;
+  max-width: 300px;
 }
 
+/*
+ * The name's field is as wide as its text (hovered, focused or not), so it stays centered while it's edited: the field
+ * and a hidden copy of the text (the label's data-value, kept up to date by session-name.tsx) share one grid cell,
+ * and the copy sets the width. Padding on both sides alike (the pencil sits in the right one) keeps the text centered.
+ */
 .apps-session .session-name {
-  margin-left: 0;
+  display: grid;
+  margin: 0;
+}
+
+.apps-session .session-name::after {
+  content: attr(data-value) ' ';
+  grid-area: 1 / 1;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  white-space: pre;
+  padding: 0 28px;
+  border: 1px solid transparent;
+  font-weight: 600;
+}
+
+.apps-session .session-name input[type='text'] {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-width: 0;
+  padding: 0 28px;
+  text-align: center;
 }
 
 #apps-menu .error {
@@ -601,7 +702,7 @@
   align-items: flex-start;
   gap: 10px;
   padding: 10px 36px 10px 10px;
-  background: var(--color-surface);
+  background: var(--color-control);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-surface);
 }
@@ -662,13 +763,43 @@
   background: var(--color-flyout);
   border-color: var(--color-flyout-border);
   box-shadow: var(--shadow-flyout);
-  animation: toast-in 200ms ease-out;
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
+  animation: slide-in 160ms var(--ease-out);
 }
 
-@keyframes toast-in {
+/* toasts slide in from the right and out to it; a dismissed notification in the panel slides out the same way */
+@keyframes slide-in {
   from {
     opacity: 0;
-    transform: translateY(-8px);
+    translate: 24px 0;
+  }
+}
+
+.toast.leaving,
+.notification.leaving {
+  pointer-events: none;
+  animation: slide-out 140ms var(--ease-in) forwards;
+}
+
+@keyframes slide-out {
+  to {
+    opacity: 0;
+    translate: 24px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #apps-menu,
+  #notifications-panel,
+  .context-menu,
+  .context-menu.leaving,
+  .taskbar-button.app.leaving,
+  .toast,
+  .toast.leaving,
+  .notification.leaving {
+    transition: none;
+    animation: none;
   }
 }
 
@@ -696,12 +827,15 @@
 }
 
 #output .window-layer,
+#output .ghost-layer,
 #output .popup-layer,
 #output .floating-layer {
   position: absolute;
   inset: 0;
 }
 
+/* (the ghost layer: closed windows fading out, desktop.ts fadeOut) */
+#output .ghost-layer,
 #output .floating-layer {
   pointer-events: none;
 }
@@ -739,12 +873,21 @@
   transform-origin: 0 0;
   color: var(--color-frame-text-inactive);
   font-family: var(--font-family);
-  font-size: var(--font-size-small);
+  font-size: 16px;
   line-height: 1;
+  /* the title bar's top corners are rounded (not when maximized): the border and the shadow follow them */
+  border-radius: var(--radius-frame) var(--radius-frame) 0 0;
+  box-shadow: var(--shadow-frame);
 }
 
 #output .frame.active {
   color: var(--color-frame-text);
+  box-shadow: var(--shadow-frame-active);
+}
+
+#output .frame.maximized {
+  border-radius: 0;
+  box-shadow: none;
 }
 
 #output .frame-border {
@@ -752,6 +895,7 @@
   inset: 0;
   z-index: 1;
   border: var(--frame-border) solid var(--color-frame-border);
+  border-radius: inherit;
   pointer-events: none;
 }
 
@@ -763,16 +907,25 @@
   border: none;
 }
 
+/* the icon on the left, the title in the middle (of the whole bar: the sides are equally wide), the buttons on the right */
 #output .frame-title {
   position: absolute;
   left: 0;
   top: 0;
   right: 0;
   height: var(--frame-title-height);
-  display: flex;
+  border-radius: inherit;
+  display: grid;
+  /* The sides share what the title leaves equally (so it's centered), but never get less than the icon's square and the
+     buttons (a dialog has only one): in a narrow window the title moves off center, then shrinks, instead of covering
+     them. */
+  --frame-side: calc(3 * var(--frame-title-height));
+  grid-template-columns: minmax(var(--frame-title-height), 1fr) minmax(0, auto) minmax(var(--frame-side), 1fr);
   align-items: center;
   overflow: hidden;
   background: var(--color-frame-inactive);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
   pointer-events: auto;
   cursor: default;
 }
@@ -781,39 +934,42 @@
   background: var(--color-frame);
 }
 
+/* centered in a square at the left, like the buttons on the right */
 #output .frame-icon {
-  flex: none;
   display: inline-flex;
-  width: 16px;
-  height: 16px;
-  margin-left: 10px;
+  justify-self: start;
+  width: 26px;
+  height: 26px;
+  margin-left: calc((var(--frame-title-height) - 26px) / 2);
 }
 
 #output .frame-icon img,
 #output .frame-icon svg {
-  width: 16px;
-  height: 16px;
+  width: 26px;
+  height: 26px;
 }
 
 #output .frame-text {
-  flex: 1;
   min-width: 0;
-  margin: 0 8px;
+  margin: 0 10px;
+  text-align: center;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
 #output .frame-buttons {
-  flex: none;
   display: flex;
+  justify-self: end;
   align-self: stretch;
 }
 
+/* square buttons, as wide as the title bar is high, with square highlights */
 #output .frame-button {
   display: inline-grid;
   place-items: center;
-  width: 46px;
+  width: var(--frame-title-height);
+  border-radius: 0;
   height: 100%;
   margin: 0;
   padding: 0;
@@ -839,6 +995,10 @@
 
 #output .frame-button:disabled {
   opacity: 0.4;
+}
+
+#output .frame.dialog .frame-title {
+  --frame-side: var(--frame-title-height);
 }
 
 /* a dialog can only be closed */
@@ -935,7 +1095,9 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: color-mix(in srgb, var(--color-desktop) 80%, transparent);
+  background: var(--surface-passive);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
   font-size: 16px;
 }
 

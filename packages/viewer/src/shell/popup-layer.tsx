@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { closePopup, usePopupStack } from '../popups'
-import type { ContextPopup, PreviewPopup } from '../popups'
+import type { ContextPopup, PopupEntry, PreviewPopup } from '../popups'
+import { usePresence } from './presence'
 import { WindowPreview } from './previews'
 
 /**
@@ -9,15 +10,16 @@ import { WindowPreview } from './previews'
  * rendered by the desktop view.
  */
 export function PopupLayer() {
-  const entries = usePopupStack()
+  // closed menus stay a moment, animating out (the .leaving animation in style.css)
+  const entries = usePresence(usePopupStack(), keyOf, MENU_LEAVE_MS)
   return (
     <>
-      {entries.map((entry, index) => {
+      {entries.map(({ item: entry, leaving }) => {
         if (entry.kind === 'context') {
-          return <ContextMenu key={index} entry={entry} />
+          return <ContextMenu key={keyOf(entry)} entry={entry} leaving={leaving} />
         }
-        if (entry.kind === 'preview') {
-          return <WindowPreview key={index} entry={entry} />
+        if (entry.kind === 'preview' && !leaving) {
+          return <WindowPreview key={keyOf(entry)} entry={entry} />
         }
         return null
       })}
@@ -25,8 +27,14 @@ export function PopupLayer() {
   )
 }
 
-/** A context menu at a point (page coordinates), kept inside the window. */
-function ContextMenu({ entry }: { entry: ContextPopup }) {
+const MENU_LEAVE_MS = 100
+const keyOf = (entry: PopupEntry) => `${entry.kind}:${entry.owner}`
+
+/**
+ * A context menu at a point (page coordinates), kept inside the window. Leaving: closed, animating out (no input, not
+ * the popup of its owner anymore).
+ */
+function ContextMenu({ entry, leaving }: { entry: ContextPopup; leaving: boolean }) {
   const [position, setPosition] = useState<{ left: number; top: number } | undefined>(undefined)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -48,10 +56,10 @@ function ContextMenu({ entry }: { entry: ContextPopup }) {
   return (
     <div
       ref={menuRef}
-      id={entry.menuId}
-      className="context-menu flyout"
+      id={leaving ? undefined : entry.menuId}
+      className={'context-menu flyout' + (entry.alignRight ? ' align-right' : '') + (leaving ? ' leaving' : '')}
       role="menu"
-      data-popup-owner={entry.owner}
+      data-popup-owner={leaving ? undefined : entry.owner}
       style={
         position === undefined
           ? { visibility: 'hidden' }

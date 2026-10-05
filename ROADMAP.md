@@ -56,7 +56,7 @@ This document records the design decisions made so far and the order of the rema
 
 ## Sessions
 
-- Default name "Session N" (lowest free number). Rename by clicking the name itself, in the session list and in the
+- Default name "Nebula N" (lowest free number). Rename by clicking the name itself, in the session list and in the
   Apps menu. Both use the same click-to-edit component, which shows it is editable on hover (outline, pencil icon).
 - **Disconnect** returns to the session list; the session keeps running. **Log out** ends the session and returns to
   the sign-in page.
@@ -117,8 +117,8 @@ Drawn by the browser in HTML/CSS.
 
 - **Design language**: loosely Windows 11. Simple, flat, modern. A style to borrow, not a feature checklist. Open fonts
   and icons only.
-- **Themes**: all colors and sizes are CSS custom properties, so a theme is just a stylesheet. Light and dark built in;
-  downloadable/user-written themes later.
+- **Themes**: all colors and sizes are CSS custom properties, so a theme is just a stylesheet. Dark only for now
+  (glass surfaces on a background picture); downloadable/user-written themes later.
 - **No keyboard shortcuts** (at least at first) and no fullscreen or keyboard-lock modes. Everything must be reachable
   from the shell UI, and nothing should require understanding hidden modes.
   - Shortcuts the browser or the OS grabs (Ctrl+W, Ctrl+T, Ctrl+N, Alt+Tab, ...) don't reach apps, and we live with
@@ -130,7 +130,7 @@ Drawn by the browser in HTML/CSS.
   - Left-aligned: Apps button, pinned apps (with a running indicator) and running windows grouped by app.
   - Hover previews of a group's windows, from the images the browser already has.
   - Icons from the app's `.desktop` file and the XDG icon theme, with a generic fallback.
-  - Right side: audio mute toggle, connection indicator, notifications, clock.
+  - Right side: system tray icons (planned, see below), audio mute toggle, notifications, clock.
   - Right-click menus (New window, Pin/Unpin, window actions) are a convenience only; everything in them is also
     reachable from the Apps menu or previews.
 - **Apps menu** (not "Start"), top to bottom:
@@ -143,6 +143,8 @@ Drawn by the browser in HTML/CSS.
 - **Notifications** via `org.freedesktop.Notifications`, served by the session process on the session's D-Bus bus
   (it starts a bus if the user has none): pop-ups at the top right below the taskbar, plus a history list (last 50,
   kept across reconnects). Notification action buttons are not supported yet.
+- **System tray** (planned, Lower priority item 5c): apps' tray icons (StatusNotifierItem) in the taskbar's tray area,
+  their menus shown as our own menus.
 
 ## Encoding policy
 
@@ -1181,6 +1183,25 @@ single large item never stalls the link. Initial window before any estimate: 64 
        only (x264 and its CPU alpha path).
 
 ### Lower priority
+
+5c. **System tray (StatusNotifierItem host).** Apps like JuK, Discord, Steam, chat clients and network/Bluetooth applets
+    put an icon in "the system tray" and keep running when their window closes. On a Linux desktop the tray is a
+    freedesktop/KDE D-Bus protocol, not Wayland: apps register their `org.kde.StatusNotifierItem` with a
+    `org.kde.StatusNotifierWatcher`, and the panel registers as a `StatusNotifierHost` and draws the icons. Today
+    `kded5` (D-Bus activated by KDE apps) provides a watcher but nothing hosts, so Qt reports a tray and apps "dock"
+    into one nobody draws: JuK, closed, keeps running (and playing) invisibly, reachable only by launching it again.
+    - The session process provides the watcher (if none is on the bus) and registers as the host, like it serves
+      `org.freedesktop.Notifications`; it forwards the items to the viewer over the session WebSocket.
+    - The viewer shows each item's icon (`IconName` through the XDG icon theme like other icons, or `IconPixmap` data)
+      in the taskbar's tray area, left of the mute toggle, with its `ToolTip`; `Status: Passive` items are hidden,
+      `NeedsAttention` uses its attention icon.
+    - Clicks: left click `Activate(x, y)` (usually shows/hides the window), middle click `SecondaryActivate`, wheel
+      `Scroll`. Right click (or `ItemIsMenu`) shows the item's menu, read from its `com.canonical.dbusmenu` object
+      (labels, enabled, toggles/radios, separators, submenus), as one of our own animated context menus; choosing an
+      entry sends the dbusmenu `Event` "clicked". `ContextMenu(x, y)` only for items without a dbusmenu.
+    - Legacy XEmbed tray icons (old X11 apps) are not supported.
+    - e2e: a small test item (e.g. a Python/GDBus script) registering an icon and a menu; check the icon shows, a
+      click activates, a menu entry is delivered, and the icon goes when the item's bus name goes.
 
 6. **Don't send what can't be seen: minimized, fully covered and partially covered windows**, all with one algorithm,
    computed on the server. It already has every window's position, stacking order, minimized state and opaque region

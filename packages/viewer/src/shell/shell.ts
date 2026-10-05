@@ -5,7 +5,6 @@ import { closePopup, isKindOpen, openPopup } from '../popups'
 import { appById, resetGroupOrder } from './groups'
 import { IconCache } from './icons'
 
-export type ConnectionIndicator = 'connecting' | 'connected' | 'reconnecting' | 'offline'
 
 const TOAST_MS = 6000
 const MAX_TOASTS = 3
@@ -50,10 +49,6 @@ export class ShellController {
     closePopup()
     this.clearToastTimers()
     shellStore.update({ notifications: [], unseen: false, toasts: [] })
-  }
-
-  setConnection(state: ConnectionIndicator): void {
-    shellStore.update({ connection: state })
   }
 
   handleMessage(message: ServerMessage): void {

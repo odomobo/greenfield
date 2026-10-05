@@ -42,6 +42,8 @@ type SessionEntry = SessionInfo & {
 const TICKET_LIFETIME_MS = 7 * 24 * 3600 * 1000
 const MAX_CONCURRENT_AUTH = 4
 const SESSION_START_TIMEOUT_MS = 20_000
+/** How long a stopping gateway waits for its sessions: they give their apps 5 s to quit (Apps.ts), then kill them. */
+const SESSION_EXIT_TIMEOUT_MS = 8_000
 
 function sessionInfo({ id, name, createdAt }: SessionEntry): SessionInfo {
   return { id, name, createdAt }
@@ -373,6 +375,7 @@ export class Monitor {
       socketPath,
       encoder: this.encoder,
       renderDevice: this.config.renderDevice,
+      timeScale: this.config.timeScale,
     }
     child.send(start)
     log.info(`Started session ${id} for ${user.username}.`)
@@ -384,14 +387,14 @@ export class Monitor {
     return [...this.sessions.values()].filter((session) => session.uid === uid && !session.ending)
   }
 
-  /** "Session N" with the lowest N none of the user's sessions is called, so names don't shift when one ends. */
+  /** "Nebula N" with the lowest N none of the user's sessions is called, so names don't shift when one ends. */
   private defaultSessionName(uid: number): string {
     const taken = new Set(this.userSessions(uid).map((session) => session.name))
     let n = 1
-    while (taken.has(`Session ${n}`)) {
+    while (taken.has(`Nebula ${n}`)) {
       n++
     }
-    return `Session ${n}`
+    return `Nebula ${n}`
   }
 
   private shuttingDown = false
@@ -406,6 +409,15 @@ export class Monitor {
     for (const session of this.sessions.values()) {
       session.process.kill('SIGTERM')
     }
-    setTimeout(() => process.exit(code), 1500)
+    // the sessions end their apps (killing the ones that don't quit) before they exit; wait for that, within reason
+    const deadline = Date.now() + SESSION_EXIT_TIMEOUT_MS / this.config.timeScale
+    const exitWhenDone = () => {
+      if (this.sessions.size === 0 || Date.now() >= deadline) {
+        process.exit(code)
+      }
+      setTimeout(exitWhenDone, 50)
+    }
+    // (the web process gets a moment to close its connections even without sessions)
+    setTimeout(exitWhenDone, 300)
   }
 }

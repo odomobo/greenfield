@@ -237,23 +237,6 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
       }
     }
     connection.onStateChange = (state) => {
-      switch (state.kind) {
-        case 'connecting':
-          shell.setConnection('connecting')
-          break
-        case 'connected':
-          shell.setConnection('connected')
-          break
-        case 'reconnecting':
-          shell.setConnection('reconnecting')
-          break
-        case 'taken-over':
-        case 'ended':
-          shell.setConnection('offline')
-          break
-        case 'signed-out':
-          break
-      }
       appStore.update({ connection: state })
       if (state.kind === 'signed-out') {
         showLogin()

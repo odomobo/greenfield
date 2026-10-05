@@ -35,14 +35,7 @@ export function LoginView({
   return (
     <div id="login-view" className="page" hidden={!visible}>
       <main className="card">
-        <div className="avatar">
-          <svg width="32" height="32" viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              fill="currentColor"
-              d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9Zm0 1.5c-4.1 0-7.5 2.2-7.5 5v1.5h15V18.5c0-2.8-3.4-5-7.5-5Z"
-            />
-          </svg>
-        </div>
+        <img className="logo" src="/static/logo.png" alt="" draggable={false} />
         <h1>Sign in</h1>
         <p className="subtitle">{hostname}</p>
         <p className="error" role="alert" hidden={view.loginError === undefined}>

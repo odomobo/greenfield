@@ -62,6 +62,14 @@ export function closePopup(): void {
   closeAbove(0)
 }
 
+/** Close the popup owned by `owner` (and those above it), if it's open: a second click on its button. */
+export function closePopupOf(owner: string): void {
+  const index = stack().findIndex((popup) => popup.owner === owner)
+  if (index >= 0) {
+    closeAbove(index)
+  }
+}
+
 /** Whether a popup owned by `owner` is open (e.g. an anchored button shows its open state). */
 export function isOpen(owner: string): boolean {
   return stack().some((popup) => popup.owner === owner)

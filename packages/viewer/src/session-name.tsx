@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { api } from './auth'
 
@@ -23,6 +23,20 @@ export function SessionNameField({ session, showError, onRenamed, id }: SessionN
   const inputRef = useRef<HTMLInputElement>(null)
   const saved = useRef(session.name)
   const cancelled = useRef(false)
+  const labelRef = useRef<HTMLLabelElement>(null)
+
+  // the label carries the text being shown, for the styles that size the field to it (the Apps menu's centered name).
+  // An element-level listener: React's delegated onInput misses input events dispatched on the element itself.
+  const sync = () => {
+    if (labelRef.current !== null && inputRef.current !== null) {
+      labelRef.current.dataset.value = inputRef.current.value
+    }
+  }
+  useEffect(() => {
+    const input = inputRef.current
+    input?.addEventListener('input', sync)
+    return () => input?.removeEventListener('input', sync)
+  }, [])
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') {
@@ -32,6 +46,7 @@ export function SessionNameField({ session, showError, onRenamed, id }: SessionN
       cancelled.current = true
       if (inputRef.current) {
         inputRef.current.value = saved.current
+        sync()
       }
       inputRef.current?.blur()
     }
@@ -58,10 +73,12 @@ export function SessionNameField({ session, showError, onRenamed, id }: SessionN
       const renamed: SessionInfo = await response.json()
       saved.current = renamed.name
       input.value = saved.current
+      sync()
       showError(undefined)
       onRenamed?.(renamed)
     } else {
       input.value = saved.current
+      sync()
       showError(
         response.status === 400
           ? `A session name must be 1 to ${MAX_SESSION_NAME_LENGTH} characters long.`
@@ -71,7 +88,7 @@ export function SessionNameField({ session, showError, onRenamed, id }: SessionN
   }
 
   return (
-    <label className="session-name" title="Rename" id={id}>
+    <label className="session-name" title="Rename" id={id} ref={labelRef} data-value={session.name}>
       <input
         ref={inputRef}
         type="text"

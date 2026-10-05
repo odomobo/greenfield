@@ -219,6 +219,7 @@ const contentTypes: Record<string, string> = {
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.jpg': 'image/jpeg',
   '.woff2': 'font/woff2',
   '.wasm': 'application/wasm',
 }

@@ -8,7 +8,7 @@ import type { SessionEncoder } from './encoder'
  */
 export type SessionInfo = {
   id: string
-  /** user-visible name, "Session N" until the user renames it */
+  /** user-visible name, "Nebula N" until the user renames it */
   name: string
   createdAt: number
 }
@@ -77,4 +77,6 @@ export type SessionStart = {
   socketPath: string
   encoder: SessionEncoder
   renderDevice: string
+  /** test only (see --dev-time-scale): divides how long apps get to quit when the session ends; 1 in production */
+  timeScale: number
 }

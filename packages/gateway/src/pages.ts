@@ -14,7 +14,8 @@ function layout(title: string, body: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="same-origin">
 <title>${escapeHTML(title)}</title>
-<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/icon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/static/icon-16.png" type="image/png" sizes="16x16">
 <link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>

@@ -35,12 +35,27 @@ test('launching something that does not exist fails', async () => {
   assert.deepEqual(apps.pids, [])
 })
 
-test('terminating the session ends its launched apps', async () => {
+test('terminating the session ends its launched apps, and resolves once they are gone', async () => {
   const apps = new Apps('wayland-test')
   const pid = await apps.launch('Sleeper', 'sleep', ['30'])
-  apps.terminate()
-  await waitFor(() => apps.pids.length === 0, 'the app to end')
+  const start = Date.now()
+  await apps.terminate(5000)
+  assert.deepEqual(apps.pids, [])
   assert.throws(() => process.kill(pid, 0))
+  assert.ok(Date.now() - start < 2000, 'waited for the kill timeout although the app quit')
+})
+
+test('apps that ignore SIGTERM are killed once their time is up', async () => {
+  const apps = new Apps('wayland-test')
+  // the shell ignores SIGTERM, and so does the sleep it becomes
+  const pid = await apps.launch('Stubborn', 'sh', ['-c', 'trap "" TERM; exec sleep 30'])
+  // (give the shell time to set its trap)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  const start = Date.now()
+  await apps.terminate(300)
+  assert.deepEqual(apps.pids, [])
+  assert.throws(() => process.kill(pid, 0))
+  assert.ok(Date.now() - start >= 300, 'killed before its time was up')
 })
 
 test('clients of launched apps, and of their child processes, belong to them', async () => {
@@ -56,8 +71,8 @@ test('clients of launched apps, and of their child processes, belong to them', a
   apps.clientDisconnected(2)
   // launched apps stay known until they exit, without any Wayland connection
   assert.deepEqual(apps.pids, [pid])
-  apps.terminate()
-  await waitFor(() => apps.pids.length === 0, 'the app to end')
+  await apps.terminate()
+  assert.deepEqual(apps.pids, [])
 })
 
 test('an app that connects on its own is known while it has connections', () => {

@@ -10,6 +10,7 @@
 import {
   Apps,
   createLogger,
+  KILL_AFTER_MS,
   createSessionController,
   SessionController,
   startWlrootsCompositor,
@@ -41,7 +42,7 @@ process.once('message', (message: SessionStart) => {
   })
 })
 
-async function start({ socketPath, encoder }: SessionStart) {
+async function start({ socketPath, encoder, timeScale }: SessionStart) {
   const { audioDir } = setupSessionEnvironment()
 
   const { viewerHost, apps } = startWlrootsCompositor({ h264Encoder: encoder === 'none' ? undefined : encoder })
@@ -56,7 +57,7 @@ async function start({ socketPath, encoder }: SessionStart) {
   const controller = createSessionController(viewerHost)
 
   // the gateway went away or asked us to stop: don't leave orphaned apps behind
-  const terminate = () => endSession(apps, audio)
+  const terminate = () => void endSession(apps, audio, KILL_AFTER_MS / timeScale)
   process.once('disconnect', terminate)
   // on, not once: a second signal while ending must not kill us before we exit (exiting cleans up after XWayland)
   process.on('SIGTERM', terminate)
@@ -69,13 +70,14 @@ async function start({ socketPath, encoder }: SessionStart) {
 
 let ending = false
 
-function endSession(apps: Apps, audio: AudioService) {
+async function endSession(apps: Apps, audio: AudioService, killAfterMs: number) {
   if (ending) {
     return
   }
   ending = true
   logger.info('Session ending, terminating its apps.')
-  apps.terminate()
+  // we stay until they're gone: the apps that don't quit are killed by us, and quitting ones still have their display
+  await apps.terminate(killAfterMs)
   audio.stop()
   setTimeout(() => process.exit(), 500)
 }

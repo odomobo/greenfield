@@ -1,105 +1,83 @@
 /*
- * Default theme. Everything visual is a custom property here, so a theme is just a stylesheet that overrides them.
- * Flat, simple, modern: neutral surfaces, one accent color, soft corners, no ornament.
+ * The theme: dark only. Every page sits on the same picture, and the things drawn on it are glass: a blurred,
+ * darkened pane (the passive surface: cards, taskbar, menus, notifications, inactive title bars) or a blurred pane
+ * tinted nebula blue (the active surface: the active window's title bar). Everything visual is a custom property here.
  */
 :root {
+  color-scheme: dark;
+
   --font-family: system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', 'Noto Sans', 'Cantarell', 'Ubuntu',
     'Helvetica Neue', Arial, sans-serif;
   --font-size: 14px;
   --font-size-small: 12px;
   --font-size-title: 20px;
 
-  --color-background: #eef1f6;
-  --color-background-gradient: linear-gradient(160deg, #e7ecf5 0%, #f3f0f6 55%, #eaf1f3 100%);
-  --color-surface: #ffffff;
-  --color-surface-hover: #f5f5f5;
-  --color-border: #e5e5e5;
-  --color-text: #1a1a1a;
-  --color-text-secondary: #5f5f5f;
-  --color-accent: #005fb8;
-  --color-accent-hover: #0067c0;
-  --color-accent-pressed: #004d99;
-  --color-on-accent: #ffffff;
-  --color-input-background: #ffffff;
-  --color-input-border: #d1d1d1;
-  --color-input-underline: #8a8a8a;
-  --color-error: #c42b1c;
-  --color-error-background: #fde7e9;
-  --color-focus-ring: #1a1a1a;
+  /* the picture behind every page (and the color shown until it loads) */
+  --background-color: #05070d;
+  --background-image: url('/static/background.jpg');
+
+  /* the two glass surfaces */
+  --surface-blur: blur(24px);
+  --surface-passive: rgba(0, 0, 0, 0.6);
+  --surface-active: rgba(24, 56, 128, 0.65);
+  --surface-edge: rgba(255, 255, 255, 0.1);
+
+  --color-surface: var(--surface-passive);
+  --color-surface-hover: rgba(255, 255, 255, 0.07);
+  --color-control: rgba(255, 255, 255, 0.06);
+  --color-control-hover: rgba(255, 255, 255, 0.1);
+  --color-border: rgba(255, 255, 255, 0.1);
+  --color-text: #ffffff;
+  --color-text-secondary: #c2c8d6;
+  --color-accent: #6cb4ff;
+  --color-accent-hover: #82c0ff;
+  --color-accent-pressed: #5aa2ec;
+  --color-on-accent: #03101f;
+  --color-input-background: rgba(255, 255, 255, 0.06);
+  --color-input-border: rgba(255, 255, 255, 0.12);
+  --color-input-underline: rgba(255, 255, 255, 0.5);
+  --color-error: #ff99a4;
+  --color-error-background: rgba(120, 20, 30, 0.45);
+  --color-focus-ring: #ffffff;
+
+  /* animation curves: starting fast (things coming in) and accelerating out (things going away) */
+  --ease-out: cubic-bezier(0, 0, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 1, 1);
 
   --radius-surface: 8px;
   --radius-control: 4px;
-  --shadow-surface: 0 2px 8px rgba(0, 0, 0, 0.06), 0 16px 40px rgba(0, 0, 0, 0.08);
+  --shadow-surface: 0 2px 8px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.4);
   --control-height: 34px;
   --card-width: 360px;
   --spacing: 16px;
 
   /* desktop shell */
-  --taskbar-height: 40px;
-  --color-desktop: #d3dce8;
-  --color-taskbar: #eef1f5;
-  --color-taskbar-border: #dde1e7;
-  --color-subtle-hover: rgba(0, 0, 0, 0.05);
-  --color-subtle-pressed: rgba(0, 0, 0, 0.09);
-  --color-indicator: #8a8a8a;
-  --color-flyout: #f9f9f9;
-  --color-flyout-border: #e0e0e0;
-  --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.14), 0 2px 6px rgba(0, 0, 0, 0.06);
+  --taskbar-height: 48px;
+  --color-taskbar: var(--surface-passive);
+  --color-taskbar-border: var(--surface-edge);
+  --color-subtle-hover: rgba(255, 255, 255, 0.08);
+  --color-subtle-pressed: rgba(255, 255, 255, 0.12);
+  --color-indicator: #9aa3b5;
+  --color-flyout: var(--surface-passive);
+  --color-flyout-border: var(--surface-edge);
+  --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
   --radius-flyout: 8px;
-  --color-connection-ok: #0f7b0f;
-  --color-connection-bad: #c42b1c;
 
   /* window frames (title bar and border drawn by the viewer; their sizes are fixed by the protocol) */
-  --color-frame: #f3f3f3;
-  --color-frame-inactive: #fbfbfb;
-  --color-frame-text: #1a1a1a;
-  --color-frame-text-inactive: #7a7a7a;
-  --color-frame-border: #c9c9c9;
-  --color-frame-border-active: #7f8791;
+  --color-frame: var(--surface-active);
+  --color-frame-inactive: var(--surface-passive);
+  --color-frame-text: #ffffff;
+  --color-frame-text-inactive: #a9b0bf;
+  /* opaque: --surface-edge only reads as dark gray over a surface's own dark glass, and a window's border has none
+     under it (it would light up the picture behind it) */
+  --color-frame-border: #2a2a2a;
+  --color-frame-border-active: #2a2a2a;
+  --radius-frame: 8px;
   --color-frame-close: #c42b1c;
   --color-frame-on-close: #ffffff;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-background: #1c1c1c;
-    --color-background-gradient: linear-gradient(160deg, #1d2129 0%, #201d24 55%, #1b2224 100%);
-    --color-surface: #2b2b2b;
-    --color-surface-hover: #323232;
-    --color-border: #3a3a3a;
-    --color-text: #ffffff;
-    --color-text-secondary: #c5c5c5;
-    --color-accent: #4cc2ff;
-    --color-accent-hover: #47b1e8;
-    --color-accent-pressed: #42a1d2;
-    --color-on-accent: #000000;
-    --color-input-background: #2d2d2d;
-    --color-input-border: #3d3d3d;
-    --color-input-underline: #9a9a9a;
-    --color-error: #ff99a4;
-    --color-error-background: #442726;
-    --color-focus-ring: #ffffff;
-    --shadow-surface: 0 2px 8px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.35);
-
-    --color-desktop: #141a24;
-    --color-taskbar: #1f1f1f;
-    --color-taskbar-border: #2e2e2e;
-    --color-subtle-hover: rgba(255, 255, 255, 0.06);
-    --color-subtle-pressed: rgba(255, 255, 255, 0.1);
-    --color-indicator: #9a9a9a;
-    --color-flyout: #2c2c2c;
-    --color-flyout-border: #3d3d3d;
-    --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
-    --color-connection-ok: #6ccb5f;
-    --color-connection-bad: #ff99a4;
-
-    --color-frame: #202020;
-    --color-frame-inactive: #2b2b2b;
-    --color-frame-text: #ffffff;
-    --color-frame-text-inactive: #9a9a9a;
-    --color-frame-border: #3a3a3a;
-    --color-frame-border-active: #5b6470;
-  }
+  /* Linux style: a shallow shadow under inactive windows, a tall one under the active window */
+  --shadow-frame: 0 2px 6px rgba(0, 0, 0, 0.45), 0 6px 20px rgba(0, 0, 0, 0.45);
+  --shadow-frame-active: 0 5px 14px rgba(0, 0, 0, 0.5), 0 16px 44px 2px rgba(0, 0, 0, 0.65);
 }
 
 * {
@@ -115,12 +93,14 @@ body {
   margin: 0;
 }
 
+html {
+  background: var(--background-color) var(--background-image) center / cover no-repeat fixed;
+}
+
 body {
   font-family: var(--font-family);
   font-size: var(--font-size);
   color: var(--color-text);
-  background: var(--color-background);
-  background-image: var(--color-background-gradient);
 }
 
 /* a full-viewport screen with a centered card: the sign-in form, the session list, error pages */
@@ -140,22 +120,20 @@ body {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-surface);
   box-shadow: var(--shadow-surface);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
 }
 
 .card.wide {
   max-width: calc(var(--card-width) * 1.5);
 }
 
-.avatar {
-  width: 64px;
-  height: 64px;
-  margin: 0 auto var(--spacing);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--color-surface-hover);
-  color: var(--color-text-secondary);
+.logo {
+  display: block;
+  width: 96px;
+  height: 96px;
+  margin: calc(var(--spacing) * -0.5) auto calc(var(--spacing) * 0.5);
+  user-select: none;
 }
 
 h1 {
@@ -212,7 +190,7 @@ button,
   font: inherit;
   text-decoration: none;
   color: var(--color-text);
-  background: var(--color-surface);
+  background: var(--color-control);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
   cursor: pointer;
@@ -220,7 +198,7 @@ button,
 
 button:hover,
 .button:hover {
-  background: var(--color-surface-hover);
+  background: var(--color-control-hover);
 }
 
 button.primary,
