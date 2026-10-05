@@ -48,6 +48,8 @@ Notes:::
 
 Bug: when minimizing, then maximizing from there, when restoring, the animation pretends it's going to minimize but simply goes back to the normal size.
 
+Bug: when window gets small, our title bar rendering gets messed up. icon stays on top (good), other buttons cover app name (fine), but then when it gets really small, x scrolls off the edge. We'd rather have minimize and maximize start sliding off (but not covering icon)
+
 Bug: gtk demo can't be maximized, minimized, restored
 
 Bug: when window is at top of screen, moving mouse cursor off top edge can leave a shadow cursor showing.
@@ -62,15 +64,11 @@ Bug: can't use right-click menu on app icons, because they disappear when mouse 
 
 Bug: move from the right-click menu isn't actually useful (we can't use it to move a window left or up).
 
-Improvement: video playback is decent, but still uses a lot of cpu
+Bug: clock needs to show device time, not local time. the way it works now is ridiculous.
 
-Improvement: video playback only works when there is actual GPU rendering. Otherwise, CPU rendering is always used. Then, we can justify somewhat higher video quality.
+Improvement: Maybe consider QOI instead of PNG for image compression.
 
-Maybe consider QOI instead of PNG for image compression.
-
-Improvement: server side rendering should happen at 30fps, to reduce server-side work.
-
-Question: Are events pushed to the wayland server, or polled by it? Are there two different modes? So like a game uses one, a desktop application uses another?
+Improvement: title bars should be same size as task bar. Need to fix title rendering - currently cuts off bottom of text.
 
 Improvement: should be able to slide taskbar icons around
 
@@ -86,9 +84,9 @@ Improvement: when taking over an active session, should give a dialog box asking
 
 Improvement: in session menu in apps menu, instead of "disconnect", it should say "Sessions".
 
-Improvement: DOM per window instead of full webgl rendering context.
-
 Improvement: if the server goes down, then in addition to bringing you back to the main login page, it should tell you that it can't access the server.
+
+Improvement: the status indicator should tell more when you click on it. As it is, I'm not sure it even does anything at all.
 
 Bug: when there are too many apps, some of them get inaccessible.
 
@@ -98,13 +96,19 @@ Nice to have: when opening or closing a window, it should animate in/out the sam
 
 Nice to have: right click never allows browser default.
 
-Nice to have: when opening/closing menu, it should slide in/out.
+Nice to have: when opening/closing menu, it should slide in/out. In fact, everything should animate in/out.
 
 Nice to have: when new icons appear/disappear from task bar, icons should slide. New icon should animate in/out.
 
 Nice to have: file download/upload.
 
-Nice to have: background, new chic theme.
+Nice to have: background, new chic theme. Rounded corners on our title bars. Blurred translucent windows. Drop shadow for our windows and for all windows which are opaque and full-sized (which clearly don't have a shadow of their own). Drop shadow should be farther when window is selected.
+
+Actually, all elements (menu, notifications) should have drop shadows.
+
+Nice to have: nebula icon, including for app menu.
+
+Nice to have: we'll need to get it inspired by windows, and not just a pure copy of windows. Certainly there are some things we can do better than windows does?
 
 Nice to have: native code written in rust. Maybe another language for server code???
 
