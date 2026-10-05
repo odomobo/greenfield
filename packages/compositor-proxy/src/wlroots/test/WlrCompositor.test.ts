@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { onViewerFeedback, setViewerAttached } from '../../FramePacing.js'
 import { ControlMessage } from '../../viewer/ViewerTransport.js'
 import type { EncodingSink } from '../../encoding/SurfaceEncoder.js'
+import { FRAME_BORDER, FRAME_TITLE_HEIGHT } from '@gfld/scene-protocol'
 import { WlrCompositor, WlrNative } from '../WlrCompositor.js'
 
 type Configure = { sid: number; width: number; height: number; state: Record<string, boolean | undefined> }
@@ -142,7 +143,7 @@ class FakeCore {
   }
 
   /** A mapped toplevel with a buffer: what an app's first window goes through. */
-  newWindow(sid: number, options: { width?: number; height?: number; title?: string; parent?: number } = {}) {
+  newWindow(sid: number, options: { width?: number; height?: number; title?: string; parent?: number; decorated?: boolean } = {}) {
     const width = options.width ?? 400
     const height = options.height ?? 300
     this.onEvent('surface-new', sid, `1/${sid}`)
@@ -154,6 +155,9 @@ class FakeCore {
       fullscreen: false,
     })
     this.onEvent('toplevel-new', sid)
+    if (options.decorated) {
+      this.onEvent('toplevel-decorated', sid, true)
+    }
     this.onEvent('toplevel-title', sid, options.title ?? `window ${sid}`)
     this.onEvent('toplevel-app-id', sid, 'test-app')
     if (options.parent !== undefined) {
@@ -931,4 +935,66 @@ test('frame callbacks are held while both of the surface’s slots are taken, an
   } finally {
     setViewerAttached(false)
   }
+})
+
+test('decorated windows say so in the scene; undecorated ones leave the flag out; the decoration can go again', async () => {
+  core.newWindow(1, { decorated: true })
+  core.newWindow(2)
+  await flush()
+  let [framed, plain] = windowsOf(lastScene())
+  assert.equal(framed.decorated, true)
+  assert.ok(!('decorated' in plain))
+  // the app destroyed its decoration object: it draws its own frame now
+  core.onEvent('toplevel-decorated', 1, false)
+  await flush()
+  ;[framed, plain] = windowsOf(lastScene())
+  assert.ok(!('decorated' in framed))
+})
+
+test('a decorated window is maximized to the output minus its title bar, below it; undecorated ones to the output', async () => {
+  compositor.handleMessage({ type: 'output', width: 1000, height: 700 })
+  core.newWindow(1, { decorated: true })
+  core.newWindow(2)
+  core.onEvent('toplevel-request-maximize', 1, true)
+  core.onEvent('toplevel-request-maximize', 2, true)
+  assert.deepEqual(lastConfigure(1), {
+    sid: 1,
+    width: 1000,
+    height: 700 - FRAME_TITLE_HEIGHT,
+    state: { maximized: true },
+  })
+  assert.deepEqual(lastConfigure(2), { sid: 2, width: 1000, height: 700, state: { maximized: true } })
+  await flush()
+  const [framed, plain] = windowsOf(lastScene())
+  assert.deepEqual([framed.x, framed.y], [0, FRAME_TITLE_HEIGHT])
+  assert.deepEqual([plain.x, plain.y], [0, 0])
+  // the output changes: the title bar is subtracted again
+  compositor.handleMessage({ type: 'output', width: 800, height: 600 })
+  assert.deepEqual(lastConfigure(1), { sid: 1, width: 800, height: 600 - FRAME_TITLE_HEIGHT, state: { maximized: true } })
+})
+
+test('a window that becomes decorated while maximized is reconfigured below its title bar', async () => {
+  compositor.handleMessage({ type: 'output', width: 1000, height: 700 })
+  core.newWindow(1)
+  core.onEvent('toplevel-request-maximize', 1, true)
+  core.onEvent('toplevel-decorated', 1, true)
+  assert.equal(lastConfigure(1)?.height, 700 - FRAME_TITLE_HEIGHT)
+})
+
+test('a dialog is centered on its parent counting both frames', async () => {
+  core.newWindow(1, { width: 400, height: 300, decorated: true })
+  compositor.handleMessage({ type: 'window.move', window: '1/1', x: 100, y: 50 })
+  core.newWindow(2, { width: 100, height: 100, parent: 1, decorated: true })
+  await flush()
+  const [, dialog] = windowsOf(lastScene())
+  // equal frames around both: the outer rectangles share their centers, as the contents do
+  assert.deepEqual([dialog.x, dialog.y], [150, 100])
+  // an undecorated dialog on a decorated parent: the parent's outer rectangle is the taller one (title bar, borders)
+  core.newWindow(3, { width: 100, height: 100, parent: 1 })
+  await flush()
+  const third = windowsOf(lastScene()).find((window) => window.id === '1/3')
+  // (parent outer rectangle: y from -title bar to height + bottom border; the dialog's: 0 to 100)
+  const parentCenterY = (-FRAME_TITLE_HEIGHT + 300 + FRAME_BORDER) / 2
+  assert.equal(third.x, 150)
+  assert.equal(third.y, Math.round(parentCenterY - 50))
 })

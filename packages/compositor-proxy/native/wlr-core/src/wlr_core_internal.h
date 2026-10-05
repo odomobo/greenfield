@@ -9,6 +9,7 @@
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/util/box.h>
 #include "node_api.h"
 
@@ -42,6 +43,8 @@ struct core {
     struct wlr_presentation *presentation;
     uint64_t presentation_seq;
     struct wlr_xdg_activation_v1 *xdg_activation;
+    struct wlr_xdg_decoration_manager_v1 *decoration_manager;
+    struct wl_listener new_toplevel_decoration;
     struct wl_listener request_activate;
     const char *socket;
     /* XWayland, NULL if it's disabled or couldn't be set up */
@@ -97,6 +100,10 @@ struct gsurf {
     struct wl_listener set_title;
     struct wl_listener set_app_id;
     struct wl_listener set_parent;
+    /* the toplevel's xdg-decoration object, NULL if the app has none (it draws its own frame, or none) */
+    struct wlr_xdg_toplevel_decoration_v1 *decoration;
+    struct wl_listener decoration_request_mode;
+    struct wl_listener decoration_destroy;
 
     /* the X11 window this is the surface of (XWayland), NULL if none */
     struct xwin *xwin;

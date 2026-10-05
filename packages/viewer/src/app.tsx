@@ -6,7 +6,9 @@ import { Desktop } from './desktop'
 import { SessionInfo } from './session-name'
 import { ShellController } from './shell/shell'
 import { AppsMenuActions } from './shell/apps-menu'
-import { groupKey } from './shell/groups'
+import { appForWindow, groupKey } from './shell/groups'
+import { windowMenuItems } from './shell/menus'
+import { openPopup } from './popups'
 import { appStore, shellStore } from './state'
 import { DesktopView } from './views/desktop'
 import { LoginView } from './views/login'
@@ -171,6 +173,42 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
       }
       const selector = `#taskbar-items button[data-group="${CSS.escape(groupKey(state.apps, window))}"]`
       return document.querySelector(selector)?.getBoundingClientRect()
+    }
+
+    /** A window's title bar shows its app's icon (the desktop entry's, else the window's own). */
+    desktop.frameIcon = (window) => {
+      const state = shellStore.get()
+      const name = appForWindow(state.apps, window)?.icon
+      if (name !== undefined) {
+        shell.icons.want(name)
+        const url = state.icons[name]
+        if (typeof url === 'string') {
+          return url
+        }
+      }
+      return desktop.windowOwnIcon(window.id)
+    }
+    // the icons arrive after the windows
+    let shownApps = shellStore.get().apps
+    let shownIcons = shellStore.get().icons
+    shellStore.subscribe(() => {
+      const { apps, icons } = shellStore.get()
+      if (apps !== shownApps || icons !== shownIcons) {
+        shownApps = apps
+        shownIcons = icons
+        desktop.refreshFrames()
+      }
+    })
+    /** Right click on a title bar: the window menu, as on the taskbar. */
+    desktop.onWindowMenu = (window, at) => {
+      openPopup({
+        kind: 'context',
+        owner: `frame:${window.id}`,
+        items: windowMenuItems(window, desktop),
+        x: at.x,
+        y: at.y,
+        nested: false,
+      })
     }
 
     connection.onOpen = () => desktop.reset()

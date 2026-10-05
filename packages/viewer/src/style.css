@@ -704,6 +704,193 @@
   transform-origin: 0 0;
 }
 
+/*
+ * A decorated window's frame (window-frame.ts): its box is the window's outer rectangle, the app's content sits in it
+ * below the title bar. Only the title bar and the resize margin take pointer events; the rest of the box is click
+ * through, so it never covers the content. Sizes come from the protocol, colors from the theme.
+ */
+#output .frame {
+  position: absolute;
+  pointer-events: none;
+  transform-origin: 0 0;
+  color: var(--color-frame-text-inactive);
+  font-family: var(--font-family);
+  font-size: var(--font-size-small);
+  line-height: 1;
+}
+
+#output .frame.active {
+  color: var(--color-frame-text);
+}
+
+#output .frame-border {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: var(--frame-border) solid var(--color-frame-border);
+  pointer-events: none;
+}
+
+#output .frame.active .frame-border {
+  border-color: var(--color-frame-border-active);
+}
+
+#output .frame.maximized .frame-border {
+  border: none;
+}
+
+#output .frame-title {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  height: var(--frame-title-height);
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  background: var(--color-frame-inactive);
+  pointer-events: auto;
+  cursor: default;
+}
+
+#output .frame.active .frame-title {
+  background: var(--color-frame);
+}
+
+#output .frame-icon {
+  flex: none;
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  margin-left: 10px;
+}
+
+#output .frame-icon img,
+#output .frame-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+#output .frame-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+#output .frame-buttons {
+  flex: none;
+  display: flex;
+  align-self: stretch;
+}
+
+#output .frame-button {
+  display: inline-grid;
+  place-items: center;
+  width: 46px;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+}
+
+#output .frame-button:hover:not(:disabled) {
+  background: var(--color-subtle-hover);
+}
+
+#output .frame-button:active:not(:disabled) {
+  background: var(--color-subtle-pressed);
+}
+
+#output .frame-button.close:hover,
+#output .frame-button.close:active {
+  background: var(--color-frame-close);
+  color: var(--color-frame-on-close);
+}
+
+#output .frame-button:disabled {
+  opacity: 0.4;
+}
+
+/* a dialog can only be closed */
+#output .frame.dialog .frame-button.minimize,
+#output .frame.dialog .frame-button.maximize {
+  display: none;
+}
+
+/* the invisible margin outside the border that resizes the window, and the corners */
+#output .frame-grab {
+  position: absolute;
+  pointer-events: auto;
+}
+
+#output .frame.fixed-size .frame-grab {
+  display: none;
+}
+
+#output .frame-grab.n,
+#output .frame-grab.s {
+  left: 0;
+  right: 0;
+  height: calc(var(--frame-grab) + var(--frame-border));
+}
+
+#output .frame-grab.n {
+  top: calc(-1 * var(--frame-grab));
+}
+
+#output .frame-grab.s {
+  bottom: calc(-1 * var(--frame-grab));
+}
+
+#output .frame-grab.w,
+#output .frame-grab.e {
+  top: 0;
+  bottom: 0;
+  width: calc(var(--frame-grab) + var(--frame-border));
+}
+
+#output .frame-grab.w {
+  left: calc(-1 * var(--frame-grab));
+}
+
+#output .frame-grab.e {
+  right: calc(-1 * var(--frame-grab));
+}
+
+#output .frame-grab.nw,
+#output .frame-grab.ne,
+#output .frame-grab.sw,
+#output .frame-grab.se {
+  width: calc(var(--frame-grab) + 4px);
+  height: calc(var(--frame-grab) + 4px);
+}
+
+#output .frame-grab.nw,
+#output .frame-grab.ne {
+  top: calc(-1 * var(--frame-grab));
+}
+
+#output .frame-grab.sw,
+#output .frame-grab.se {
+  bottom: calc(-1 * var(--frame-grab));
+}
+
+#output .frame-grab.nw,
+#output .frame-grab.sw {
+  left: calc(-1 * var(--frame-grab));
+}
+
+#output .frame-grab.ne,
+#output .frame-grab.se {
+  right: calc(-1 * var(--frame-grab));
+}
+
 #output canvas.surface {
   position: absolute;
   display: block;

@@ -29,6 +29,10 @@ Since wave 2 B, X11 apps run too (XWayland).
   seat pointer drag, the icon surface is reported (`drag-start`, `drag-icon`, `drag-end`). Files from the user's
   computer: a drag of ours with a `text/uri-list` source (`startFileDrag`, `fileDragAccepted`, `dropFileDrag`,
   `cancelFileDrag`, `provideFiles`), driven by `src/wlroots/FileDrops.ts`.
+- Decorations (Core item 4): `xdg-decoration` (`wlr_xdg_decoration_manager_v1`, in `wlr_core.c`) answers every decoration
+  object with server side mode, and X11 managed windows are decorated unless `_MOTIF_WM_HINTS` has no title
+  (`wlr_core_xwayland.c`); both emit `toplevel-decorated(sid, decorated)`. The viewer draws the frame, the policy
+  (`WlrCompositor.ts`) subtracts it when maximizing and centering dialogs.
 - `native/wlr-core/src/xwayland_sockets.c`: replaces wlroots' `xwayland/sockets.c` at link time (see the gotchas).
 - `native/wlr-core/src/wlr_core_encoder.c`: the existing GStreamer encoder (`native/encoding`), compiled into the same
   addon against the system libwayland (`shim/westfield.h`), fed from wlroots buffers. `src/westfield-egl.c`,
