@@ -8,7 +8,11 @@
 #      viewer then shows exactly the client's last frame, pixel for pixel;
 #   3. bursts (phase 3): now that the link was limited once, a large static page (the busy client's page mode) is
 #      promoted as soon as it paints, and again as soon as it scrolls: JPEG patches at once, then it settles
-#      (losslessly, at the lowest priority) and is demoted, and the viewer shows its last frame exactly.
+#      (losslessly, at the lowest priority) and is demoted, and the viewer shows its last frame exactly;
+#   4. chunks (5d): while the page's large patches cross the link, a tone app's audio packets never wait long behind
+#      them (they go between chunks): the simulated link logs any audio packet that waited over 30 ms, and none may
+#      have waited over 60 ms. Measured on the server: the headless browser here (software rendering) is itself slow
+#      to take messages while it draws. Skipped when the session can't have audio (as scripts/e2e/audio.sh).
 # No GPU acceleration is assumed: the gateway runs with --encoder none (lib.sh).
 #
 # Requires: gcc, wayland-scanner (libwayland-dev), wayland-protocols, playwright-cli, curl, node, the built packages
@@ -31,6 +35,20 @@ PAGE_W=1200
 PAGE_H=660
 PAGE_PAUSE="$WORK/page-pause"
 mkdir -p "$WORK/data/applications" "$WORK/config"
+# the tone app (as in audio.sh), if the session can have audio
+AUDIO=1
+for tool in pipewire pipewire-pulse wireplumber gst-launch-1.0; do command -v "$tool" >/dev/null || AUDIO=0; done
+for element in pulsesrc pulsesink opusenc rtpopuspay rtpstreampay audiotestsrc; do
+  gst-inspect-1.0 "$element" >/dev/null 2>&1 || AUDIO=0
+done
+if [ "$AUDIO" = 1 ]; then
+  cat >"$WORK/data/applications/test-tone.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Test Tone
+Exec=gst-launch-1.0 -q audiotestsrc freq=440 volume=0.3 is-live=true ! audioconvert ! pulsesink
+EOF
+fi
 cat >"$WORK/run-page" <<EOF
 #!/bin/sh
 exec "$WORK/busy-client" "$WORK/page-frames" $PAGE_W $PAGE_H "$PAGE_PAUSE" page >"$WORK/page.log" 2>&1
@@ -109,12 +127,27 @@ wait_until "the viewer to show the client's last frame exactly" 20 exact
 echo "    the viewer shows the last frame pixel for pixel; patch kinds: $(pw_eval "() => JSON.stringify(window.__viewerTest.patchKinds())")"
 echo "    ok"
 
+audio() { echo "window.__viewerTest.audio()"; }
+if [ "$AUDIO" = 1 ]; then
+  step "a tone plays (for the audio check of the page step)"
+  wait_for "() => { const a = $(audio); return a.available && a.contextState === 'running' && a.sentMuted === false }" "audio to be available and the audio context to run" 30
+  click_element '#apps-button'
+  wait_for "() => !!document.querySelector('.app-row[data-app=\"test-tone.desktop\"]') && document.activeElement.id === 'apps-search'" "the tone app in the Apps menu"
+  pw type "Test Tone" >/dev/null
+  wait_for "() => [...document.querySelectorAll('.apps-list [data-app]')].map((e) => e.dataset.app).join(' ') === 'test-tone.desktop'" "searching for it"
+  pw press Enter >/dev/null
+  wait_for "() => $(audio).packets > 20" "audio packets" 30
+  echo "    ok"
+fi
+
 step "a large static page appears: a burst (its backlog needs the link too long), JPEG, then settled and demoted"
 touch "$PAGE_PAUSE"
 click_element '#apps-button'
 wait_for "() => !!document.querySelector('.app-row[data-app=\"test-page.desktop\"]') && document.activeElement.id === 'apps-search'" "the page client in the Apps menu"
 pw type "Test Page" >/dev/null
 wait_for "() => [...document.querySelectorAll('.apps-list [data-app]')].map((e) => e.dataset.app).join(' ') === 'test-page.desktop'" "searching for it"
+# from here on, audio must not wait behind the page's patches (checked at the end)
+PAGE_LOG_FROM="$(wc -l <"$WORK/gateway.log")"
 pw press Enter >/dev/null
 wait_for "() => window.__viewerTest.windows().some((w) => w.appId === 'test-page' && w.placed && w.hasContent)" "the page window" 30
 PAGE="$(pw_eval "() => window.__viewerTest.windows().find((w) => w.appId === 'test-page').id" | tr -d '"')"
@@ -154,5 +187,16 @@ wait_until "the page to be demoted again" 20 demoted 2
 wait_until "the viewer to show the scrolled page exactly" 20 page_exact
 echo "    patch kinds: $(pw_eval "() => JSON.stringify(window.__viewerTest.patchKinds())")"
 echo "    ok"
+
+if [ "$AUDIO" = 1 ]; then
+  step "audio didn't wait behind the page's patches (chunks)"
+  [ "$(pw_eval "() => $(audio).packets")" -gt 100 ] || fail "no audio was flowing"
+  WAITS="$(tail -n +"$PAGE_LOG_FROM" "$WORK/gateway.log" | { grep -a 'Simulated link: an audio packet waited' || true; } | sed 's/.*waited \([0-9]*\) ms.*/\1/' | tr '\n' ' ')"
+  echo "    audio waits over 30 ms since the page appeared: ${WAITS:-none}"
+  for wait in $WAITS; do
+    [ "$wait" -le 60 ] || fail "an audio packet waited $wait ms in the link behind the page's patches"
+  done
+  echo "    ok"
+fi
 
 echo "PASS: a streaming surface goes lossy (JPEG) on a slow link and is sent again losslessly once bandwidth recovers; bursts go lossy at once, then settle"

@@ -1328,9 +1328,9 @@ single large item never stalls the link. Initial window before any estimate: 64 
          simulated link, after the link was limited once, a static page (foot full of text, say) scrolled: JPEG patches
          within a few hundred ms, then settled losslessly at the lowest tier and demoted; the viewer ends up exact.
 
-### Next: chunked data items
+### Done: chunked data items
 
-5d. **Chunk large data items** (user's design, agreed 2026-10-05). The problem: audio and control messages are written
+5d. **Done.** **Chunk large data items** (user's design, agreed 2026-10-05). The problem: audio and control messages are written
     to the socket at once, but they can't overtake a data item already handed over. A 64K-pixel lossless patch of
     video-like content is 130-200 KB, 130-200 ms of an 8 Mbit/s link, and audio waiting behind it underruns the
     viewer's jitter buffer (seen with a stream at the settling threshold: a settling patch between every frame, audio
@@ -1356,6 +1356,24 @@ single large item never stalls the link. Initial window before any estimate: 64 
     - Tests: unit (chunk sizes, reassembly, order: a higher tier between chunks, one item at a time per tier, control
       and audio between chunks, started items never dropped, slots freed on the last chunk); e2e: on the 8 Mbit/s
       simulated link, audio packets' delay stays small while a large lossless repaint goes through.
+    - Status (built 2026-10-05, scene protocol 19): `CHUNK` envelope, `encodeChunk` / `decodeChunk` /
+      `ChunkAssembler` in scene-protocol; the transport (`ViewerTransport.ts`) moves an item it starts chunking out
+      of its surface's chain into `started` (so drops can't touch it), continues a tier's started item before the
+      tier starts another, and a started item waits in the highest tier of its surface's queued items (a surface's
+      next item never overtakes it). The deficit round-robin charges chunks. The viewer acks every chunk, joins them
+      (`connection.ts`) and counts an item's chunks as one item for `largestPendingBytes` (`acks.ts`). With
+      `--dev-link-kbps`, the simulated link logs audio that waited over 30 ms behind other data (at most once a
+      second).
+    - Measured on the 8 Mbit/s simulated link while the page client (1200x660) paints and settles (about 1 MB
+      lossless): audio waited at most 15-19 ms with chunks; 70+ ms without (64K-pixel patches whole). The headless
+      browser of the e2e tests is itself slow to take messages while it draws (gaps of about 110 ms between audio
+      packets either way, software rendering under WSL), so the check is on the server.
+    - Tests: compositor-proxy 210 (7 chunking tests in `SendScheduler.test.ts`; the congestion tests run unchunked),
+      viewer 128 (the envelope and assembler, chunk acks), `lossy.sh` gains the audio check (a tone app, skipped
+      without PipeWire), about 20 s.
+    - Seen, not fixed: at the very start of a session on the simulated link (an unbounded FIFO), the busy client's
+      first burst made an audio packet wait about 1 s: the congestion controller's Startup overshoots before it has
+      measured the link. A real link's buffer is bounded (it drops), so this may be the simulation's; worth a look.
 
 ### Lower priority
 

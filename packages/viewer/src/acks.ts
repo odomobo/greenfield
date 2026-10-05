@@ -3,17 +3,18 @@ import { BACKLOG_HOLD_BYTES, type ViewerAck } from './protocol.js'
 /**
  * Acknowledgements of data envelopes for the server's congestion control (see the ACK envelope in the scene protocol).
  *
- * Every data envelope (FRAME, PATCH) is acknowledged as soon as it arrives, before it's decoded. Each ack also reports
- * the backlog: envelopes received but not yet applied (a patch drawn, a frame decoded; dropped counts as applied). The
- * server stops sending data while that backlog, not counting its largest envelope, is over BACKLOG_HOLD_BYTES, so once
- * an envelope is applied while the last report was over the limit, a fresh ack tells the server the backlog went down.
- * Sizes are whole envelopes, as the server counts them. One tracker per connection (reset() on a new one).
+ * Every data envelope (FRAME, PATCH, CHUNK) is acknowledged as soon as it arrives, before it's decoded. Each ack also
+ * reports the backlog: envelopes received but not yet applied (a patch drawn, a frame decoded; dropped counts as
+ * applied; a chunk once its whole item is). The server stops sending data while that backlog, not counting its largest
+ * item, is over BACKLOG_HOLD_BYTES, so once an envelope is applied while the last report was over the limit, a fresh ack
+ * tells the server the backlog went down. Sizes are whole envelopes, as the server counts them; an item's chunks count
+ * together as one item for the largest. One tracker per connection (reset() on a new one).
  */
 export class AckTracker {
   private received = 0
   private nextToken = 0
-  /** token -> size of the envelopes received and not yet applied */
-  private readonly pending = new Map<number, number>()
+  /** token -> size of the envelopes received and not yet applied, and the chunked item they belong to */
+  private readonly pending = new Map<number, { bytes: number; item?: number }>()
   private backlog = 0
   /** the last report's backlog not counting its largest envelope */
   private lastReportedExcess = 0
@@ -23,11 +24,14 @@ export class AckTracker {
     private readonly holdBytes = BACKLOG_HOLD_BYTES,
   ) {}
 
-  /** A data envelope of this size arrived: it's acknowledged right away. Pass the token to applied() later. */
-  arrived(bytes: number): number {
+  /**
+   * A data envelope of this size arrived (`item`: a chunk of that item): it's acknowledged right away. Pass the token to
+   * applied() later.
+   */
+  arrived(bytes: number, item?: number): number {
     this.received = (this.received + 1) >>> 0
     const token = this.nextToken++
-    this.pending.set(token, bytes)
+    this.pending.set(token, { bytes, item })
     this.backlog += bytes
     this.report()
     return token
@@ -35,12 +39,12 @@ export class AckTracker {
 
   /** The envelope was applied (or dropped). Calling it again for the same token does nothing. */
   applied(token: number): void {
-    const bytes = this.pending.get(token)
-    if (bytes === undefined) {
+    const pending = this.pending.get(token)
+    if (pending === undefined) {
       return
     }
     this.pending.delete(token)
-    this.backlog -= bytes
+    this.backlog -= pending.bytes
     if (this.lastReportedExcess > this.holdBytes) {
       this.report()
     }
@@ -56,7 +60,15 @@ export class AckTracker {
 
   private report() {
     let largest = 0
-    for (const bytes of this.pending.values()) {
+    const items = new Map<number, number>()
+    for (const { bytes, item } of this.pending.values()) {
+      if (item === undefined) {
+        largest = Math.max(largest, bytes)
+      } else {
+        items.set(item, (items.get(item) ?? 0) + bytes)
+      }
+    }
+    for (const bytes of items.values()) {
       largest = Math.max(largest, bytes)
     }
     this.lastReportedExcess = this.backlog - largest

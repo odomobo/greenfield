@@ -20,6 +20,18 @@ describe('AckTracker', () => {
     ])
   })
 
+  it("an item's chunks are acknowledged one by one and count together as one item for the largest", () => {
+    const { tracker, sent } = setup()
+    tracker.arrived(100)
+    const chunks = [400, 400, 400].map((bytes) => tracker.arrived(bytes, 7))
+    assert.deepEqual(sent.at(-1), { received: 4, backlogBytes: 1300, largestPendingBytes: 1200 })
+    for (const token of chunks) {
+      tracker.applied(token)
+    }
+    tracker.arrived(50, 8)
+    assert.deepEqual(sent.at(-1), { received: 5, backlogBytes: 150, largestPendingBytes: 100 })
+  })
+
   it('applied envelopes leave the backlog, without an ack while under the limit', () => {
     const { tracker, sent } = setup()
     const first = tracker.arrived(100)

@@ -29,11 +29,19 @@
  * letting the audio get ever later (the sequence numbers show it). The viewer plays audio through a small jitter
  * buffer and does not conceal losses.
  *
- * Data envelopes (FRAME and PATCH) are acknowledged for congestion control (see "Transport and congestion control" in
+ * CHUNK payload (server -> viewer): u32le item id, u8 flags (1: first, 2: last), then the next bytes of a data envelope
+ * (FRAME or PATCH) too large to send at once. Large items are sent in chunks so that control messages and audio can go
+ * between them (see "Chunk large data items" in ROADMAP.md): the viewer joins an item's chunks (`ChunkAssembler`) and
+ * handles the result as that envelope. An item's chunks arrive in order, but chunks of up to a few items (one per send
+ * tier) may be interleaved; ids are per connection, counting up from 0 (mod 2^32). Items that fit in one chunk are sent
+ * as they are.
+ *
+ * Data envelopes (FRAME, PATCH and CHUNK) are acknowledged for congestion control (see "Transport and congestion control" in
  * ROADMAP.md): the viewer sends an ACK first thing when a data envelope arrives, before decoding it, so the server's
  * round-trip times measure the network, not decoding. Data envelopes are numbered implicitly, in the order they're
  * sent (TCP keeps it); `received` counts them. The ACK also reports the viewer's backlog (received, not yet applied):
- * the server sends no data while `backlogBytes - largestPendingBytes > BACKLOG_HOLD_BYTES`, so after applying an item
+ * the server sends no data while `backlogBytes - largestPendingBytes > BACKLOG_HOLD_BYTES` (an item's chunks count as one
+ * item: it's applied once it is whole), so after applying an item
  * the viewer sends a fresh ACK (same `received`) whenever its last report was over that, or the server would wait
  * forever. Control envelopes are never acknowledged.
  *
@@ -73,7 +81,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 18
+export const PROTOCOL_VERSION = 19
 
 /**
  * The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). The
@@ -105,6 +113,7 @@ export const enum EnvelopeKind {
   FILE = 4,
   ACK = 5,
   AUDIO = 6,
+  CHUNK = 7,
 }
 
 /**
@@ -516,9 +525,106 @@ export function decodeViewerEnvelope(data: Uint8Array): ViewerEnvelope {
   return { kind: 'control', message: decodeControl(data) }
 }
 
-/** True for a server -> viewer data envelope (FRAME or PATCH, the ones the viewer acknowledges). */
+/** True for a server -> viewer data envelope (FRAME, PATCH or CHUNK, the ones the viewer acknowledges). */
 export function isDataEnvelope(data: Uint8Array): boolean {
-  return data.byteLength >= 2 && (data[1] === EnvelopeKind.FRAME || data[1] === EnvelopeKind.PATCH)
+  return (
+    data.byteLength >= 2 &&
+    (data[1] === EnvelopeKind.FRAME || data[1] === EnvelopeKind.PATCH || data[1] === EnvelopeKind.CHUNK)
+  )
+}
+
+/** The CHUNK envelope's header: version, kind, u32le item id, u8 flags. */
+export const CHUNK_HEADER_BYTES = 7
+const CHUNK_FIRST = 1
+const CHUNK_LAST = 2
+
+/** One chunk of a large data envelope, see the CHUNK envelope. */
+export type Chunk = { id: number; first: boolean; last: boolean; data: Uint8Array }
+
+/** Encode a server -> viewer chunk of a data envelope (its bytes from `start` to `end`). */
+export function encodeChunk(id: number, envelope: Uint8Array, start: number, end: number): Uint8Array {
+  const chunk = new Uint8Array(CHUNK_HEADER_BYTES + end - start)
+  chunk[0] = PROTOCOL_VERSION
+  chunk[1] = EnvelopeKind.CHUNK
+  new DataView(chunk.buffer).setUint32(2, id >>> 0, true)
+  chunk[6] = (start === 0 ? CHUNK_FIRST : 0) | (end >= envelope.byteLength ? CHUNK_LAST : 0)
+  chunk.set(envelope.subarray(start, end), CHUNK_HEADER_BYTES)
+  return chunk
+}
+
+/** True for a CHUNK envelope. */
+export function isChunkEnvelope(data: Uint8Array): boolean {
+  return data.byteLength >= 2 && data[0] === PROTOCOL_VERSION && data[1] === EnvelopeKind.CHUNK
+}
+
+/** Decode a CHUNK envelope. Throws if it isn't one. */
+export function decodeChunk(data: Uint8Array): Chunk {
+  if (!isChunkEnvelope(data) || data.byteLength < CHUNK_HEADER_BYTES) {
+    throw new Error('Not a CHUNK envelope.')
+  }
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+  return {
+    id: view.getUint32(2, true),
+    first: (data[6] & CHUNK_FIRST) !== 0,
+    last: (data[6] & CHUNK_LAST) !== 0,
+    data: data.subarray(CHUNK_HEADER_BYTES),
+  }
+}
+
+/** More items than this in progress at once is a protocol error (there is one per send tier). */
+const MAX_PARTIAL_ITEMS = 8
+
+/**
+ * Joins chunks back into the envelopes they were cut from (one per connection). `push` returns the whole envelope with
+ * an item's last chunk, else undefined. Throws on a chunk that doesn't fit (a protocol error).
+ */
+export class ChunkAssembler {
+  private readonly partial = new Map<number, Uint8Array[]>()
+
+  /** items begun and not finished */
+  get pending(): number {
+    return this.partial.size
+  }
+
+  push(chunk: Chunk): Uint8Array | undefined {
+    const parts = this.partial.get(chunk.id)
+    if (chunk.first) {
+      if (parts !== undefined) {
+        throw new Error(`Chunk item ${chunk.id} started twice.`)
+      }
+      if (chunk.last) {
+        return chunk.data.slice()
+      }
+      if (this.partial.size >= MAX_PARTIAL_ITEMS) {
+        throw new Error('Too many chunked items at once.')
+      }
+      this.partial.set(chunk.id, [chunk.data.slice()])
+      return undefined
+    }
+    if (parts === undefined) {
+      throw new Error(`Chunk of an unknown item ${chunk.id}.`)
+    }
+    parts.push(chunk.data.slice())
+    if (!chunk.last) {
+      return undefined
+    }
+    this.partial.delete(chunk.id)
+    let length = 0
+    for (const part of parts) {
+      length += part.byteLength
+    }
+    const whole = new Uint8Array(length)
+    let offset = 0
+    for (const part of parts) {
+      whole.set(part, offset)
+      offset += part.byteLength
+    }
+    return whole
+  }
+
+  reset(): void {
+    this.partial.clear()
+  }
 }
 
 /**

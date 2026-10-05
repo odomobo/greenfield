@@ -1,11 +1,14 @@
 import { AckTracker } from './acks'
 import {
+  ChunkAssembler,
   CLOSE_TAKEN_OVER,
+  decodeChunk,
   decodeEnvelope,
   DecodedEnvelope,
   encodeAck,
   encodeControl,
   encodeFileChunk,
+  isChunkEnvelope,
   isDataEnvelope,
   ViewerMessage,
 } from './protocol'
@@ -30,8 +33,9 @@ const CLOSE_NOT_FOUND = 4004
  *
  * The first message on the socket is the sign-in token (not the URL, so it doesn't end up in logs).
  *
- * Data envelopes (frames, patches) are acknowledged the moment they arrive, before decoding (see acks.ts); whoever
- * handles one calls its `applied` once it's drawn, decoded or dropped.
+ * Data envelopes (frames, patches, chunks) are acknowledged the moment they arrive, before decoding (see acks.ts);
+ * whoever handles one calls its `applied` once it's drawn, decoded or dropped. Chunks are joined into the envelope
+ * they were cut from, which is handled once it's whole (its `applied` covers all its chunks).
  */
 export class Connection {
   onEnvelope: (envelope: DecodedEnvelope, applied: () => void) => void = () => {
@@ -51,6 +55,9 @@ export class Connection {
       this.ws.send(encodeAck(ack))
     }
   })
+  private readonly chunks = new ChunkAssembler()
+  /** the ack tokens of the chunks of each item still being joined */
+  private readonly chunkTokens = new Map<number, number[]>()
   private retryDelay = 500
   private retryTimer?: number
   private target?: { url: string; token: string }
@@ -75,8 +82,10 @@ export class Connection {
     const ws = new WebSocket(url)
     ws.binaryType = 'arraybuffer'
     this.ws = ws
-    // the server counts data envelopes per connection
+    // the server counts data envelopes (and numbers chunked items) per connection
     this.acks.reset()
+    this.chunks.reset()
+    this.chunkTokens.clear()
     ws.onopen = () => {
       ws.send(token)
       this.retryDelay = 500
@@ -87,20 +96,15 @@ export class Connection {
       if (!(event.data instanceof ArrayBuffer) || this.ws !== ws) {
         return
       }
-      // acknowledge data first thing, so the server's round-trip times measure the network, not our decoding
-      const token = isDataEnvelope(new Uint8Array(event.data, 0, Math.min(2, event.data.byteLength)))
-        ? this.acks.arrived(event.data.byteLength)
-        : undefined
-      const applied = token === undefined ? noop : () => this.acks.applied(token)
-      let envelope: DecodedEnvelope
-      try {
-        envelope = decodeEnvelope(event.data)
-      } catch (e) {
-        console.error('Invalid message from server', e)
-        applied()
+      const head = new Uint8Array(event.data, 0, Math.min(2, event.data.byteLength))
+      if (isChunkEnvelope(head)) {
+        this.onChunk(event.data)
         return
       }
-      this.onEnvelope(envelope, applied)
+      // acknowledge data first thing, so the server's round-trip times measure the network, not our decoding
+      const token = isDataEnvelope(head) ? this.acks.arrived(event.data.byteLength) : undefined
+      const applied = token === undefined ? noop : () => this.acks.applied(token)
+      this.handle(event.data, applied)
     }
     ws.onclose = (event) => {
       if (this.ws !== ws) {
@@ -125,6 +129,56 @@ export class Connection {
       this.onStateChange({ kind: 'reconnecting', inSeconds: Math.ceil(delay / 1000) })
       this.retryTimer = window.setTimeout(() => this.connect(), delay)
     }
+  }
+
+  /** A chunk arrived: acknowledged at once like any data envelope; its item is handled once it's whole. */
+  private onChunk(data: ArrayBuffer) {
+    let chunk: ReturnType<typeof decodeChunk>
+    try {
+      chunk = decodeChunk(new Uint8Array(data))
+    } catch (e) {
+      console.error('Invalid chunk from server', e)
+      // still a data envelope the server counts
+      this.acks.applied(this.acks.arrived(data.byteLength))
+      return
+    }
+    const token = this.acks.arrived(data.byteLength, chunk.id)
+    const tokens = this.chunkTokens.get(chunk.id) ?? []
+    tokens.push(token)
+    this.chunkTokens.set(chunk.id, tokens)
+    let whole: Uint8Array | undefined
+    try {
+      whole = this.chunks.push(chunk)
+    } catch (e) {
+      console.error('Invalid chunk from server', e)
+      this.chunkTokens.delete(chunk.id)
+      for (const token of tokens) {
+        this.acks.applied(token)
+      }
+      return
+    }
+    if (whole === undefined) {
+      return
+    }
+    this.chunkTokens.delete(chunk.id)
+    this.handle(whole.buffer as ArrayBuffer, () => {
+      for (const token of tokens) {
+        this.acks.applied(token)
+      }
+    })
+  }
+
+  /** Decode a (whole) envelope and pass it on. */
+  private handle(data: ArrayBuffer, applied: () => void) {
+    let envelope: DecodedEnvelope
+    try {
+      envelope = decodeEnvelope(data)
+    } catch (e) {
+      console.error('Invalid message from server', e)
+      applied()
+      return
+    }
+    this.onEnvelope(envelope, applied)
   }
 
   /** disconnect and stop reconnecting */

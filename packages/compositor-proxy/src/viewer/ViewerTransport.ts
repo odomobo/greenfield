@@ -12,7 +12,10 @@ export type Congestion = Pick<CongestionController, 'canSend' | 'nextSendTime' |
   Partial<Pick<CongestionController, 'bandwidthEstimate'>>
 import {
   AudioPacket,
+  CHUNK_HEADER_BYTES,
   decodeViewerEnvelope,
+  encodeChunk,
+  EnvelopeKind,
   encodeAudio,
   encodeControl,
   encodeFrame,
@@ -65,7 +68,10 @@ export interface ViewerTransport {
    * streaming classes, then settling) share the link by byte-weighted deficit round-robin (9 : 3 : 1, work-conserving),
    * surfaces of a tier take turns, one item per visit, as fast as the congestion controller lets them go (see
    * congestion.ts: pacing, in-flight limit, the viewer's backlog). Video frames and patches of a surface are sent in
-   * order, so a surface's items wait in the highest tier of any of them. A video key frame replaces everything unsent
+   * order, so a surface's items wait in the highest tier of any of them. Items larger than the chunk size (chunkSize)
+   * go out in chunks (CHUNK envelopes): control messages and audio go between any two, a higher tier's items too, but a
+   * tier sends one item at a time (its started item continues until done), and a surface's next item waits for its
+   * started one. A started item is never dropped. A video key frame replaces everything unsent
    * of its surface (it covers the whole surface),
    * delta frames are chained behind it up to a small limit. Patches are never coalesced or dropped, except by a later
    * key frame or the calls below.
@@ -131,6 +137,14 @@ const DRR_QUANTUM: Record<SendTier, number> = {
 }
 /** The tiers from the highest priority, the round-robin's order. */
 const TIERS: readonly SendTier[] = ['normal', 'streaming', 'settle']
+// Items larger than this are sent in chunks of this size: about 10 ms of the link at the congestion controller's
+// bandwidth estimate, at least CHUNK_MIN_BYTES (a slow link, or no estimate yet) and at most CHUNK_MAX_BYTES (an
+// overestimate). So nothing else waits behind one data item for long, and the message (and ack) rate stays moderate.
+export const CHUNK_MS = 10
+export const CHUNK_MIN_BYTES = 10 * 1024
+export const CHUNK_MAX_BYTES = 300 * 1024
+// The simulated link logs audio waiting longer than this behind other data (see noteLinkAudioWait).
+const LINK_AUDIO_WAIT_LOG_MS = 30
 // Max unsent delta frames per surface. Beyond that the viewer is too far behind: drop them and resync with a key frame.
 const MAX_UNSENT_FRAMES_PER_SURFACE = 3
 
@@ -157,10 +171,19 @@ function sizeOf(entry: QueuedEntry): number {
   return entry.kind === 'frame' ? entry.frame.length : entry.envelope.length
 }
 
-/** The size of the envelope the item goes out as: what the congestion controller and the viewer's acks count. */
-function envelopeSizeOf(surface: string, entry: QueuedEntry): number {
-  // FRAME envelope: version, kind, u16 key length, key, frame (see the scene protocol)
-  return entry.kind === 'frame' ? 4 + Buffer.byteLength(surface) + entry.frame.length : entry.envelope.length
+/** A data item being sent in chunks: its envelope and how much of it went out. */
+type StartedItem = { readonly entry: QueuedEntry; readonly envelope: Uint8Array; readonly id: number; sent: number }
+
+/** The next piece of a data item to hand to the socket. */
+type NextSend = {
+  surface: string
+  entry: QueuedEntry
+  /** what to write: the whole envelope, or a CHUNK of it */
+  data: Uint8Array
+  /** its first piece (a key frame is sent from here on) */
+  first: boolean
+  /** its last piece (the item is done once it's written) */
+  last: boolean
 }
 
 const nextTier = (tier: SendTier): SendTier => TIERS[(TIERS.indexOf(tier) + 1) % TIERS.length]
@@ -198,6 +221,15 @@ export class WebSocketViewerTransport implements ViewerTransport {
    * goes to the back after each of its items is sent. A surface's tier is the highest of its items' (see tierOf).
    */
   private readonly pendingFrames = new Map<string, QueuedEntry[]>()
+  /**
+   * Items being sent in chunks, at most one per surface (its next item waits) and one per tier (a tier continues its
+   * started item before it starts another). They are out of their surface's chain: never dropped.
+   */
+  private readonly started = new Map<string, StartedItem>()
+  private nextItemId = 0
+  private readonly chunkBytes: { min: number; max: number }
+  /** FRAME envelopes encoded while asking whether they may go (the controller may say not yet) */
+  private readonly frameEnvelopes = new WeakMap<QueuedEntry, Uint8Array>()
   /** deficit round-robin state: whose turn it is, whether it got its quantum for this turn, bytes carried over */
   private drrTurn: SendTier = 'normal'
   private drrQuantumGiven = false
@@ -221,6 +253,9 @@ export class WebSocketViewerTransport implements ViewerTransport {
   private readonly linkQueue: { data: Uint8Array; at: number }[] = []
   private linkFreeAt = 0
   private linkTimer?: NodeJS.Timeout
+  /** the longest an audio packet waited in the simulated link this second, and when the second began */
+  private linkAudioWait = 0
+  private linkAudioWaitSince = 0
 
   constructor(
     private readonly ws: WebSocket,
@@ -230,11 +265,14 @@ export class WebSocketViewerTransport implements ViewerTransport {
       link?: SimulatedLink
       /** the predicted backlog of the surfaces' damage not handed to the transport yet (see bandwidth.ts) */
       unencodedBytes?: () => number
+      /** the chunk size's bounds (see CHUNK_MS), for tests */
+      chunkBytes?: { min: number; max: number }
     } = {},
   ) {
     this.now = options.now ?? (() => performance.now())
     this.congestion = options.congestion ?? new CongestionController({ now: this.now() })
     this.link = options.link
+    this.chunkBytes = options.chunkBytes ?? { min: CHUNK_MIN_BYTES, max: CHUNK_MAX_BYTES }
     const unencodedBytes = options.unencodedBytes ?? (() => 0)
     this.bandwidth = new BandwidthMonitor(
       this.now(),
@@ -296,6 +334,10 @@ export class WebSocketViewerTransport implements ViewerTransport {
 
   queuedBytes(surface: string): number {
     let bytes = 0
+    const started = this.started.get(surface)
+    if (started !== undefined && started.entry.tier !== 'settle') {
+      bytes += started.envelope.length - started.sent
+    }
     for (const entry of this.pendingFrames.get(surface) ?? []) {
       if (entry.tier !== 'settle') {
         bytes += sizeOf(entry)
@@ -306,7 +348,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
 
   private queuedBacklogBytes(): number {
     let bytes = 0
-    for (const surface of this.pendingFrames.keys()) {
+    for (const surface of new Set([...this.pendingFrames.keys(), ...this.started.keys()])) {
       bytes += this.queuedBytes(surface)
     }
     return bytes
@@ -393,6 +435,39 @@ export class WebSocketViewerTransport implements ViewerTransport {
       dropEntries(chain)
     }
     this.pendingFrames.clear()
+    dropEntries([...this.started.values()].map(({ entry }) => entry))
+    this.started.clear()
+  }
+
+  private get dataWaiting(): boolean {
+    return this.pendingFrames.size > 0 || this.started.size > 0
+  }
+
+  /** The current chunk size (see CHUNK_MS). */
+  private get chunkSize(): number {
+    const estimate = this.congestion.bandwidthEstimate ?? 0
+    const { min, max } = this.chunkBytes
+    return Math.min(max, Math.max(min, Math.round(estimate * CHUNK_MS)))
+  }
+
+  /** The item's envelope (a frame's is encoded once, the first time it's needed). */
+  private envelopeOf(surface: string, entry: QueuedEntry): Uint8Array {
+    if (entry.kind === 'patch') {
+      return entry.envelope
+    }
+    let envelope = this.frameEnvelopes.get(entry)
+    if (envelope === undefined) {
+      envelope = encodeFrame(surface, entry.frame)
+      this.frameEnvelopes.set(entry, envelope)
+    }
+    return envelope
+  }
+
+  /** The tier a surface's items wait in, its started one included (they go in order). */
+  private surfaceTier(surface: string): SendTier {
+    const chain = this.pendingFrames.get(surface) ?? []
+    const started = this.started.get(surface)
+    return tierOf(started ? [started.entry, ...chain] : chain)
   }
 
   private queueFrame(surface: string, frame: Uint8Array, surfaceClass: SurfaceClass, done?: (sent: boolean) => void) {
@@ -437,25 +512,47 @@ export class WebSocketViewerTransport implements ViewerTransport {
     }
   }
 
-  /** The first surface of the tier, in round-robin order, and its chain of items. */
-  private findHead(tier: SendTier): { surface: string; chain: QueuedEntry[] } | undefined {
+  /**
+   * What the tier sends next: its started item (one at a time), else the first surface of the tier in round-robin
+   * order with nothing started, and its chain of items.
+   */
+  private findHead(
+    tier: SendTier,
+  ): { surface: string; started: StartedItem } | { surface: string; chain: QueuedEntry[] } | undefined {
+    for (const [surface, started] of this.started) {
+      if (this.surfaceTier(surface) === tier) {
+        return { surface, started }
+      }
+    }
     for (const [surface, chain] of this.pendingFrames) {
-      if (tierOf(chain) === tier) {
+      if (!this.started.has(surface) && tierOf(chain) === tier) {
         return { surface, chain }
       }
     }
     return undefined
   }
 
+  /** The next chunk of a started item; the item is done with its last. */
+  private nextChunk(surface: string, item: StartedItem): NextSend {
+    const end = Math.min(item.envelope.length, item.sent + this.chunkSize)
+    return {
+      surface,
+      entry: item.entry,
+      data: encodeChunk(item.id, item.envelope, item.sent, end),
+      first: item.sent === 0,
+      last: end >= item.envelope.length,
+    }
+  }
+
   /**
-   * The next data item to send, by deficit round-robin between the tiers, weighted by bytes: on its turn a tier adds
-   * its quantum to its deficit and sends items while the next fits in the deficit. A tier with nothing waiting loses
-   * its turn and its deficit, so the others share the whole link. If nothing is taken (nothing is waiting, or
-   * `allowed` refuses the next item by its envelope size), the round-robin state stays as it was: the transport asks
+   * The next data item (or chunk) to send, by deficit round-robin between the tiers, weighted by bytes: on its turn a
+   * tier adds its quantum to its deficit and sends items (chunks) while the next fits in the deficit. A tier with
+   * nothing waiting loses its turn and its deficit, so the others share the whole link. If nothing is taken (nothing is
+   * waiting, or `allowed` refuses the next piece by its size), the round-robin state stays as it was: the transport asks
    * again whenever the congestion controller might allow more, and those questions must not count as turns.
    */
-  private takeNext(allowed: (envelopeBytes: number) => boolean): { surface: string; entry: QueuedEntry } | undefined {
-    if (this.pendingFrames.size === 0) {
+  private takeNext(allowed: (envelopeBytes: number) => boolean): NextSend | undefined {
+    if (!this.dataWaiting) {
       return undefined
     }
     const saved = { turn: this.drrTurn, quantumGiven: this.drrQuantumGiven, ...this.drrDeficit }
@@ -481,19 +578,53 @@ export class WebSocketViewerTransport implements ViewerTransport {
         this.drrQuantumGiven = true
         this.drrDeficit[turn] += DRR_QUANTUM[turn]
       }
-      const entry = head.chain[0]
-      if (sizeOf(entry) <= this.drrDeficit[turn]) {
-        if (!allowed(envelopeSizeOf(head.surface, entry))) {
+      let next: NextSend
+      let start: (() => void) | undefined
+      if ('started' in head) {
+        next = this.nextChunk(head.surface, head.started)
+      } else {
+        const entry = head.chain[0]
+        const envelope = this.envelopeOf(head.surface, entry)
+        if (envelope.length <= this.chunkSize) {
+          next = { surface: head.surface, entry, data: envelope, first: true, last: true }
+        } else {
+          const item: StartedItem = { entry, envelope, id: this.nextItemId, sent: 0 }
+          next = this.nextChunk(head.surface, item)
+          start = () => {
+            this.nextItemId = (this.nextItemId + 1) >>> 0
+            this.started.set(head.surface, item)
+          }
+        }
+      }
+      const cost = next.data.length - (next.last && next.first ? 0 : CHUNK_HEADER_BYTES)
+      if (cost <= this.drrDeficit[turn]) {
+        if (!allowed(next.data.length)) {
           return nothingTaken()
         }
-        this.drrDeficit[turn] -= sizeOf(entry)
-        head.chain.shift()
-        // back of the line, for fairness between surfaces
-        this.pendingFrames.delete(head.surface)
-        if (head.chain.length) {
-          this.pendingFrames.set(head.surface, head.chain)
+        this.drrDeficit[turn] -= cost
+        if (next.first) {
+          // out of the chain: from here on it's sent, whatever is dropped
+          const chain = this.pendingFrames.get(head.surface)!
+          chain.shift()
+          if (chain.length === 0) {
+            this.pendingFrames.delete(head.surface)
+          }
+          start?.()
         }
-        return { surface: head.surface, entry }
+        const started = this.started.get(head.surface)
+        if (started !== undefined && !next.last) {
+          started.sent += next.data.length - CHUNK_HEADER_BYTES
+        }
+        if (next.last) {
+          this.started.delete(head.surface)
+          // back of the line, for fairness between surfaces
+          const chain = this.pendingFrames.get(head.surface)
+          if (chain !== undefined) {
+            this.pendingFrames.delete(head.surface)
+            this.pendingFrames.set(head.surface, chain)
+          }
+        }
+        return next
       }
       this.drrQuantumGiven = false
       this.drrTurn = nextTier(turn)
@@ -519,13 +650,13 @@ export class WebSocketViewerTransport implements ViewerTransport {
     // data to send.
     this.flushControl()
 
-    this.congestion.setDataWaiting(this.pendingFrames.size > 0)
+    this.congestion.setDataWaiting(this.dataWaiting)
     // data waits because the controller or the socket holds it back (not because there's none)
     let held = false
     for (;;) {
       if (this.ws.bufferedAmount > SEND_BUFFERED_LIMIT) {
         // a send's callback pumps again
-        if (!this.safetyLimitLogged && this.pendingFrames.size > 0) {
+        if (!this.safetyLimitLogged && this.dataWaiting) {
           this.safetyLimitLogged = true
           logger.info(`More than ${SEND_BUFFERED_LIMIT} bytes buffered for the viewer, holding data items.`)
         }
@@ -549,25 +680,24 @@ export class WebSocketViewerTransport implements ViewerTransport {
         }
         break
       }
-      const { surface, entry } = next
-      let data: Uint8Array
-      if (entry.kind === 'frame') {
-        if (isKeyFrame(entry.frame)) {
-          this.keyFrameSent.add(surface)
-        }
-        data = encodeFrame(surface, entry.frame)
-      } else {
-        data = entry.envelope
+      const { surface, entry, data } = next
+      if (next.first && entry.kind === 'frame' && isKeyFrame(entry.frame)) {
+        this.keyFrameSent.add(surface)
       }
       this.congestion.onSend(data.length, now)
       // The callback fires once the data was handed to the kernel. With TCP_NOTSENT_LOWAT that means most of it has
-      // actually left; the slot it took is free from then on.
-      this.write(data, () => {
-        entry.done?.(true)
-        this.pump()
-      })
+      // actually left; the item's slot is free from then on (once its last chunk is).
+      this.write(
+        data,
+        next.last
+          ? () => {
+              entry.done?.(true)
+              this.pump()
+            }
+          : () => this.pump(),
+      )
     }
-    this.congestion.setDataWaiting(this.pendingFrames.size > 0)
+    this.congestion.setDataWaiting(this.dataWaiting)
     this.bandwidth.setHeld(held && this.findHead('streaming') !== undefined, this.now())
   }
 
@@ -586,10 +716,28 @@ export class WebSocketViewerTransport implements ViewerTransport {
     const now = this.now()
     this.linkFreeAt = Math.max(now, this.linkFreeAt) + data.byteLength / this.link.bytesPerMs
     this.linkQueue.push({ data, at: this.linkFreeAt })
+    if (data[1] === EnvelopeKind.AUDIO) {
+      this.noteLinkAudioWait(this.linkFreeAt - now, now)
+    }
     this.scheduleLink(now)
     if (sent) {
       queueMicrotask(sent)
     }
+  }
+
+  /**
+   * How long audio waits behind other data in the simulated link: logged (at most once a second) when it was more than
+   * LINK_AUDIO_WAIT_LOG_MS, for tests (scripts/e2e/lossy.sh) and for trying things by hand.
+   */
+  private noteLinkAudioWait(wait: number, now: number) {
+    if (now - this.linkAudioWaitSince >= 1000) {
+      if (this.linkAudioWait > LINK_AUDIO_WAIT_LOG_MS) {
+        logger.info(`Simulated link: an audio packet waited ${Math.round(this.linkAudioWait)} ms behind other data.`)
+      }
+      this.linkAudioWait = 0
+      this.linkAudioWaitSince = now
+    }
+    this.linkAudioWait = Math.max(this.linkAudioWait, wait)
   }
 
   private scheduleLink(now: number) {

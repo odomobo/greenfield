@@ -58,6 +58,8 @@ function setup(congestion?: Congestion) {
   const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, {
     now: clock.now,
     congestion: congestion ?? controller,
+    // these tests are about the window, not chunking (see SendScheduler.test.ts)
+    chunkBytes: { min: 1 << 30, max: 1 << 30 },
   })
   const queuePatch = (serial: number, bytes: number) =>
     transport.send({ priority: 'patch', surface: 's', tier: 'normal', patch: patch(serial, bytes) })

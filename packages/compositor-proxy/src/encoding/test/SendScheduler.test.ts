@@ -2,9 +2,23 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
-import { decodeEnvelope, Patch, PatchFormat } from '@gfld/scene-protocol'
+import {
+  ChunkAssembler,
+  decodeChunk,
+  decodeEnvelope,
+  isChunkEnvelope,
+  Patch,
+  PatchFormat,
+} from '@gfld/scene-protocol'
 import type { SendTier } from '../policy.js'
-import { Congestion, WebSocketViewerTransport } from '../../viewer/ViewerTransport.js'
+import {
+  CHUNK_MAX_BYTES,
+  CHUNK_MIN_BYTES,
+  CHUNK_MS,
+  Congestion,
+  WebSocketViewerTransport,
+} from '../../viewer/ViewerTransport.js'
+import { CHUNK_HEADER_BYTES } from '@gfld/scene-protocol'
 
 /** Just enough of a ws WebSocket: sends complete when the test says so. */
 class FakeWebSocket extends EventEmitter {
@@ -46,21 +60,50 @@ function oneAtATime(ws: { sent: unknown[] }): Congestion {
   }
 }
 
-function setup() {
+/** `bandwidthEstimate`: the controller's, in bytes per ms (it sets the chunk size); none by default. */
+function setup(bandwidthEstimate?: number) {
   const ws = new FakeWebSocket()
   // These tests are about the order of sending when the network is the bottleneck, not about congestion control: one
   // data item at a time, the next once the socket took the last (the test's flush()).
-  const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, { congestion: oneAtATime(ws) })
+  const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, {
+    congestion: { ...oneAtATime(ws), bandwidthEstimate },
+  })
   const queue = (surface: string, tier: SendTier, serial: number, bytes: number) =>
     transport.send({ priority: 'patch', surface, tier, patch: patch(serial, bytes) })
-  /** Let every pending send complete, in order, and say what was sent: [surface, serial, wire size]. */
+  const assembler = new ChunkAssembler()
+  /** bytes on the wire of each item in progress (by chunk id) */
+  const partialSizes = new Map<number, number>()
+  /** what went over the wire, piece by piece: a whole envelope's kind, or a chunk of an item */
+  const pieces: ({ kind: 'chunk'; id: number; first: boolean; last: boolean; size: number } | { kind: string })[] = []
+  /**
+   * Let every pending send complete, in order, and say what was sent, items joined from their chunks: [surface, serial,
+   * wire size (all its chunks)], when the item was complete.
+   */
   const drain = () => {
     const result: { surface: string; serial: number; size: number }[] = []
     while (ws.sent.length) {
       const { data, callback } = ws.sent.shift()!
-      const envelope = decodeEnvelope(new Uint8Array(data).slice().buffer)
+      let bytes = new Uint8Array(data)
+      let size = data.length
+      if (isChunkEnvelope(bytes)) {
+        const chunk = decodeChunk(bytes)
+        pieces.push({ kind: 'chunk', id: chunk.id, first: chunk.first, last: chunk.last, size: data.length })
+        size += partialSizes.get(chunk.id) ?? 0
+        partialSizes.set(chunk.id, size)
+        const whole = assembler.push(chunk)
+        if (whole === undefined) {
+          callback()
+          continue
+        }
+        partialSizes.delete(chunk.id)
+        bytes = whole
+      }
+      const envelope = decodeEnvelope(bytes.slice().buffer)
+      if (!isChunkEnvelope(new Uint8Array(data))) {
+        pieces.push({ kind: envelope.kind })
+      }
       if (envelope.kind === 'patch') {
-        result.push({ surface: envelope.surface, serial: envelope.patch.contentSerial, size: data.length })
+        result.push({ surface: envelope.surface, serial: envelope.patch.contentSerial, size })
       }
       callback()
     }
@@ -71,7 +114,7 @@ function setup() {
     queue('blocker', 'normal', 0, 10)
     assert.equal(ws.sent.length, 1)
   }
-  return { ws, transport, queue, drain, block }
+  return { ws, transport, queue, drain, block, pieces }
 }
 
 const NORMAL = 100
@@ -248,4 +291,151 @@ test('control messages go out before queued data, always', () => {
   assert.equal(ws.sent.length, 2)
   const envelope = decodeEnvelope(new Uint8Array(ws.sent[1].data).slice().buffer)
   assert.equal(envelope.kind, 'control')
+})
+
+// Chunks ----------------------------------------------------------------------------------------------------------
+
+const chunkSizes = (pieces: ReturnType<typeof setup>['pieces']) =>
+  pieces.flatMap((piece) => ('size' in piece ? [piece.size - CHUNK_HEADER_BYTES] : []))
+
+test('items larger than the chunk size go in chunks: 10 ms of the bandwidth estimate, at least 10 KB, at most 300 KB', () => {
+  // no estimate yet: the minimum
+  {
+    const { queue, drain, block, pieces } = setup()
+    block()
+    queue('a', 'normal', NORMAL, 35_000)
+    queue('b', 'normal', NORMAL + 1, CHUNK_MIN_BYTES - 100)
+    const sent = drain()
+    assert.deepEqual(
+      sent.map(({ serial }) => serial),
+      [0, NORMAL, NORMAL + 1],
+      'whole again, in order',
+    )
+    const sizes = chunkSizes(pieces)
+    assert.equal(sizes.length, 4, 'the large one in 4 chunks, the small one whole')
+    assert.ok(sizes.slice(0, 3).every((size) => size === CHUNK_MIN_BYTES))
+  }
+  // 10 MB/s: 100 KB chunks
+  {
+    const { queue, drain, block, pieces } = setup(10_000)
+    block()
+    queue('a', 'normal', NORMAL, 250_000)
+    drain()
+    assert.deepEqual(chunkSizes(pieces).slice(0, 2), [10_000 * CHUNK_MS, 10_000 * CHUNK_MS])
+  }
+  // an estimate of 1 GB/s: the maximum
+  {
+    const { queue, drain, block, pieces } = setup(1_000_000)
+    block()
+    queue('a', 'normal', NORMAL, 700_000)
+    drain()
+    assert.equal(chunkSizes(pieces)[0], CHUNK_MAX_BYTES)
+  }
+})
+
+test('control messages go between chunks', () => {
+  const { ws, transport, queue, drain, block, pieces } = setup()
+  block()
+  queue('a', 'normal', NORMAL, 50_000)
+  // the blocker, then the first chunk
+  ws.sent.shift()!.callback()
+  assert.equal(ws.sent.length, 1)
+  transport.send({ priority: 'control', message: { type: 'scene' } })
+  drain()
+  const kinds = pieces.map((piece) => ('id' in piece ? (piece.last ? 'last' : 'chunk') : piece.kind))
+  assert.deepEqual(kinds, ['chunk', 'control', 'chunk', 'chunk', 'chunk', 'last'])
+})
+
+test("a higher tier's item goes between a lower tier's chunks, then the started item continues", () => {
+  const { ws, queue, drain, block, pieces } = setup()
+  block()
+  queue('x', 'settle', SETTLE, 50_000)
+  ws.sent.shift()!.callback()
+  // the first settling chunk is on the socket; a window draws
+  queue('n', 'normal', NORMAL, 500)
+  const order = drain().map(({ serial }) => serial)
+  assert.deepEqual(order, [NORMAL, SETTLE])
+  const kinds = pieces.map((piece) => ('id' in piece ? (piece.first ? 'first' : 'chunk') : piece.kind))
+  assert.deepEqual(kinds.slice(0, 3), ['first', 'patch', 'chunk'], 'right after the chunk on the socket')
+})
+
+test('a tier sends one item at a time: chunks of two items of a tier are not interleaved', () => {
+  const { queue, drain, block, pieces } = setup()
+  block()
+  queue('a', 'streaming', STREAMING, 30_000)
+  queue('b', 'streaming', STREAMING + 1, 30_000)
+  queue('a', 'streaming', STREAMING + 2, 30_000)
+  assert.deepEqual(
+    drain().map(({ serial }) => serial),
+    [0, STREAMING, STREAMING + 1, STREAMING + 2],
+    'surfaces still take turns per item',
+  )
+  const ids = pieces.flatMap((piece) => ('id' in piece ? [piece.id] : []))
+  assert.deepEqual(
+    ids,
+    [...ids].sort((x, y) => x - y),
+    'each item whole before the next',
+  )
+})
+
+test("a surface's next item waits for its started one, which then goes in the next item's tier", () => {
+  const { ws, queue, drain, block } = setup()
+  block()
+  queue('a', 'settle', SETTLE, 50_000)
+  queue('x', 'settle', SETTLE + 1, 50_000)
+  ws.sent.shift()!.callback()
+  // a's settling item started; damage of a (overlapping it, say) must not overtake it
+  queue('a', 'normal', NORMAL, 500)
+  queue('n', 'normal', NORMAL + 1, 500)
+  const order = drain().map(({ serial }) => serial)
+  assert.ok(order.indexOf(SETTLE) < order.indexOf(NORMAL), 'in order')
+  // and a's started item was pulled ahead of x's by the damage behind it
+  assert.ok(order.indexOf(SETTLE) < order.indexOf(SETTLE + 1))
+})
+
+test('a started item is never dropped, an unstarted one is; its done comes with its last chunk', () => {
+  const { ws, transport, drain, block } = setup()
+  block()
+  const done: { serial: number; sent: boolean }[] = []
+  const send = (serial: number, bytes: number) =>
+    transport.send({
+      priority: 'patch',
+      surface: 'a',
+      tier: 'streaming',
+      patch: patch(serial, bytes),
+      done: (sent) => done.push({ serial, sent }),
+    })
+  send(STREAMING, 50_000)
+  send(STREAMING + 1, 50_000)
+  ws.sent.shift()!.callback()
+  assert.ok(transport.queuedBytes('a') > 85_000)
+  transport.dropPatches('a')
+  assert.deepEqual(done, [{ serial: STREAMING + 1, sent: false }])
+  assert.ok(transport.queuedBytes('a') > 30_000 && transport.queuedBytes('a') < 50_000, 'what is left of the started one')
+  // the chunks go one by one (the first is on the socket already); done only once the last is written
+  let chunks = 0
+  while (ws.sent.length && done.length === 1) {
+    ws.sent.shift()!.callback()
+    chunks++
+  }
+  assert.equal(chunks, Math.ceil(50_000 / CHUNK_MIN_BYTES))
+  assert.deepEqual(done[1], { serial: STREAMING, sent: true })
+  assert.deepEqual(
+    drain().map(({ serial }) => serial),
+    [],
+  )
+  assert.equal(transport.queuedBytes('a'), 0)
+})
+
+test('a key frame replaces unsent items but not a started one', () => {
+  const { ws, transport, queue, drain, block } = setup()
+  block()
+  queue('a', 'normal', NORMAL, 50_000)
+  queue('a', 'normal', NORMAL + 1, 500)
+  ws.sent.shift()!.callback()
+  transport.requireKeyFrame('a')
+  assert.deepEqual(
+    drain().map(({ serial }) => serial),
+    [NORMAL],
+  )
 })
