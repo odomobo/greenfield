@@ -624,6 +624,10 @@ single large item never stalls the link. Initial window before any estimate: 64 
   in the mask only, nothing is sent when they agree (Ctrl+A, Ctrl+B stays one Ctrl press). Caps Lock and Num Lock
   follow the browser the same way. Losing page focus (blur, hidden tab) or the viewer releases every held key.
   `scripts/e2e/desktop.sh` checks foot's protocol log for all four cases.
+- Core 2 (2026-10-04, merged into master): normal and streaming priority classes by the relentless measure,
+  per-surface slots, streaming patches encoded on nice-19 worker threads, byte-weighted scheduler between the classes,
+  PNG patches only without GPU acceleration (`--encoder auto|none|nvh264|vaapih264`, no x264), and our own
+  BBRv3-style congestion control with viewer acks and the backlog hold (scene protocol 11). See Core items 2a and 2b.
 
 ### Core
 
@@ -759,9 +763,13 @@ single large item never stalls the link. Initial window before any estimate: 64 
         worker takes from, instead of assigning to workers round-robin; capture is allowed while fewer than 2 x workers
         patches are encoding or waiting. `setThreadNice` returns the thread id (or minus errno).
       - The frame clock got a testable queue class (`FrameCallbackQueue`); `ProcessingDuration` is gone.
-      -       - The relentless measure was changed after the first version, see "Classes" (periods of 750 ms, busy and
+      - The relentless measure was changed after the first version, see "Classes" (periods of 750 ms, busy and
         backlogged fractions). Class changes are logged with the last period's fractions. Video (GPU) paths are
         untested here as before.
+      - Checked by hand after merging (2026-10-04, at the user's request; not part of the e2e suite): two 640x480
+        busy clients at once. A single one keeps up (about 42% busy) and stays normal, but two make each other wait
+        for the encoder: both were promoted in every one of 5 runs (last period 75-92% backlogged, within about 1.5 s),
+        after which the session used about 190% of a core at nice 19 and about 13% at normal priority.
       - New e2e script `scripts/e2e/busy.sh` (with `busy-client.c`): a busy client is shown as patches and paced, and
         foot stays responsive while it runs; it also waits for the busy surface to be promoted to streaming and for the nice-19
         workers to use CPU. The e2e gateways run `--encoder none`; the viewer's video decoding has no
@@ -816,7 +824,11 @@ single large item never stalls the link. Initial window before any estimate: 64 
     the window, the backlog hold or the safety limit; an ack releases data; paced items go out by timer. On the local
     e2e link the controller stays out of the way: `scripts/test-gateway.sh` takes ~23 s as before, the busy client runs
     at ~8.5–8.8 frames/s and foot's typing shows after ~335–360 ms (driver delays included) with and without it.
-    Untested: real slow or distant links (WSL can't shape traffic without root). The spec is
+    Untested: real slow or distant links (WSL can't shape traffic without root). User decisions (2026-10-04): the
+    deviations from the draft are accepted as they are. Five adapt BBRv3 to messages and to a delay signal; two have
+    no counterpart in the draft (restarting on a path change, detecting a capacity drop), both needed because a delay
+    signal can't tell a slower or longer path from a queue. They needn't be separated in the code, and the controller
+    isn't to be changed further without a concrete problem. The spec is
     [Transport and congestion control](#transport-and-congestion-control); this lists the work. Opus fork (subtle:
     bugs show up as random latency spikes), own branch and worktree, after 2a is merged (it plugs into 2a's send
     scheduler).
@@ -917,8 +929,20 @@ single large item never stalls the link. Initial window before any estimate: 64 
 
 - Real PAM sign-in (needs root).
 - GPU (dmabuf) buffers on a machine with a GPU.
+- GPU acceleration path of Core 2: `--encoder auto` picking `vaapih264`/`nvh264`, and streaming surfaces sent as
+  hardware video (key frame on promotion, crisp patch render on demotion, video frames in slots). Only unit tested.
+- Congestion control on real links: slow, distant (100-300 ms), Wi-Fi and mobile. Only the simulated link and
+  loopback are tested.
+- Congestion control sharing a bottleneck with other traffic (a download filling the router's buffer). Not in the
+  simulated scenarios; the possible failure would be periodic throughput dips about every 10 s (the competing queue
+  raising the measured base delay until it looks like a path change).
+- A real game rendering on the CPU (llvmpipe) as a streaming surface: no GL app is installed on the development
+  machine, so only the synthetic busy client was measured.
 - Firefox: whether a mouse back button over the desktop is fully blocked.
 
 ### Known issues
 
 - Pinning two apps in quick succession once left only one pinned; not reproduced since.
+- By design, a single busy surface that the server keeps up with stays normal, so its encoding runs at normal
+  priority (one 640x480 busy client alone: about 42% busy, about 85% of a core). Larger ones cross the 60% line
+  (1920x1080: promoted); somewhere around 1280x720 is the border. `PROMOTE_FRACTION` is the knob if this matters.
