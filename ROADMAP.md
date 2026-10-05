@@ -299,8 +299,14 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
   - Not limited, without GPU: QOI patches (lossless).
   - Not limited, with GPU: real-time video at a higher quality.
   - Limited, without GPU: **JPEG patches at medium quality** (4:4:4, so coloured text stays readable; libjpeg-turbo;
-    the browser decodes them natively). JPEG has no alpha: patches that aren't opaque stay QOI (or get their alpha sent
-    separately; decide when implementing).
+    the browser decodes them natively). JPEG has no alpha, so it is sent **the way video sends it**: a patch that isn't
+    opaque carries two JPEGs, the colour image and its alpha plane as a grayscale (one-channel) JPEG, with their lengths
+    (alpha length 0 for opaque patches), just as a video frame carries its colour and alpha streams. The viewer decodes
+    both with `createImageBitmap` and composites them with the video's shader (`alpha-video.ts`: `rgb × alpha, alpha`,
+    premultiplied; an `ImageBitmap` is a WebGL texture like a `VideoFrame`), which becomes the shared compositor for
+    colour + gray alpha. Lossy alpha (slight fringes at anti-aliased edges) is accepted, as for video; the lossless
+    refresh clears it. **Alpha of 254 or more counts as fully opaque**, so JPEG's rounding doesn't make opaque areas
+    slightly transparent (in the shared shader, so video gets it too).
   - Limited, with GPU: real-time video at a lower quality, still enough to read text.
   - Video always has a **fixed quality target and variable bitrate**, no bitrate cap. Under contention the frame rate
     drops instead: that is what the per-surface two slots are for (frames are only taken when a slot is free), and they
