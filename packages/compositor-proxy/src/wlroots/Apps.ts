@@ -10,7 +10,9 @@ import { createLogger } from '../Logger.js'
 const logger = createLogger('apps')
 
 /** How long an app gets to quit after SIGTERM before it's killed. */
-const KILL_AFTER_MS = 10_000
+export const KILL_AFTER_MS = 5_000
+/** How long to wait for killed apps to be reported gone. */
+const KILLED_WAIT_MS = 1_000
 
 type App = {
   pid: number
@@ -150,20 +152,37 @@ export class Apps {
     }
   }
 
-  /** Ask every app of the session to quit; kill the ones still running a while later (if we're still here). */
-  terminate(): void {
-    for (const app of this.apps.values()) {
-      const pids = new Set([app.pid, ...app.descendants.values()])
-      for (const pid of pids) {
-        signal(pid, 'SIGTERM')
-      }
-      // only while it's still ours: once it's gone, its pid may belong to someone else
-      setTimeout(() => {
-        if (this.apps.get(app.pid) === app) {
-          pids.forEach((pid) => signal(pid, 'SIGKILL'))
-        }
-      }, KILL_AFTER_MS).unref()
+  /**
+   * Ask every app of the session to quit, and kill the ones still running `killAfterMs` later. Resolves once they're
+   * all gone (or, should one survive SIGKILL, shortly after): the session must stay up until then, it's the one that
+   * kills them.
+   */
+  async terminate(killAfterMs = KILL_AFTER_MS): Promise<void> {
+    const pidsOf = (app: App) => new Set([app.pid, ...app.descendants.values()])
+    const apps = [...this.apps.values()]
+    for (const app of apps) {
+      pidsOf(app).forEach((pid) => signal(pid, 'SIGTERM'))
     }
+    if (await this.allGone(killAfterMs)) {
+      return
+    }
+    // only the ones still ours: once an app is gone, its pid may belong to someone else
+    for (const app of apps) {
+      if (this.apps.get(app.pid) === app) {
+        logger.info(`App ${app.name} (${app.pid}) didn't quit, killing it.`)
+        pidsOf(app).forEach((pid) => signal(pid, 'SIGKILL'))
+      }
+    }
+    await this.allGone(KILLED_WAIT_MS)
+  }
+
+  /** Waits (at most `ms`) until no app is left; whether none is. */
+  private async allGone(ms: number): Promise<boolean> {
+    const deadline = Date.now() + ms
+    while (this.apps.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    return this.apps.size === 0
   }
 
   /** The app a process belongs to: the process itself, or the nearest ancestor that's an app of ours. */

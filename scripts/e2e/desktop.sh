@@ -18,7 +18,7 @@
 #      back into view;
 #   3. Disconnect (in the Apps menu's session menu) goes back to the session list without signing in again; renaming
 #      the session by clicking its name (a name with HTML in it shows as text, Escape cancels); signing out; Log out
-#      (session menu) ends the session.
+#      (session menu) ends the session, killing an app that ignores SIGTERM once its time is up.
 #
 # The gateway gets its own D-Bus session bus (for notifications), config dir (pinned apps) and a test app
 # (a .desktop file for foot with WAYLAND_DEBUG) in its own data dir. It runs with --dev-time-scale (see auth.sh).
@@ -38,6 +38,20 @@ GenericName=Terminal
 Exec=env WAYLAND_DEBUG=1 foot --app-id=test-foot -o key-bindings.fullscreen=F11
 Icon=foot
 Categories=System;TerminalEmulator;
+EOF
+# an app that ignores SIGTERM: ending the session has to kill it
+cat >"$WORK/run-stubborn" <<EOF
+#!/bin/sh
+trap "" TERM
+echo \$\$ >"$WORK/stubborn.pid"
+exec sleep 300
+EOF
+chmod +x "$WORK/run-stubborn"
+cat >"$WORK/data/applications/test-stubborn.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Test Stubborn
+Exec=$WORK/run-stubborn
 EOF
 # a session bus of our own: notifications go to this test's session, not to whatever owns the user's bus
 read -r DBUS_ADDRESS DBUS_PID < <(dbus-daemon --session --fork --nopidfile --print-address=1 --print-pid=1 | tr '\n' ' '; echo)
@@ -776,10 +790,25 @@ echo "    ok"
 step "Log out ends the session"
 pw_eval "() => { document.querySelector('.sessions button[data-action=open]').click(); return true }" >/dev/null
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection"
+# an app that ignores SIGTERM (no window): the session kills it when its time is up (5 s, divided by the time scale)
+click_element '#apps-button'
+wait_for "() => $(visible apps-menu) && document.activeElement.id === 'apps-search'" "the Apps menu" 5
+pw type "Test Stubborn" >/dev/null
+wait_for "() => [...document.querySelectorAll('.apps-list [data-app]')].map((e) => e.dataset.app).join(' ') === 'test-stubborn.desktop'" "the stubborn app in the Apps menu" 5
+pw press Enter >/dev/null
+wait_for "() => !$(visible apps-menu)" "the Apps menu to close" 5
+stubborn_started() { [ -s "$WORK/stubborn.pid" ]; }
+wait_until "the stubborn app to start" 5 stubborn_started
+STUBBORN_PID="$(cat "$WORK/stubborn.pid")"
+EXTRA_PIDS+=("$STUBBORN_PID")
 session_menu logout
 wait_for "() => $(visible login-view)" "the sign-in form"
 foot_gone() { ! kill -0 "$FOOT_PID" 2>/dev/null; }
 wait_until "foot to end after logging out" 15 foot_gone
+stubborn_gone() { ! kill -0 "$STUBBORN_PID" 2>/dev/null; }
+wait_until "the app that ignores SIGTERM to be killed" 5 stubborn_gone
+grep -aq "App Test Stubborn ($STUBBORN_PID) didn't quit, killing it." "$WORK/gateway.log" ||
+  fail "the stubborn app wasn't killed by the session"
 browser_login
 [ "$(pw_eval "() => document.querySelectorAll('.sessions li').length")" = 0 ] || fail "ended session still listed"
 echo "    ok"
