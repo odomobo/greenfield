@@ -192,7 +192,8 @@ doesn't need to know a surface's class; nothing about it is in the scene protoco
   device, missing element) is logged once and the session continues as `none`.
 - `none` means no video encoder is ever created: the encoder pool has size 0 and the GStreamer video pipelines are
   never built. The x264 code in `native/encoding/src/gst_frame_encoder.c` stays for now (unused; GPU acceleration is
-  to be revisited, see wave 4 G).
+  to be revisited, see wave 4 G). **Video on CPU only is to be removed entirely** (decided 2026-10-05): the x264
+  encoder and the CPU alpha path (alpha bytes written as I420 luma for x264) go; video exists only with a GPU.
 - A buffer whose pixels can't be read (`readPixels` fails; today only an unsupported SHM format, as there are no GPU
   buffers without the GLES2 renderer) is sent as video if an encoder exists, regardless of class. With `none` it
   can't be shown: log once per surface and send nothing for it.
@@ -280,7 +281,8 @@ surfaces go the same way, no special cases), is encoded like this:
    the **raw** pixels if QOI came out bigger than raw, else the QOI as is, and don't try LZ4.
 2. Else LZ4 over the QOI. If that's smaller than the QOI, send **QOI + LZ4**, else the plain **QOI**.
 
-Each patch carries a one-byte format tag: raw, QOI, or QOI + LZ4 (width, height and channels are in the patch header).
+Each patch carries a one-byte **format tag** that the viewer switches on to decode it: raw, QOI, or QOI + LZ4 now, and
+JPEG and JPEG with alpha later (below). Width, height and channels are in the patch header.
 No PNG fallback for patches. Raw is RGB for opaque patches and RGBA otherwise. LZ4 finds exact repeats (4 bytes or
 more, within 64 KB): it helps a lot on text and UI (repeated glyphs, widgets) and little on video, photos and noise.
 
@@ -299,10 +301,10 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
   - Not limited, without GPU: QOI patches (lossless).
   - Not limited, with GPU: real-time video at a higher quality.
   - Limited, without GPU: **JPEG patches at medium quality** (4:4:4, so coloured text stays readable; libjpeg-turbo;
-    the browser decodes them natively). JPEG has no alpha, so it is sent **the way video sends it**: a patch that isn't
-    opaque carries two JPEGs, the colour image and its alpha plane as a grayscale (one-channel) JPEG, with their lengths
-    (alpha length 0 for opaque patches), just as a video frame carries its colour and alpha streams. The viewer decodes
-    both with `createImageBitmap` and composites them with the video's shader (`alpha-video.ts`: `rgb × alpha, alpha`,
+    the browser decodes them natively). JPEG has no alpha, so alpha is sent **the way video sends it**. Two format
+    tags: **JPEG** (an opaque patch: one colour JPEG) and **JPEG with alpha** (two JPEGs, the colour image and its
+    alpha plane as a grayscale (one-channel) JPEG, with their lengths, like a video frame's colour and alpha streams).
+    For JPEG with alpha the viewer decodes both with `createImageBitmap` and composites them with the video's shader (`alpha-video.ts`: `rgb × alpha, alpha`,
     premultiplied; an `ImageBitmap` is a WebGL texture like a `VideoFrame`), which becomes the shared compositor for
     colour + gray alpha. Lossy alpha (slight fringes at anti-aliased edges) is accepted, as for video; the lossless
     refresh clears it. **Alpha of 254 or more counts as fully opaque**, so JPEG's rounding doesn't make opaque areas
@@ -1134,7 +1136,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
        0.77x, 2.28x; QOI + deflate 1 the smallest but its browser decode (`DecompressionStream`, ~0.4 ms per call) is
        slower than PNG's. Browser decode per 64k-pixel tile: PNG 0.66 ms, QOI + LZ4 in wasm 0.27 ms, QOI in plain JS
        0.37 ms. All patches round-trip exactly. The wasm decoder (QOI into a caller buffer + LZ4) is 2.1 KB.
-    2. **The implementation**: the QOI cascade (raw / QOI / QOI + LZ4, one-byte format tag; see Encoding policy) for
+    2. **Phase 1: replace PNG with the QOI cascade** (raw / QOI / QOI + LZ4, one-byte format tag; see Encoding policy) for
        every patch of every surface, no PNG fallback for patches and no special cases.
        - Encoder: native C (QOI + LZ4) in compositor-proxy's CMake project, called synchronously from worker threads
          (the streaming class's already run at low priority; the normal class keeps its own). Opaque detection as in
@@ -1148,9 +1150,11 @@ single large item never stalls the link. Initial window before any estimate: 64 
          property and sent as a data URL); `png.ts` and `png-worker.ts` otherwise go. Protocol version bump.
        - Afterwards, check the encoding policy's tuning (pool sizes, the relentless thresholds), measured with PNG's
          costs.
-    3. **Later: lossy streaming when bandwidth is short** (Encoding policy): the bandwidth-limited signal from the
-       controller, JPEG patches for streaming surfaces without GPU, two video qualities with GPU, per-area lossy
-       tracking and intelligent lossless refreshes.
+    3. **Phase 2: the four cases for the streaming class** (Encoding policy): the bandwidth-limited signal from the
+       controller; not limited: QOI patches (no GPU) or higher-quality video (GPU); limited: JPEG / JPEG with alpha
+       patches (no GPU) or lower-quality video (GPU); fixed-quality video with variable bitrate; per-area lossy
+       tracking and intelligent lossless refreshes; alpha >= 254 opaque in the shared shader. Also remove video on CPU
+       only (x264 and its CPU alpha path).
 
 ### Lower priority
 
