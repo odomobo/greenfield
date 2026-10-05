@@ -35,8 +35,10 @@ export type WindowLayout = {
  * fading a window is a CSS transform and opacity on this element. Everything is imperative (see desktop.ts): React
  * never sees it.
  *
- * A decorated window's frame (window-frame.ts) is one more element inside this one, after the canvases. It's drawn at
- * its real size even while the content is stretched (a resize being dragged), see frameBox.
+ * A decorated window's frame (window-frame.ts) is one more element inside this one, before the canvases: it lies outside
+ * the window geometry, so it never covers the app's content, and popups reaching past the window's edge (a long menu)
+ * are drawn over it. It's drawn at its real size even while the content is stretched (a resize being dragged), see
+ * frameBox.
  */
 export class WindowView {
   readonly element = document.createElement('div')
@@ -59,8 +61,8 @@ export class WindowView {
   /** The surfaces of the window, bottom to top. */
   setSurfaces(views: SurfaceView[]): void {
     this.views = views
-    // (the canvases come first, the frame is the last child)
-    let expected = this.element.firstChild
+    // (the frame is the first child, the canvases follow)
+    let expected = this.frame.element.nextSibling
     for (const view of views) {
       if (view.canvas === expected) {
         expected = expected.nextSibling
@@ -69,7 +71,7 @@ export class WindowView {
         this.element.insertBefore(view.canvas, expected)
       }
     }
-    while (expected !== null && expected !== this.frame.element) {
+    while (expected !== null) {
       const next: ChildNode | null = expected.nextSibling
       expected.remove()
       expected = next
