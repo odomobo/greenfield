@@ -101,8 +101,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: calc(var(--taskbar-height) - 8px);
+  height: calc(var(--taskbar-height) - 8px);
+  padding: 0;
 }
 
 #audio-button.muted,
@@ -777,7 +778,7 @@
   transform-origin: 0 0;
   color: var(--color-frame-text-inactive);
   font-family: var(--font-family);
-  font-size: var(--font-size);
+  font-size: 16px;
   line-height: 1;
   /* the title bar's top corners are rounded (not when maximized): the border and the shadow follow them */
   border-radius: var(--radius-frame) var(--radius-frame) 0 0;
@@ -811,6 +812,7 @@
   border: none;
 }
 
+/* the icon on the left, the title in the middle (of the whole bar: the sides are equally wide), the buttons on the right */
 #output .frame-title {
   position: absolute;
   left: 0;
@@ -818,7 +820,12 @@
   right: 0;
   height: var(--frame-title-height);
   border-radius: inherit;
-  display: flex;
+  display: grid;
+  /* The sides share what the title leaves equally (so it's centered), but never get less than the icon's square and the
+     buttons (a dialog has only one): in a narrow window the title moves off center, then shrinks, instead of covering
+     them. */
+  --frame-side: calc(3 * var(--frame-title-height));
+  grid-template-columns: minmax(var(--frame-title-height), 1fr) minmax(0, auto) minmax(var(--frame-side), 1fr);
   align-items: center;
   overflow: hidden;
   background: var(--color-frame-inactive);
@@ -834,31 +841,31 @@
 
 /* centered in a square at the left, like the buttons on the right */
 #output .frame-icon {
-  flex: none;
   display: inline-flex;
-  width: 20px;
-  height: 20px;
-  margin-left: calc((var(--frame-title-height) - 20px) / 2);
+  justify-self: start;
+  width: 26px;
+  height: 26px;
+  margin-left: calc((var(--frame-title-height) - 26px) / 2);
 }
 
 #output .frame-icon img,
 #output .frame-icon svg {
-  width: 20px;
-  height: 20px;
+  width: 26px;
+  height: 26px;
 }
 
 #output .frame-text {
-  flex: 1;
   min-width: 0;
   margin: 0 10px;
+  text-align: center;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
 #output .frame-buttons {
-  flex: none;
   display: flex;
+  justify-self: end;
   align-self: stretch;
 }
 
@@ -893,6 +900,10 @@
 
 #output .frame-button:disabled {
   opacity: 0.4;
+}
+
+#output .frame.dialog .frame-title {
+  --frame-side: var(--frame-title-height);
 }
 
 /* a dialog can only be closed */

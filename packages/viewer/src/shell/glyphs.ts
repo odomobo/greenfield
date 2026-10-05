@@ -6,6 +6,11 @@ function glyph(paths: string, size = 16): string {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`
 }
 
+/** A solid speaker (the mute toggle's icons) with `strokes` beside it, drawn as bold lines. */
+function solid(strokes: string, size: number): string {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M2.5 9.6c0-.6.5-1.1 1.1-1.1h3.3l4.6-3.9c.6-.5 1.5-.1 1.5.7v13.4c0 .8-.9 1.2-1.5.7l-4.6-3.9H3.6c-.6 0-1.1-.5-1.1-1.1z"/><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">${strokes}</g></svg>`
+}
+
 export const glyphs = {
   apps: (size = 18) =>
     glyph(
@@ -31,10 +36,10 @@ export const glyphs = {
   restore: (size = 14) => glyph('<rect x="4.5" y="8.5" width="11" height="11" rx="2"/><path d="M8.5 5.5h8a2 2 0 0 1 2 2v8"/>', size),
   signal: () => glyph('<path d="M4 18.5h1M9 18.5v-4M14 18.5v-8M19 18.5v-12"/>'),
   signalOff: () => glyph('<path d="M4 18.5h1M9 18.5v-4M14 18.5v-2M19 18.5v-2"/><path d="m14 5 5 5m0-5-5 5"/>'),
-  /** speaker with sound waves */
-  speaker: () => glyph('<path d="M4.5 9.5h3.5l4.5-3.5v12l-4.5-3.5H4.5z"/><path d="M16 9.5a4 4 0 0 1 0 5M18.5 7a7.5 7.5 0 0 1 0 10"/>'),
-  /** speaker, muted: crossed out */
-  speakerMuted: () => glyph('<path d="M4.5 9.5h3.5l4.5-3.5v12l-4.5-3.5H4.5z"/><path d="m16 9.5 5 5m0-5-5 5"/>'),
+  /** speaker with sound waves (solid) */
+  speaker: (size = 22) => solid('<path d="M16 9a4.2 4.2 0 0 1 0 6M18.8 6.3a8 8 0 0 1 0 11.4"/>', size),
+  /** speaker, muted: crossed out (solid) */
+  speakerMuted: (size = 22) => solid('<path d="m16 9 6 6m0-6-6 6"/>', size),
   user: (size = 16) =>
     glyph('<circle cx="12" cy="8.5" r="4"/><path d="M4.5 20c.8-3.6 3.8-5.5 7.5-5.5s6.7 1.9 7.5 5.5"/>', size),
   /** the fallback for apps without an icon */
