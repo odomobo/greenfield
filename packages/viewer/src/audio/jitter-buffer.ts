@@ -38,8 +38,8 @@ export type JitterBufferOptions = {
 
 export const defaultJitterBufferOptions: JitterBufferOptions = {
   sampleRate: 48000,
-  targetMs: 70,
-  maxMs: 300,
+  targetMs: 160,
+  maxMs: 360,
   fadeMs: 10,
   crossfadeMs: 5,
   maxRateAdjust: 0.001,
