@@ -17,8 +17,8 @@
   --background-image: url('/static/background.jpg');
 
   /* the two glass surfaces */
-  --surface-blur: blur(24px) saturate(140%);
-  --surface-passive: rgba(0, 0, 0, 0.5);
+  --surface-blur: blur(24px);
+  --surface-passive: rgba(0, 0, 0, 0.6);
   --surface-active: rgba(24, 56, 128, 0.65);
   --surface-edge: rgba(255, 255, 255, 0.1);
 
@@ -66,13 +66,14 @@
   --color-frame-inactive: var(--surface-passive);
   --color-frame-text: #ffffff;
   --color-frame-text-inactive: #a9b0bf;
-  --color-frame-border: rgba(255, 255, 255, 0.1);
-  --color-frame-border-active: rgba(140, 180, 255, 0.35);
+  --color-frame-border: #a6a6a6;
+  --color-frame-border-active: #a6a6a6;
+  --radius-frame: 8px;
   --color-frame-close: #c42b1c;
   --color-frame-on-close: #ffffff;
   /* Linux style: a shallow shadow under inactive windows, a tall one under the active window */
-  --shadow-frame: 0 1px 3px rgba(0, 0, 0, 0.45), 0 3px 10px rgba(0, 0, 0, 0.35);
-  --shadow-frame-active: 0 6px 16px rgba(0, 0, 0, 0.5), 0 20px 56px 4px rgba(0, 0, 0, 0.7);
+  --shadow-frame: 0 2px 6px rgba(0, 0, 0, 0.45), 0 6px 20px rgba(0, 0, 0, 0.45);
+  --shadow-frame-active: 0 5px 14px rgba(0, 0, 0, 0.5), 0 16px 44px 2px rgba(0, 0, 0, 0.65);
 }
 
 * {

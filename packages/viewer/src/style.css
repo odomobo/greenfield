@@ -747,6 +747,8 @@
   font-family: var(--font-family);
   font-size: var(--font-size-small);
   line-height: 1;
+  /* the title bar's top corners are rounded (not when maximized): the border and the shadow follow them */
+  border-radius: var(--radius-frame) var(--radius-frame) 0 0;
   box-shadow: var(--shadow-frame);
 }
 
@@ -756,6 +758,7 @@
 }
 
 #output .frame.maximized {
+  border-radius: 0;
   box-shadow: none;
 }
 
@@ -764,6 +767,7 @@
   inset: 0;
   z-index: 1;
   border: var(--frame-border) solid var(--color-frame-border);
+  border-radius: inherit;
   pointer-events: none;
 }
 
@@ -781,6 +785,7 @@
   top: 0;
   right: 0;
   height: var(--frame-title-height);
+  border-radius: inherit;
   display: flex;
   align-items: center;
   overflow: hidden;

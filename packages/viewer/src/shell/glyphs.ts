@@ -9,7 +9,10 @@ function glyph(paths: string, size = 16): string {
 export const glyphs = {
   apps: (size = 18) =>
     glyph(
-      '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
+      // a 3 x 3 grid of dots
+      [5, 12, 19]
+        .flatMap((y) => [5, 12, 19].map((x) => `<circle cx="${x}" cy="${y}" r="2.1" fill="currentColor" stroke="none"/>`))
+        .join(''),
       size,
     ),
   search: () => glyph('<circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/>'),
