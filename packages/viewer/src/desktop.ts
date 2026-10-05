@@ -973,6 +973,19 @@ export class Desktop {
         }
         break
       }
+      case 'window-menu-requested': {
+        // the app's own title bar was right-clicked: our window menu, as for our title bars, where the app says
+        const window = this.windows.find((w) => w.id === message.window)
+        if (window) {
+          const { x, y, scaleX, scaleY } = this.windowTransform(window)
+          const bounds = this.container.getBoundingClientRect()
+          this.onWindowMenu(this.shellWindowOf(window), {
+            x: bounds.left + x + message.x * scaleX,
+            y: bounds.top + y + message.y * scaleY,
+          })
+        }
+        break
+      }
     }
   }
 

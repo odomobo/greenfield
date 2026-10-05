@@ -57,7 +57,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 13
+export const PROTOCOL_VERSION = 14
 
 /** The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). */
 export const FRAME_TITLE_HEIGHT = 32
@@ -214,6 +214,11 @@ export type ServerMessage =
   | { type: 'interactive'; mode: 'resize'; window: string; edges: number }
   /** The client asked to be (un)maximized; the scene follows once it committed. Lets the viewer animate right away. */
   | { type: 'maximize-requested'; window: string; maximized: boolean }
+  /**
+   * The app's own title bar was right-clicked (xdg_toplevel.show_window_menu, client-side decorations): the viewer
+   * opens its window menu (the one of our own title bars) at x, y, in the window's main surface coordinates.
+   */
+  | { type: 'window-menu-requested'; window: string; x: number; y: number }
   /**
    * An app locked the pointer to a surface (locked: true, confined: false): the viewer requests the browser's pointer
    * lock and sends `pointer.relative` instead of positions, until it's unlocked (the app let go, the window lost

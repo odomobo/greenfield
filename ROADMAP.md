@@ -946,6 +946,17 @@ single large item never stalls the link. Initial window before any estimate: 64 
    machine's is upstream GNOME's `appmenu:close` (desktop Ubuntu overrides it to `:minimize,maximize,close` through
    `ubuntu-settings`, which WSL doesn't have). Our sessions are the desktop environment for their apps, so we supply
    the settings, the standard way. The shell is called **nebula**: anything new is named that (not "greenfield").
+   **Status:** xdg-shell 6 **done** (branch `core4b-desktop-integration`, scene protocol 14): bounds (output minus our
+   frame, from a toplevel's first commit, again when the output or its decoration changes; X11 windows never),
+   wlroots' default capabilities (all four work), `show_window_menu` opens our window menu at the pointer
+   (`window-menu-requested`); `suspended` unused. Checked in `decorations.sh` (foot's bounds and `wm_capabilities`
+   from its Wayland log, the menu from a foot drawing its own title bar) and unit tests. The Settings backend is
+   **on hold**: GTK reads settings through the portal only from 4.21 on ("The Wayland backend relies on the portal
+   for settings", GTK NEWS 4.21.0); before that (Ubuntu 24.04 has 4.14) only inside Flatpak or with
+   `GDK_DEBUG=portals` (`gdk_should_use_portal`, checked in 4.14.5's source and with `dbus-monitor`: gtk4-demo never
+   calls `org.freedesktop.portal.Settings`, it reads GSettings). So here the backend would only reach Flatpak apps and
+   newer GTK; gtk4-demo and Chrome (GTK 3/4 settings) keep `appmenu:close` from GSettings. Decide how to supply the
+   button layout to non-portal GTK (e.g. GSettings defaults for our sessions) before building it.
    - **xdg-shell version 6** (`wlr_xdg_shell_create`, today 3; wlroots 0.17.4 supports 6). Backwards compatible: each
      client binds the lower of its version and ours, and v4-6 only add things. What newer clients then act on must be
      accurate:

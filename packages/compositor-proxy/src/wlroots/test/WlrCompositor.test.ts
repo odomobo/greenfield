@@ -41,6 +41,9 @@ class FakeCore {
   readonly outputScales: number[] = []
   readonly toplevels = new Map<number, Toplevel>()
   readonly children = new Map<number, [number, number, number, boolean][]>()
+  /** surfaces that committed (a toplevel can be configured, bounds included, from its first commit on) */
+  readonly committed = new Set<number>()
+  readonly bounds: [number, number, number][] = []
 
   readonly native: WlrNative = {
     create: (onEvent, _width, _height, keyboard) => {
@@ -107,6 +110,13 @@ class FakeCore {
     close: (sid) => {
       this.closed.push(sid)
     },
+    setBounds: (sid, width, height) => {
+      if (!this.toplevels.has(sid) || !this.committed.has(sid)) {
+        return false
+      }
+      this.bounds.push([sid, width, height])
+      return true
+    },
     toplevelState: (sid) => this.toplevels.get(sid),
     windowSurfaces: (sid) => this.children.get(sid) ?? [[sid, 0, 0, false]],
     setPosition: (sid, x, y) => {
@@ -168,6 +178,7 @@ class FakeCore {
   }
 
   commit(sid: number, width: number, height: number, frameCallbacks = false) {
+    this.committed.add(sid)
     this.onEvent(
       'surface-commit',
       sid,
@@ -211,6 +222,37 @@ beforeEach(() => {
 
 afterEach(() => {
   compositor.detach()
+})
+
+test('a window is told its bounds from its first commit: the output minus our frame, again when either changes', async () => {
+  compositor.handleMessage({ type: 'output', width: 1000, height: 700 })
+  // decorated before its first commit (foot asks for server side decorations first): applied at the commit
+  core.newWindow(1, { decorated: true })
+  core.newWindow(2)
+  assert.deepEqual(core.bounds, [
+    [1, 1000 - 2 * FRAME_BORDER, 700 - FRAME_TITLE_HEIGHT - FRAME_BORDER],
+    [2, 1000, 700],
+  ])
+  // once per change, not per commit
+  core.commit(1, 400, 300)
+  assert.equal(core.bounds.length, 2)
+  compositor.handleMessage({ type: 'output', width: 800, height: 600 })
+  core.onEvent('toplevel-decorated', 2, true)
+  assert.deepEqual(core.bounds.slice(2), [
+    [1, 800 - 2 * FRAME_BORDER, 600 - FRAME_TITLE_HEIGHT - FRAME_BORDER],
+    [2, 800, 600],
+    [2, 800 - 2 * FRAME_BORDER, 600 - FRAME_TITLE_HEIGHT - FRAME_BORDER],
+  ])
+})
+
+test("an app's title bar right-clicked (show_window_menu) asks the viewer for its window menu there", async () => {
+  core.newWindow(1)
+  core.onEvent('toplevel-request-window-menu', 1, 40, 12)
+  core.onEvent('toplevel-request-window-menu', 9, 1, 1)
+  assert.deepEqual(
+    sent.filter((message) => message.type === 'window-menu-requested'),
+    [{ type: 'window-menu-requested', window: '1/1', x: 40, y: 12 }],
+  )
 })
 
 test('a mapped toplevel is a scene window, activated and focused', async () => {

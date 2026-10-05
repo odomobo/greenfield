@@ -122,7 +122,13 @@ FRAME_T="$(pw_eval "() => Math.round(document.querySelector('$FOOT .frame-title'
 wait_for "() => { const w = window.__viewerTest.windows().find((w) => w.appId === 'test-foot'); const g = w.shownGeometry; const d = document.getElementById('output').getBoundingClientRect(); const t = document.querySelector('$FOOT .frame-title').getBoundingClientRect(); return Math.abs(t.bottom - d.top - g.y) <= 1 && Math.abs(t.width - g.width - 2) <= 1 && Math.abs(t.left - d.left - g.x + 1) <= 1 }" "the title bar to sit on the window" 5
 [ "$(pw_eval "() => document.querySelector('$FOOT .frame-text').textContent === window.__viewerTest.windows().find((w) => w.appId === 'test-foot').title")" = true ] || fail "the title bar doesn't show the window's title"
 [ "$(pw_eval "() => document.querySelector('$FOOT').classList.contains('active')")" = true ] || fail "foot's frame isn't active while foot has the focus"
-echo "    title bar ${FRAME_T}px; foot has one surface and was told server side mode"
+# xdg-shell 4 and 5: foot was told its bounds (the output minus our frame: the title bar and a border on each other
+# side) and what we support (window menu, maximize, fullscreen, minimize: four u32, 16 bytes)
+read -r OUT_W OUT_H < <(pw_eval "() => window.__viewerTest.output().width + ' ' + window.__viewerTest.output().height" | tr -d '"'; echo)
+grep -aq "xdg_toplevel@[0-9]*\.configure_bounds($((OUT_W - 2)), $((OUT_H - FRAME_T - 1)))" "$WORK/gateway.log" ||
+  fail "foot wasn't told its bounds ($((OUT_W - 2))x$((OUT_H - FRAME_T - 1))): $(grep -ao 'configure_bounds([^)]*)' "$WORK/gateway.log" | head -3)"
+grep -aq 'xdg_toplevel@[0-9]*\.wm_capabilities(array\[16\])' "$WORK/gateway.log" || fail "foot wasn't told our four capabilities"
+echo "    title bar ${FRAME_T}px; foot has one surface and was told server side mode, bounds $((OUT_W - 2))x$((OUT_H - FRAME_T - 1)) and four capabilities"
 shot foot-active
 
 step "a popup reaching past the window's edge covers the frame (a stand-in canvas over the bottom border)"
@@ -312,6 +318,21 @@ wait_for "$(win_is test-foot-csd 'w.placed && w.hasContent')" "the second foot's
 wait_for "$(win_is test-foot-csd 'w.surfaces.length > 1')" "the second foot to draw its own decorations" 10
 [ "$(pw_eval "() => [...document.querySelectorAll('.frame')].filter((f) => getComputedStyle(f).display !== 'none').length")" = 1 ] ||
   fail "only the first foot's frame should be shown: $(pw_eval "() => [...document.querySelectorAll('.frame')].filter((f) => getComputedStyle(f).display !== 'none').map((f) => f.dataset.frameWindow)")"
+echo "    ok"
+
+step "right clicking an app's own title bar (show_window_menu) opens our window menu there"
+wait_for "$(settled)" "the window to settle" 5
+read -r CX CY CW CH < <(geometry_of test-foot-csd; echo)
+# foot's title bar is the top of its window geometry (a subsurface), the middle of it is the title
+pw mousemove $((DESK_X + CX + CW / 2)) $((DESK_Y + CY + 12)) >/dev/null
+pw mousedown right >/dev/null
+pw mouseup right >/dev/null
+wait_for "() => [...document.querySelectorAll('.context-menu button')].map((b) => b.dataset.action).join(',') === 'minimize,maximize,move,size,close'" "our window menu for foot's title bar" 5
+# where the app asked: at the pointer
+[ "$(pw_eval "() => { const m = document.querySelector('.context-menu').getBoundingClientRect(); return Math.abs(m.left - $((DESK_X + CX + CW / 2))) <= 2 && Math.abs(m.top - $((DESK_Y + CY + 12))) <= 2 }")" = true ] ||
+  fail "the menu isn't at the pointer: $(pw_eval "() => JSON.stringify(document.querySelector('.context-menu').getBoundingClientRect())")"
+pw press Escape >/dev/null
+wait_for "() => !document.querySelector('.context-menu')" "the menu to close" 5
 echo "    ok"
 
 step "the close button closes the window"

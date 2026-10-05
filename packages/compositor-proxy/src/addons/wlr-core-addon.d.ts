@@ -118,6 +118,12 @@ declare namespace wlrCore {
 
   export function close(sid: number): void
 
+  /**
+   * The largest sensible size for a Wayland toplevel (xdg_toplevel.configure_bounds), sent with its next configure.
+   * False if it couldn't be applied yet (before the toplevel's first commit) or the sid isn't a Wayland toplevel.
+   */
+  export function setBounds(sid: number, width: number, height: number): boolean
+
   export function toplevelState(sid: number):
     | {
         geometry: [number, number, number, number]
