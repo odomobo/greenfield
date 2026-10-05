@@ -711,6 +711,9 @@
  */
 #output .frame {
   position: absolute;
+  /* its own stacking context: the border is above the title bar, but the frame as a whole is beneath the window's
+     surfaces (it comes first), so popups reaching past the window's edge cover it */
+  z-index: 0;
   pointer-events: none;
   transform-origin: 0 0;
   color: var(--color-frame-text-inactive);

@@ -124,6 +124,12 @@ wait_for "() => { const w = window.__viewerTest.windows().find((w) => w.appId ==
 echo "    title bar ${FRAME_T}px; foot has one surface and was told server side mode"
 shot foot-active
 
+step "a popup reaching past the window's edge covers the frame (a stand-in canvas over the bottom border)"
+# hit testing follows the painting order: the border (normally click through) takes pointer events for the check
+[ "$(pw_eval "() => { const frame = document.querySelector('$FOOT'); const border = frame.querySelector('.frame-border'); const b = border.getBoundingClientRect(); const popup = document.createElement('canvas'); popup.className = 'surface'; frame.parentElement.append(popup); const w = frame.parentElement.getBoundingClientRect(); Object.assign(popup.style, { left: (b.left - w.left + 20) + 'px', top: (b.bottom - w.top - 20) + 'px', width: '40px', height: '40px' }); border.style.pointerEvents = 'auto'; const top = document.elementFromPoint(b.left + 30, b.bottom - 0.5); border.style.pointerEvents = ''; popup.remove(); return top === popup }")" = true ] ||
+  fail "the frame's border is drawn over a popup reaching past the window's edge"
+echo "    ok"
+
 step "the frame of an inactive window"
 launch test-xclock.desktop "Test Clock"
 wait_for "$(win_is XClock 'w.placed && w.hasContent')" "xclock's window" 40
