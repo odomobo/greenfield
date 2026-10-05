@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { isWholePixelScale, snapToDevicePixel, videoSourceRect } from '../src/surface-geometry.js'
+import { clipTo, isWholePixelScale, snapToDevicePixel, videoSourceRect } from '../src/surface-geometry.js'
 
 describe('videoSourceRect', () => {
   it('is the whole frame when nothing was padded', () => {
@@ -49,5 +49,23 @@ describe('snapToDevicePixel', () => {
     assert.ok(Math.abs(snapToDevicePixel(41.3, 1.5) - 124 / 3) < 1e-9)
     assert.equal(snapToDevicePixel(10.4, 1), 10)
     assert.equal(snapToDevicePixel(10.3, 2), 10.5)
+  })
+})
+
+describe('clipTo', () => {
+  it('is nothing for a surface inside the area', () => {
+    assert.equal(clipTo({ x: 10, y: 10, width: 50, height: 50 }, { x: 0, y: 0, width: 100, height: 100 }), '')
+  })
+
+  it('cuts what reaches past the area, on every side', () => {
+    // (a client side shadow 16 px left, 10 px above, 16 px right and 22 px below a 100x80 geometry)
+    assert.equal(
+      clipTo({ x: -16, y: -10, width: 132, height: 112 }, { x: 0, y: 0, width: 100, height: 80 }),
+      'inset(10px 16px 22px 16px)',
+    )
+  })
+
+  it('cuts only the sides that reach past', () => {
+    assert.equal(clipTo({ x: 0, y: 70, width: 40, height: 20 }, { x: 0, y: 0, width: 100, height: 80 }), 'inset(0px 0px 10px 0px)')
   })
 })

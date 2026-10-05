@@ -16,7 +16,7 @@ class FakeCore {
   onEvent: (type: string, ...args: any[]) => void = () => undefined
   readonly positions: [number, number, number][] = []
   readonly toplevels = new Map<number, Toplevel>()
-  readonly surfaces = new Map<number, [number, number, number][]>()
+  readonly surfaces = new Map<number, [number, number, number, boolean][]>()
 
   readonly native = new Proxy(
     {
@@ -31,7 +31,7 @@ class FakeCore {
         }
       },
       toplevelState: (sid: number) => this.toplevels.get(sid),
-      windowSurfaces: (sid: number) => this.surfaces.get(sid) ?? [[sid, 0, 0]],
+      windowSurfaces: (sid: number) => this.surfaces.get(sid) ?? [[sid, 0, 0, false]],
       setPosition: (sid: number, x: number, y: number) => {
         this.positions.push([sid, x, y])
       },
@@ -144,23 +144,24 @@ test("an X11 menu moving by itself updates the scene of the window it's shown wi
   core.surface(3, 80, 120)
   core.onEvent('surface-map', 3)
   core.surfaces.set(1, [
-    [1, 0, 0],
-    [3, 30, 40],
+    [1, 0, 0, false],
+    [3, 30, 40, true],
   ])
   await flush()
+  // (the menu is one of the window's popups)
   assert.deepEqual(
-    windowsOf(lastScene())[0].surfaces.map((surface: any) => [surface.id, surface.x, surface.y]),
+    windowsOf(lastScene())[0].surfaces.map((surface: any) => [surface.id, surface.x, surface.y, surface.popup]),
     [
-      ['1/1', 0, 0],
-      ['1/3', 30, 40],
+      ['1/1', 0, 0, undefined],
+      ['1/3', 30, 40, true],
     ],
   )
   // a menu (override-redirect) isn't a window of its own
   assert.equal(windowsOf(lastScene()).length, 1)
 
   core.surfaces.set(1, [
-    [1, 0, 0],
-    [3, 60, 40],
+    [1, 0, 0, false],
+    [3, 60, 40, true],
   ])
   core.onEvent('x11-geometry', 3)
   await flush()

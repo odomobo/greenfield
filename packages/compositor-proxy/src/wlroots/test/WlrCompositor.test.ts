@@ -40,7 +40,7 @@ class FakeCore {
   readonly fileDrag: string[] = []
   readonly outputScales: number[] = []
   readonly toplevels = new Map<number, Toplevel>()
-  readonly children = new Map<number, [number, number, number][]>()
+  readonly children = new Map<number, [number, number, number, boolean][]>()
 
   readonly native: WlrNative = {
     create: (onEvent, _width, _height, keyboard) => {
@@ -108,7 +108,7 @@ class FakeCore {
       this.closed.push(sid)
     },
     toplevelState: (sid) => this.toplevels.get(sid),
-    windowSurfaces: (sid) => this.children.get(sid) ?? [[sid, 0, 0]],
+    windowSurfaces: (sid) => this.children.get(sid) ?? [[sid, 0, 0, false]],
     setPosition: (sid, x, y) => {
       this.positions.push([sid, x, y])
     },

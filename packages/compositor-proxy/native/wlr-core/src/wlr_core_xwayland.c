@@ -688,18 +688,19 @@ iterate_with_offset(struct wlr_surface *surface, int sx, int sy, void *data) {
 }
 
 bool
-x11_window_surfaces(struct gsurf *gsurf, wlr_surface_iterator_func_t iterator, void *data) {
+x11_window_surfaces(struct gsurf *gsurf, wlr_surface_iterator_func_t iterator, wlr_surface_iterator_func_t popup_iterator,
+                    void *data) {
     struct xwin *xwin = gsurf->xwin;
     if (xwin == NULL || !xwin->toplevel) {
         return false;
     }
     wlr_surface_for_each_surface(gsurf->surface, iterator, data);
-    // its menus and tooltips, above it, where the app put them (in root coordinates, as the window's position is)
+    // its menus and tooltips (popups), above it, where the app put them (in root coordinates, as the window's position is)
     struct xwin *override;
     wl_list_for_each(override, &xwin->x11->overrides, override_link) {
         if (override->owner == xwin && override->gsurf) {
             struct offset_iterator offset = {
-                    .iterator = iterator,
+                    .iterator = popup_iterator,
                     .data = data,
                     .dx = override->xsurface->x - xwin->xsurface->x,
                     .dy = override->xsurface->y - xwin->xsurface->y,

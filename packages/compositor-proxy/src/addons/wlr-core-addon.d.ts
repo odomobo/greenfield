@@ -116,7 +116,8 @@ declare namespace wlrCore {
     | undefined
 
   /** The toplevel's mapped surfaces (its own, subsurfaces, popups) bottom to top: [sid, x, y] relative to it. */
-  export function windowSurfaces(sid: number): [number, number, number][]
+  /** [sid, x, y, popup] bottom to top: the window's own surfaces, then its popups' (xdg popups, X11 override-redirect) */
+  export function windowSurfaces(sid: number): [number, number, number, boolean][]
 
   /** Where the toplevel's surface is on the output. X11 apps are told; for Wayland toplevels the core keeps their popups inside the output. */
   export function setPosition(sid: number, x: number, y: number): void

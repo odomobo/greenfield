@@ -13,6 +13,7 @@
 #   4. stretches foot by its resize margin: the content stretches while dragging, the frame keeps its real size, and the
 #      app is told once on release;
 #   5. launches a GTK4 app (gtk4-demo, if installed): it keeps its own decorations, no frame;
+#   (popups: shown above the frame and above other windows, checked with stand-in canvases)
 #   6. launches a second foot that asks for client side decorations (like Chrome): it keeps its own, no frame;
 #   7. closes foot with the title bar's close button.
 # E2E_SHOTS=<directory> saves screenshots of the steps there (at device pixel ratios 1 and 2, look at them).
@@ -125,8 +126,11 @@ echo "    title bar ${FRAME_T}px; foot has one surface and was told server side 
 shot foot-active
 
 step "a popup reaching past the window's edge covers the frame (a stand-in canvas over the bottom border)"
+# foot's popups' element, in the layer above all windows (moved with foot); a stand-in canvas there is where a menu goes
+FOOT_POPUPS=".window-popups[data-window=\"$(win test-foot w.id | tr -d '"')\"]"
+[ "$(pw_eval "() => !!document.querySelector('.popup-layer > $FOOT_POPUPS')")" = true ] || fail "foot has no popups' element in the popup layer"
 # hit testing follows the painting order: the border (normally click through) takes pointer events for the check
-[ "$(pw_eval "() => { const frame = document.querySelector('$FOOT'); const border = frame.querySelector('.frame-border'); const b = border.getBoundingClientRect(); const popup = document.createElement('canvas'); popup.className = 'surface'; frame.parentElement.append(popup); const w = frame.parentElement.getBoundingClientRect(); Object.assign(popup.style, { left: (b.left - w.left + 20) + 'px', top: (b.bottom - w.top - 20) + 'px', width: '40px', height: '40px' }); border.style.pointerEvents = 'auto'; const top = document.elementFromPoint(b.left + 30, b.bottom - 0.5); border.style.pointerEvents = ''; popup.remove(); return top === popup }")" = true ] ||
+[ "$(pw_eval "() => { const frame = document.querySelector('$FOOT'); const border = frame.querySelector('.frame-border'); const b = border.getBoundingClientRect(); const popup = document.createElement('canvas'); popup.className = 'surface'; const popups = document.querySelector('$FOOT_POPUPS'); popups.append(popup); const w = popups.getBoundingClientRect(); Object.assign(popup.style, { left: (b.left - w.left + 20) + 'px', top: (b.bottom - w.top - 20) + 'px', width: '40px', height: '40px' }); border.style.pointerEvents = 'auto'; const top = document.elementFromPoint(b.left + 30, b.bottom - 0.5); border.style.pointerEvents = ''; popup.remove(); return top === popup }")" = true ] ||
   fail "the frame's border is drawn over a popup reaching past the window's edge"
 echo "    ok"
 
@@ -137,6 +141,11 @@ wait_for "$(win_is test-foot '!w.activated')" "foot to lose the focus" 5
 [ "$(pw_eval "() => document.querySelector('$FOOT').classList.contains('active')")" = false ] || fail "foot's frame is active while another window has the focus"
 echo "    ok"
 shot foot-inactive-xclock-active
+
+step "a popup of a window that isn't on top is shown above the ones that are (a stand-in canvas of foot's over xclock)"
+[ "$(pw_eval "() => { const clock = document.querySelector('$(frame_of XClock)').getBoundingClientRect(); const popups = document.querySelector('$FOOT_POPUPS'); const o = popups.getBoundingClientRect(); const popup = document.createElement('canvas'); popup.className = 'surface'; popups.append(popup); Object.assign(popup.style, { left: (clock.left - o.left + 30) + 'px', top: (clock.top - o.top + 60) + 'px', width: '40px', height: '40px' }); const top = document.elementFromPoint(clock.left + 50, clock.top + 80); popup.remove(); return top === popup }")" = true ] ||
+  fail "a popup of foot is covered by xclock, which is above foot"
+echo "    ok"
 
 step "clicking foot's title bar activates it"
 read -r TX TY < <(center_of "$FOOT .frame-title"; echo)

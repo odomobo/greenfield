@@ -93,7 +93,11 @@ A stray press of the browser's back button (e.g. a mouse side button) must not t
 - **Decorations**: the viewer draws a frame (title bar, thin border, invisible resize margin) around windows the server
   marks `decorated`: Wayland apps with an `xdg-decoration` object that don't ask for client side mode, X11 windows
   that don't say they have no title bar (`_MOTIF_WM_HINTS`). Other apps (GTK, Chrome) draw their own, popups are never
-  framed (Core item 4).
+  framed (Core item 4). A decorated window's own surfaces are clipped to its window geometry, so the app can't cover
+  the frame or take its clicks.
+- **Popups** (xdg popups, X11 override-redirect menus and tooltips; scene protocol 13 marks them) are shown in a layer
+  above all windows, in the windows' order: a menu or tooltip of a window that isn't on top isn't covered by the ones
+  that are. They move, stretch, fade and hide with their window and aren't clipped to it.
 - **Input regions**: clicks outside a surface's input region (`wl_surface.set_input_region`, e.g. most of a client-side
   shadow) go to whatever is underneath; the pointer and cursor follow the same hit test.
 - **Child windows** (dialogs, `xdg_toplevel.set_parent`) are separate windows in the scene with a parent. They are

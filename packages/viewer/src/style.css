@@ -687,6 +687,7 @@
 }
 
 #output .window-layer,
+#output .popup-layer,
 #output .floating-layer {
   position: absolute;
   inset: 0;
@@ -696,8 +697,19 @@
   pointer-events: none;
 }
 
-/* a window's element is its surfaces' coordinate system, moved and stretched by a transform (desktop.ts) */
-#output .window {
+/* the popup layer takes no input itself, only the popups do (their element has no size: just its canvases) */
+#output .popup-layer {
+  pointer-events: none;
+}
+
+#output .window-popups {
+  pointer-events: auto;
+}
+
+/* a window's element is its surfaces' coordinate system, moved and stretched by a transform (desktop.ts); its popups'
+   element (in the popup layer) gets the same one */
+#output .window,
+#output .window-popups {
   position: absolute;
   left: 0;
   top: 0;

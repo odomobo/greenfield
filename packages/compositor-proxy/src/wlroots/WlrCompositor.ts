@@ -838,10 +838,11 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   private windowSurfaces(sid: number): SceneSurface[] {
     const surfaces: SceneSurface[] = []
-    for (const [childSid, x, y] of this.wlr.windowSurfaces(sid)) {
+    for (const [childSid, x, y, popup] of this.wlr.windowSurfaces(sid)) {
       const surface = this.surfaces.get(childSid)
       if (surface?.buffer) {
-        surfaces.push({ id: surface.key, x, y, width: surface.width, height: surface.height, input: surface.input })
+        const { key: id, width, height, input } = surface
+        surfaces.push(popup ? { id, x, y, width, height, input, popup } : { id, x, y, width, height, input })
       }
     }
     return surfaces

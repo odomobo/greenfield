@@ -137,6 +137,8 @@ export class Desktop {
   private readonly windowViews = new Map<string, WindowView>()
   /** the windows' elements; the layer above holds the client cursor and the drag icon */
   private readonly windowLayer = document.createElement('div')
+  /** the windows' popups (menus, tooltips), above all windows, in the windows' order (see WindowView) */
+  private readonly popupLayer = document.createElement('div')
   private readonly floatingLayer = document.createElement('div')
   /** one WebGL context for all video with alpha */
   private readonly alphaCompositor = new AlphaCompositor()
@@ -205,8 +207,9 @@ export class Desktop {
     private readonly connection: Connection,
   ) {
     this.windowLayer.className = 'window-layer'
+    this.popupLayer.className = 'popup-layer'
     this.floatingLayer.className = 'floating-layer'
-    container.append(this.windowLayer, this.floatingLayer)
+    container.append(this.windowLayer, this.popupLayer, this.floatingLayer)
     this.pointerLock = new PointerLock(
       {
         request: () => container.requestPointerLock() as Promise<void> | void,
@@ -1278,6 +1281,7 @@ export class Desktop {
   private syncWindowViews() {
     const live = new Set<string>()
     let expected = this.windowLayer.firstChild
+    let expectedPopups = this.popupLayer.firstChild
     for (const window of this.windows) {
       live.add(window.id)
       let view = this.windowViews.get(window.id)
@@ -1285,12 +1289,20 @@ export class Desktop {
         view = new WindowView(window.id)
         this.windowViews.set(window.id, view)
       }
-      view.setSurfaces(window.surfaces.map((surface) => this.viewFor(surface.id)))
-      // the windows are stacked in the scene's order, bottom to top (moving only what's out of place)
+      view.setSurfaces(
+        window.surfaces.map((surface) => this.viewFor(surface.id)),
+        window.surfaces.map((surface) => surface.popup === true),
+      )
+      // the windows are stacked in the scene's order, bottom to top (moving only what's out of place), their popups too
       if (view.element === expected) {
         expected = expected.nextSibling
       } else {
         this.windowLayer.insertBefore(view.element, expected)
+      }
+      if (view.popups === expectedPopups) {
+        expectedPopups = expectedPopups.nextSibling
+      } else {
+        this.popupLayer.insertBefore(view.popups, expectedPopups)
       }
     }
     for (const [id, view] of [...this.windowViews]) {

@@ -57,7 +57,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 12
+export const PROTOCOL_VERSION = 13
 
 /** The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). */
 export const FRAME_TITLE_HEIGHT = 32
@@ -124,6 +124,13 @@ export type SceneSurface = {
    * surface. Absent: the whole surface. Empty: nowhere, input goes to whatever is underneath.
    */
   input?: SceneRect[]
+  /**
+   * The surface belongs to one of the window's popups (an xdg popup, an X11 override-redirect menu or tooltip, and
+   * their subsurfaces); absent: false, the window's own surface or a subsurface of it. Popups come after the window's
+   * own surfaces. The viewer shows them above all windows (a menu or tooltip of a window that isn't on top isn't covered
+   * by the ones that are), and doesn't clip them to the window's frame: they reach past the window's edge on purpose.
+   */
+  popup?: boolean
 }
 
 export type SceneWindow = {

@@ -1,5 +1,5 @@
 import type { SurfaceView } from './surface-view'
-import { snapToDevicePixel } from './surface-geometry'
+import { clipTo, snapToDevicePixel } from './surface-geometry'
 import type { Rect } from './windows'
 import { FrameInsets } from './protocol'
 import { frameBox } from './frame-geometry'
@@ -35,20 +35,28 @@ export type WindowLayout = {
  * fading a window is a CSS transform and opacity on this element. Everything is imperative (see desktop.ts): React
  * never sees it.
  *
- * A decorated window's frame (window-frame.ts) is one more element inside this one, before the canvases: it lies outside
- * the window geometry, so it never covers the app's content, and popups reaching past the window's edge (a long menu)
- * are drawn over it. It's drawn at its real size even while the content is stretched (a resize being dragged), see
- * frameBox.
+ * A decorated window's frame (window-frame.ts) is one more element inside this one, before the canvases. It lies
+ * outside the window geometry, and the window's own surfaces are clipped to the geometry, so the app never covers the
+ * frame (nor takes its clicks: clipping applies to hit testing too). It's drawn at its real size even while the content
+ * is stretched (a resize being dragged), see frameBox.
+ *
+ * The window's popups (menus, tooltips) are in a second element, `popups`, in a layer above all windows (desktop.ts):
+ * a menu or tooltip of a window that isn't on top isn't covered by the ones that are. It's moved, stretched, faded and
+ * hidden with the window, and isn't clipped: popups reach past the window's edge on purpose.
  */
 export class WindowView {
   readonly element = document.createElement('div')
+  readonly popups = document.createElement('div')
   private views: SurfaceView[] = []
+  private popupFlags: boolean[] = []
   private layoutKey = ''
   readonly frame: WindowFrame
 
   constructor(readonly id: string) {
     this.element.className = 'window'
     this.element.dataset.window = id
+    this.popups.className = 'window-popups'
+    this.popups.dataset.window = id
     this.frame = new WindowFrame(id)
     this.element.append(this.frame.element)
   }
@@ -58,32 +66,24 @@ export class WindowView {
     this.frame.update(state)
   }
 
-  /** The surfaces of the window, bottom to top. */
-  setSurfaces(views: SurfaceView[]): void {
+  /** The surfaces of the window, bottom to top, and which of them are its popups'. */
+  setSurfaces(views: SurfaceView[], popup: boolean[]): void {
     this.views = views
-    // (the frame is the first child, the canvases follow)
-    let expected = this.frame.element.nextSibling
-    for (const view of views) {
-      if (view.canvas === expected) {
-        expected = expected.nextSibling
-      } else {
-        // (moves it if it's elsewhere, e.g. in another window)
-        this.element.insertBefore(view.canvas, expected)
-      }
-    }
-    while (expected !== null) {
-      const next: ChildNode | null = expected.nextSibling
-      expected.remove()
-      expected = next
-    }
+    this.popupFlags = popup
+    // (which surfaces are clipped may have changed)
+    this.layoutKey = ''
+    // (the frame is the first child of the window's element, its own surfaces' canvases follow)
+    placeChildren(this.element, this.frame.element.nextSibling, views.filter((_, i) => !popup[i]))
+    placeChildren(this.popups, this.popups.firstChild, views.filter((_, i) => popup[i]))
   }
 
   layout(layout: WindowLayout): void {
     const { x, y, scaleX, scaleY, opacity, hidden, inert, pixelRatio } = layout
-    const style = this.element.style
-    style.display = hidden ? 'none' : ''
-    style.pointerEvents = inert ? 'none' : ''
-    style.opacity = opacity === 1 ? '' : String(opacity)
+    for (const style of [this.element.style, this.popups.style]) {
+      style.display = hidden ? 'none' : ''
+      style.pointerEvents = inert ? 'none' : ''
+      style.opacity = opacity === 1 ? '' : String(opacity)
+    }
     const stretched = scaleX !== 1 || scaleY !== 1
     const transform = stretched
       ? `translate(${x}px, ${y}px) scale(${scaleX}, ${scaleY})`
@@ -102,7 +102,8 @@ export class WindowView {
       return
     }
     this.layoutKey = key
-    style.transform = transform
+    this.element.style.transform = transform
+    this.popups.style.transform = transform
     this.frame.place(
       decorated ? frameBox(layout.geometry, insets, scaleX, scaleY, layout.frameStretches) : undefined,
     )
@@ -110,12 +111,34 @@ export class WindowView {
       const view = this.views[i]
       const drawn = { x: x + rect.x * scaleX, y: y + rect.y * scaleY, width: rect.width * scaleX, height: rect.height * scaleY }
       view?.place(rect, drawn, pixelRatio)
+      if (view) {
+        // with our frame, the window's own surfaces show only what's inside the geometry (popups aren't clipped)
+        view.canvas.style.clipPath = decorated && !this.popupFlags[i] ? clipTo(rect, layout.geometry) : ''
+      }
     })
   }
 
   dispose(): void {
     this.frame.dispose()
     this.element.remove()
+    this.popups.remove()
     this.views = []
+  }
+}
+
+/** Make `views`' canvases the children of `parent` from `expected` on, in order, moving only what's out of place. */
+function placeChildren(parent: HTMLElement, expected: ChildNode | null, views: SurfaceView[]) {
+  for (const view of views) {
+    if (view.canvas === expected) {
+      expected = expected.nextSibling
+    } else {
+      // (moves it if it's elsewhere, e.g. in another window, or between the window's two elements)
+      parent.insertBefore(view.canvas, expected)
+    }
+  }
+  while (expected !== null) {
+    const next: ChildNode | null = expected.nextSibling
+    expected.remove()
+    expected = next
   }
 }

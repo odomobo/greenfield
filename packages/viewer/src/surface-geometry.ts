@@ -45,3 +45,12 @@ export function isWholePixelScale(shown: Rect, image: Size, pixelRatio: number):
 export function snapToDevicePixel(value: number, pixelRatio: number): number {
   return Math.round(value * pixelRatio) / pixelRatio
 }
+
+/** A CSS clip-path showing only the part of a surface (at `rect`) inside `area`, both in the window's coordinates. */
+export function clipTo(rect: Rect, area: Rect): string {
+  const top = Math.max(0, area.y - rect.y)
+  const left = Math.max(0, area.x - rect.x)
+  const bottom = Math.max(0, rect.y + rect.height - (area.y + area.height))
+  const right = Math.max(0, rect.x + rect.width - (area.x + area.width))
+  return top || right || bottom || left ? `inset(${top}px ${right}px ${bottom}px ${left}px)` : ''
+}

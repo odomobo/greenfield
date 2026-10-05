@@ -162,7 +162,10 @@ WLR_CORE_INTERNAL void x11_surface_destroyed(struct gsurf *gsurf);
 WLR_CORE_INTERNAL bool x11_configure(struct gsurf *gsurf, const struct configure_request *request);
 WLR_CORE_INTERNAL bool x11_close(struct gsurf *gsurf);
 WLR_CORE_INTERNAL bool x11_toplevel_state(struct gsurf *gsurf, struct toplevel_state *state);
-WLR_CORE_INTERNAL bool x11_window_surfaces(struct gsurf *gsurf, wlr_surface_iterator_func_t iterator, void *data);
+/* the surfaces of an X11 window, its own through `iterator`, its override-redirect menus and tooltips through
+ * `popup_iterator`; false if it isn't an X11 window */
+WLR_CORE_INTERNAL bool x11_window_surfaces(struct gsurf *gsurf, wlr_surface_iterator_func_t iterator,
+                                           wlr_surface_iterator_func_t popup_iterator, void *data);
 WLR_CORE_INTERNAL void x11_set_position(struct gsurf *gsurf, int32_t x, int32_t y);
 
 /* Input beyond pointer and keyboard (wlr_core_input.c) */

@@ -1400,24 +1400,36 @@ struct surfaces_iterator {
 };
 
 static void
-add_surface(struct wlr_surface *surface, int sx, int sy, void *data) {
-    struct surfaces_iterator *iterator = data;
+add_window_surface(struct surfaces_iterator *iterator, struct wlr_surface *surface, int sx, int sy, bool popup) {
     struct gsurf *gsurf = gsurf_from_surface(iterator->core, surface);
     if (gsurf == NULL || !surface->mapped) {
         return;
     }
     napi_value entry, value;
-    napi_create_array_with_length(iterator->env, 3, &entry);
+    napi_create_array_with_length(iterator->env, 4, &entry);
     napi_create_uint32(iterator->env, gsurf->sid, &value);
     napi_set_element(iterator->env, entry, 0, value);
     napi_create_int32(iterator->env, sx, &value);
     napi_set_element(iterator->env, entry, 1, value);
     napi_create_int32(iterator->env, sy, &value);
     napi_set_element(iterator->env, entry, 2, value);
+    napi_get_boolean(iterator->env, popup, &value);
+    napi_set_element(iterator->env, entry, 3, value);
     napi_set_element(iterator->env, iterator->array, iterator->length++, entry);
 }
 
-// windowSurfaces(sid) -> [sid, x, y][] bottom to top, relative to the toplevel's surface (subsurfaces and popups)
+static void
+add_surface(struct wlr_surface *surface, int sx, int sy, void *data) {
+    add_window_surface(data, surface, sx, sy, false);
+}
+
+static void
+add_popup_surface(struct wlr_surface *surface, int sx, int sy, void *data) {
+    add_window_surface(data, surface, sx, sy, true);
+}
+
+// windowSurfaces(sid) -> [sid, x, y, popup][] bottom to top, relative to the toplevel's surface: the window's own
+// (its surface and subsurfaces), then its popups (xdg popups, X11 override-redirect menus and tooltips) with theirs
 static napi_value
 windowSurfaces(napi_env env, napi_callback_info info) {
     napi_value argv[1];
@@ -1428,8 +1440,9 @@ windowSurfaces(napi_env env, napi_callback_info info) {
     struct gsurf *gsurf = gsurf_from_sid(core, arg_u32(env, argv[0]));
     struct surfaces_iterator iterator = {.core = core, .env = env};
     napi_create_array(env, &iterator.array);
-    if (gsurf && !x11_window_surfaces(gsurf, add_surface, &iterator) && gsurf->toplevel) {
-        wlr_xdg_surface_for_each_surface(gsurf->toplevel->base, add_surface, &iterator);
+    if (gsurf && !x11_window_surfaces(gsurf, add_surface, add_popup_surface, &iterator) && gsurf->toplevel) {
+        wlr_surface_for_each_surface(gsurf->toplevel->base->surface, add_surface, &iterator);
+        wlr_xdg_surface_for_each_popup_surface(gsurf->toplevel->base, add_popup_surface, &iterator);
     }
     return iterator.array;
 }
