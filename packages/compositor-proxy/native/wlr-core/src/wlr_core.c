@@ -292,6 +292,7 @@ gsurf_toplevel_listeners_remove(struct gsurf *gsurf) {
     wl_list_remove(&gsurf->request_maximize.link);
     wl_list_remove(&gsurf->request_fullscreen.link);
     wl_list_remove(&gsurf->request_minimize.link);
+    wl_list_remove(&gsurf->request_show_window_menu.link);
     wl_list_remove(&gsurf->set_title.link);
     wl_list_remove(&gsurf->set_app_id.link);
     wl_list_remove(&gsurf->set_parent.link);
@@ -404,6 +405,16 @@ handle_request_minimize(struct wl_listener *listener, void *data) {
     struct gsurf *gsurf = wl_container_of(listener, gsurf, request_minimize);
     napi_value args[] = {u32(gsurf->core, gsurf->sid)};
     emit(gsurf->core, "toplevel-request-minimize", 1, args);
+}
+
+/* The app's own title bar was right-clicked (client-side decorations): the viewer opens our window menu there. x, y:
+ * where, in the toplevel's surface coordinates. */
+static void
+handle_request_show_window_menu(struct wl_listener *listener, void *data) {
+    struct gsurf *gsurf = wl_container_of(listener, gsurf, request_show_window_menu);
+    struct wlr_xdg_toplevel_show_window_menu_event *event = data;
+    napi_value args[] = {u32(gsurf->core, gsurf->sid), i32(gsurf->core, event->x), i32(gsurf->core, event->y)};
+    emit(gsurf->core, "toplevel-request-window-menu", 3, args);
 }
 
 static void
@@ -543,6 +554,8 @@ handle_new_xdg_surface(struct wl_listener *listener, void *data) {
     wl_signal_add(&toplevel->events.request_fullscreen, &gsurf->request_fullscreen);
     gsurf->request_minimize.notify = handle_request_minimize;
     wl_signal_add(&toplevel->events.request_minimize, &gsurf->request_minimize);
+    gsurf->request_show_window_menu.notify = handle_request_show_window_menu;
+    wl_signal_add(&toplevel->events.request_show_window_menu, &gsurf->request_show_window_menu);
     gsurf->set_title.notify = handle_set_title;
     wl_signal_add(&toplevel->events.set_title, &gsurf->set_title);
     gsurf->set_app_id.notify = handle_set_app_id;
@@ -787,7 +800,10 @@ create(napi_env env, napi_callback_info info) {
     wlr_output_layout_add(layout, core->output, 0, 0);
     wlr_xdg_output_manager_v1_create(core->display, layout);
 
-    core->xdg_shell = wlr_xdg_shell_create(core->display, 3);
+    // version 6: configure bounds (4), window management capabilities (5: wlroots advertises window menu, maximize,
+    // fullscreen and minimize, which all work), suspended (6, not used yet). Each client binds the lower of its
+    // version and ours.
+    core->xdg_shell = wlr_xdg_shell_create(core->display, 6);
     core->new_xdg_surface.notify = handle_new_xdg_surface;
     wl_signal_add(&core->xdg_shell->events.new_surface, &core->new_xdg_surface);
     core->new_surface.notify = handle_new_surface;
@@ -1485,6 +1501,28 @@ setPosition(napi_env env, napi_callback_info info) {
     return undefined(env);
 }
 
+// setBounds(sid, width, height) -> applied: the largest sensible size for the window (xdg_toplevel.configure_bounds,
+// sent with the next configure to apps that know it): the output minus our frame. Apps use it to pick their initial
+// size. False if the toplevel can't be configured yet (before its first commit) or isn't one.
+static napi_value
+setBounds(napi_env env, napi_callback_info info) {
+    napi_value argv[3];
+    struct core *core = core_or_throw(env);
+    bool applied = false;
+    if (core && get_args(env, info, 3, argv)) {
+        struct gsurf *gsurf = gsurf_from_sid(core, arg_u32(env, argv[0]));
+        int32_t width = arg_i32(env, argv[1]), height = arg_i32(env, argv[2]);
+        if (gsurf && gsurf->toplevel && gsurf->toplevel->base->initialized && width >= 0 && height >= 0) {
+            wlr_xdg_toplevel_set_bounds(gsurf->toplevel, width, height);
+            flush(core);
+            applied = true;
+        }
+    }
+    napi_value result;
+    napi_get_boolean(env, applied, &result);
+    return result;
+}
+
 // sendFrameDone(sid, timeMs)
 static napi_value
 sendFrameDone(napi_env env, napi_callback_info info) {
@@ -1607,6 +1645,7 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("toplevelState", toplevelState),
             DECLARE_NAPI_METHOD("windowSurfaces", windowSurfaces),
             DECLARE_NAPI_METHOD("setPosition", setPosition),
+            DECLARE_NAPI_METHOD("setBounds", setBounds),
             DECLARE_NAPI_METHOD("sendFrameDone", sendFrameDone),
             DECLARE_NAPI_METHOD("readPixels", readPixels),
     };

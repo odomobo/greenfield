@@ -17,6 +17,8 @@ class FakeCore {
   readonly positions: [number, number, number][] = []
   readonly toplevels = new Map<number, Toplevel>()
   readonly surfaces = new Map<number, [number, number, number, boolean][]>()
+  /** setBounds calls (sids): X11 windows are never told bounds */
+  readonly bounded: number[] = []
 
   readonly native = new Proxy(
     {
@@ -31,6 +33,10 @@ class FakeCore {
         }
       },
       toplevelState: (sid: number) => this.toplevels.get(sid),
+      setBounds: (sid: number) => {
+        this.bounded.push(sid)
+        return true
+      },
       windowSurfaces: (sid: number) => this.surfaces.get(sid) ?? [[sid, 0, 0, false]],
       setPosition: (sid: number, x: number, y: number) => {
         this.positions.push([sid, x, y])
@@ -112,6 +118,15 @@ test('an X11 window is told where the scene shows it, once per change (a Wayland
     [0, 0],
     [300, 200],
   ])
+})
+
+test('X11 windows are never told configure bounds (an xdg_toplevel thing), Wayland windows are', async () => {
+  core.newWindow(1, true)
+  core.newWindow(2, false)
+  compositor.handleMessage({ type: 'output', width: 900, height: 600 })
+  await flush()
+  assert.ok(core.bounded.length > 0)
+  assert.ok(core.bounded.every((sid) => sid === 2))
 })
 
 test('a maximized X11 window is at the output origin, and back where it was when restored', async () => {

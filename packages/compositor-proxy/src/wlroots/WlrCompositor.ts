@@ -137,6 +137,8 @@ type Window = {
   seq: number
   /** the app's own icon (X11 _NET_WM_ICON) as a PNG data URL */
   icon?: string
+  /** the configure bounds the app was last told, "width x height" (Wayland windows) */
+  bounds?: string
 }
 
 const inactiveSink: EncodingSink = {
@@ -358,7 +360,16 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
             // keeps its old window geometry (inset by the shadow) until it's resized, so our frame would overlap it
             this.wlr.configure(window.sid, state.geometry[2], state.geometry[3], {})
           }
+          this.updateBounds(window)
           this.scheduleScene()
+        }
+        break
+      }
+      case 'toplevel-request-window-menu': {
+        // the app's own title bar was right-clicked: the viewer opens our window menu there (main surface coordinates)
+        const [sid, x, y] = args as [number, number, number]
+        if (this.windows.has(sid)) {
+          this.send?.({ type: 'window-menu-requested', window: this.keyOf(sid), x, y })
         }
         break
       }
@@ -487,6 +498,11 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     const surface = this.surfaces.get(sid)
     if (surface === undefined) {
       return
+    }
+    // (a toplevel's first commit: the initial configure, which carries the bounds, hasn't gone out yet)
+    const window = this.windows.get(sid)
+    if (window) {
+      this.updateBounds(window)
     }
     surface.width = width
     surface.height = height
@@ -700,6 +716,24 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       this.activate(0)
     }
     this.scheduleScene()
+  }
+
+  /**
+   * Tell a Wayland window the largest sensible size for it (xdg_toplevel.configure_bounds), when that changed: the
+   * output (which excludes the taskbar) minus our frame. Apps use it to pick their initial size, so they fit.
+   */
+  private updateBounds(window: Window) {
+    if (this.x11.has(window.sid)) {
+      return
+    }
+    const insets = frameInsets({ decorated: window.decorated })
+    const width = Math.max(0, this.output.width - insets.left - insets.right)
+    const height = Math.max(0, this.output.height - insets.top - insets.bottom)
+    const bounds = `${width}x${height}`
+    // (not applied before the window's first commit: tried again then)
+    if (window.bounds !== bounds && this.wlr.setBounds(window.sid, width, height)) {
+      window.bounds = bounds
+    }
   }
 
   /** The window covers the output (the viewer shows it above its taskbar), or goes back to its own size. */
@@ -1039,6 +1073,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.output = { width, height }
     this.wlr.setOutputSize(width, height)
     for (const window of this.windows.values()) {
+      this.updateBounds(window)
       const state = this.wlr.toplevelState(window.sid)
       if (state?.maximized) {
         this.setMaximized(window.sid, true)
