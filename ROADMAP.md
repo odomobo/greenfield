@@ -1024,3 +1024,9 @@ single large item never stalls the link. Initial window before any estimate: 64 
 - By design, a single busy surface that the server keeps up with stays normal, so its encoding runs at normal
   priority (one 640x480 busy client alone: about 42% busy, about 85% of a core). Larger ones cross the 60% line
   (1920x1080: promoted); somewhere around 1280x720 is the border. `PROMOTE_FRACTION` is the knob if this matters.
+- Input on a Wayland subsurface or popup the app just moved (`wl_subsurface.set_position`, `xdg_popup.reposition`)
+  can land off by the move for about a round trip: the viewer picks the surface and computes surface coordinates from
+  the positions in the last scene it has. Not seen with a real app (they rarely move subsurfaces in response to the
+  pointer; the X11 version of this, a window dragging itself, is fixed: the core uses X11's own window position). Fix
+  if it shows: send coordinates relative to the window's main surface and let the core find the surface under the
+  point in wlroots' current surface tree (`wlr_xdg_surface_surface_at`), as a local compositor does.
