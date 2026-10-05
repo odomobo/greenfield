@@ -56,8 +56,6 @@ Bug: when window is at top of screen, moving mouse cursor off top edge can leave
 
 Bug: when right click on pinned - "unpin", it shouldn't hide the app menu.
 
-Bug: session name on app menu isn't aligned correctly.
-
 Bug: windows can appear in different places under the icon. They should be left-to-right in terms of their creation order.
 
 Bug: can't use right-click menu on app icons, because they disappear when mouse moves off of app thumbnail itself (app menu doesn't keep itself visible).
@@ -66,47 +64,29 @@ Bug: move from the right-click menu isn't actually useful (we can't use it to mo
 
 Bug: clock needs to show device time, not local time. the way it works now is ridiculous.
 
-Improvement: Maybe consider QOI instead of PNG for image compression.
-
-Improvement: title bars should be same size as task bar. Need to fix title rendering - currently cuts off bottom of text.
-
 Improvement: should be able to slide taskbar icons around
 
-Improvement: session menu would look better if right-aligned, I think.
+Improvement: power menu would look better if right-aligned, I think.
+
+Improvement: power menu should allow: lock screen, log out, power down, restart. Not sure how to implement power down and restart, but they're useful.
 
 Improvement?: app groups??? Is this already implemented?
 
-Improvement: if there are no active sessions, logs directly into a new session instead of going to the session manager.
+Improvement: There should't be multiple sessions per user. Instead, there should be a single session per user. If a user logs in multiple times, the later log ins can't click on any windows. If they want to interact, they have to select from some dialog that allows for it, but then it removes interaction ability from the other session.
 
-Improvement: should show which sessions are currently actively connected
-
-Improvement: when taking over an active session, should give a dialog box asking for confirmation.
+That means we don't need the session picker anymore.
 
 Improvement: in session menu in apps menu, instead of "disconnect", it should say "Sessions".
 
 Improvement: if the server goes down, then in addition to bringing you back to the main login page, it should tell you that it can't access the server.
 
-Improvement: the status indicator should tell more when you click on it. As it is, I'm not sure it even does anything at all.
-
 Bug: when there are too many apps icons on the task bar, some of them get inaccessible.
 
 Nice to have: when hovering a window in the task bar, that window should briefly be the only one showing
 
-Nice to have: when opening or closing a window, it should animate in/out the same way as on windows (brief fade in/out, slight growth/shrink).
-
 Nice to have: right click never allows browser default.
 
-Nice to have: when opening/closing menu, it should slide in/out. In fact, everything should animate in/out.
-
-Nice to have: when new icons appear/disappear from task bar, icons should slide. New icon should animate in/out.
-
 Nice to have: file download/upload.
-
-Nice to have: background, new chic theme. Rounded corners on our title bars. Blurred translucent windows. Drop shadow for our windows and for all windows which are opaque and full-sized (which clearly don't have a shadow of their own). Drop shadow should be farther when window is selected.
-
-Nice to have: nebula icon, including for app menu.
-
-Nice to have: we'll need to get it inspired by windows, and not just a pure copy of windows. Certainly there are some things we can do better than windows does?
 
 Nice to have: native code written in rust. Maybe another language for server code???
 
