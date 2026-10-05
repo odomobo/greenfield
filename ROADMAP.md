@@ -1037,6 +1037,39 @@ single large item never stalls the link. Initial window before any estimate: 64 
 
 5. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle.
 
+### Next: QOI patches
+
+5b. **QOI instead of PNG for window patches** (user's request, 2026-10-05). Without GPU acceleration every patch is a
+    PNG today: our own encoder (`compositor-proxy/src/encoding/png.ts`: row filters in JS, deflate on libuv's thread
+    pool, `png-worker.ts` threads for the streaming class), decoded by the browser's `createImageBitmap`
+    (`viewer/src/decoder.ts`), off the main thread for free. QOI (https://github.com/phoboslab/qoi, MIT, one header)
+    encodes many times faster, so it should save server CPU, which limits us on VPSes without a GPU. The library is
+    owned in the codebase (vendored with its licence, not a dependency): a native encoder in the session process, a
+    wasm decoder in the browser.
+    1. **Spike first (Sonnet agent): measure before building.** Record real patches (foot with text, a GTK app such as
+       gtk4-demo, a busy client, a browser page if available) from a session, and compare per patch and in total:
+       - size and encode time of our PNG, QOI, and QOI followed by a fast general compressor (deflate level 1 and LZ4),
+         since QOI files are usually larger than PNG on UI content (text, flat areas, gradients) and bandwidth matters
+         over the internet;
+       - decode time in a browser: `createImageBitmap` of the PNG against a wasm QOI decoder (and the same decoder in
+         plain JS, for comparison), plus the extra step of each (`DecompressionStream` for deflate, LZ4 in the wasm).
+       Report the numbers and a recommendation (QOI, QOI + deflate or QOI + LZ4, or stay with PNG for some content). The
+       spike code lives in a scratch directory or a branch; nothing in the product changes yet. The user decides after.
+    2. **Then the implementation**, in the shape the spike recommends:
+       - Encoder: a native addon in compositor-proxy's CMake project (or a function in an existing addon), called
+         synchronously from the existing worker threads (they already run at low priority for the streaming class);
+         the normal class keeps its own thread(s). Handle the pixel format: wlroots buffers are BGRA/XRGB, so swap
+         channels in the encoder or the decoder, and opaque (XRGB) surfaces get alpha 255 or QOI's 3-channel mode.
+         Later, possibly: encode straight from the wlroots buffer without a JS copy.
+       - Decoder: wasm built with plain `clang --target=wasm32` and `wasm-ld` (package `lld`, a new build requirement),
+         no Emscripten and no libc: change `qoi_decode` to decode into a buffer we pass in instead of calling `malloc`.
+         It must run in a Web Worker (wasm on the main thread would stutter the UI during busy updates): the worker
+         makes `ImageData` → `createImageBitmap` and transfers the bitmap to the main thread.
+       - Only window patches change; app icons, cursors, drag icons and shell images stay PNG (rare, cached). Keep PNG
+         as a fallback until QOI is proven. Protocol version bump.
+       - Afterwards, check the encoding policy's tuning (pool sizes, the relentless thresholds), which was measured
+         with PNG's costs.
+
 ### Lower priority
 
 6. **Don't send what can't be seen: minimized, fully covered and partially covered windows**, all with one algorithm,
