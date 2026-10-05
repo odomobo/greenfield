@@ -969,6 +969,41 @@ single large item never stalls the link. Initial window before any estimate: 64 
      (file chooser and other dialogs for apps using the portal). Settings work with either, or neither, of the GTK and
      KDE backends: they're ours. Without the portal, apps fall back to GSettings (today's behaviour).
    - Verify: the full e2e suite, and by hand gtk4-demo, Chrome and foot (initial sizes, buttons, right-click menu).
+4c. **Next steps after 4b** (to be done by an agent, in this order; the user agreed to them on 2026-10-04):
+   1. **Merge branch `core4b-desktop-integration`** (xdg-shell 6: bounds, capabilities, our window menu for apps'
+      own title bars; scene protocol 14) into master. It was verified on its branch (compositor-proxy 155 and viewer
+      79 unit tests, `test-gateway.sh` 22.8 s); master got the 30 Hz frame clock meanwhile (`FramePacing.ts` only).
+      Its ROADMAP edit adds a status paragraph to 4b. After merging: `yarn build`, both unit suites (compare counts:
+      `yarn test` runs compiled `dist/`), `test-gateway.sh`.
+   2. **`XDG_CURRENT_DESKTOP=nebula`** in our sessions (today `greenfield`; find where the session sets it). Check
+      what reads it: `portals.conf` lookup (`nebula-portals.conf` later), `OnlyShowIn`/`NotShowIn` in desktop entries
+      (the Apps menu), autostart. Desktop entries limited to `GNOME` or `KDE` shouldn't start showing or vanish by
+      accident: say what changed.
+   3. **The desktop's defaults for apps that read GSettings** (GTK before 4.21 outside Flatpak, and Chrome through
+      GTK: they don't use the Settings portal, see 4b). Supply `org.gnome.desktop.wm.preferences` `button-layout =
+      ':minimize,maximize,close'` (Windows style, like our frames) to the apps of our sessions only, the standard way:
+      a dconf profile (`DCONF_PROFILE` in the session's environment) whose first layer is the user's own database
+      (`user-db:user`, so whatever the user set explicitly still wins, and writes go there as usual) above a nebula
+      defaults database. Rules:
+      - Don't change the user's own settings (no `gsettings set`/`dconf write` of their database) and nothing
+        machine-wide (`/etc`, `/usr/share/glib-2.0/schemas` overrides): the user's other desktops on the same machine
+        must be unaffected.
+      - First find out whether the defaults database can live outside `/etc/dconf/db` without root (dconf profiles'
+        `file-db:` line, and the dconf version on Ubuntu 24.04; `dconf compile` builds the database). If it needs a
+        system install step, implement what's possible, document the step for the install script (Lower priority
+        item: install script), and say so.
+      - Keep nebula's desktop settings (the button layout now; the color scheme later) in one place in the code, so
+        the portal backend (step 4) serves the same values.
+      - Verify: inside a session, `gsettings get org.gnome.desktop.wm.preferences button-layout` (with the session's
+        environment) gives `':minimize,maximize,close'`; gtk4-demo shows minimize, maximize and close (an e2e check
+        if cheap: gtk4-demo is optional in `decorations.sh`); by hand Chrome. The user's own value outside our
+        sessions is still `'appmenu:close'`.
+   4. **Later, with dark mode (not now):** the nebula Settings backend for `xdg-desktop-portal` from 4b (for Flatpak
+      apps, GTK 4.21 and newer, Qt), serving the same values. `xdg-desktop-portal` 1.18 finds backends' `.portal`
+      files only in `/usr/share/xdg-desktop-portal/portals` or `XDG_DESKTOP_PORTAL_DIR`: an install-script step.
+   - For the agent: name anything new "nebula" (never "greenfield"); tests under a minute, on spare ports
+     (`GATEWAY_PORT`); never kill processes by name; never read `human_notes.txt`. To try it by hand the user restarts
+     the gateway and starts a new session (protocol 14).
 
 ### First extra feature
 
