@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
@@ -8,6 +8,8 @@ import {
   nebulaDesktopSettings,
   schemaPath,
   toDconfDatabase,
+  dconfDir,
+  profileText,
   toKeyfile,
   writeDconfProfile,
 } from '../nebula-settings'
@@ -65,7 +67,7 @@ test('the database holds the settings as string variants (read like dconf does)'
   const db = toDconfDatabase()
   const value = lookup(db, '/org/gnome/desktop/wm/preferences/button-layout')
   assert.ok(value)
-  assert.equal(Buffer.compare(value, Buffer.from(":minimize,maximize,close\0\0s")), 0)
+  assert.equal(Buffer.compare(value, Buffer.from(':minimize,maximize,close\0\0s')), 0)
   assert.equal(lookup(db, '/org/gnome/desktop/wm/preferences/other'), undefined)
 })
 
@@ -93,4 +95,11 @@ test('the profile has the user layer first, then our defaults', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('the build generated the profile and database in the one place sessions use', () => {
+  const profile = path.join(dconfDir, 'profile')
+  assert.ok(existsSync(profile))
+  assert.equal(readFileSync(profile, 'utf8'), profileText(path.join(dconfDir, 'defaults.db')))
+  assert.deepEqual(readFileSync(path.join(dconfDir, 'defaults.db')), toDconfDatabase())
 })

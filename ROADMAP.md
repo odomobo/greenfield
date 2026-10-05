@@ -996,13 +996,15 @@ single large item never stalls the link. Initial window before any estimate: 64 
       what reads it: `portals.conf` lookup (`nebula-portals.conf` later), `OnlyShowIn`/`NotShowIn` in desktop entries
       (the Apps menu), autostart. Desktop entries limited to `GNOME` or `KDE` shouldn't start showing or vanish by
       accident: say what changed.
-   3. **Done** (`nebula-settings.ts` is the one place for the desktop's settings; `session-environment.ts` writes a
-      dconf profile `user-db:user` + `file-db:<abs path>` and a defaults database to `$XDG_RUNTIME_DIR/nebula-dconf/`
-      and sets `DCONF_PROFILE`. dconf 0.40 (Ubuntu 24.04) supports `file-db:` and an absolute `DCONF_PROFILE`, so no
-      root and no install step; `dconf-cli` isn't installed by default, so the database (GVDB) is written by our own
+   3. **Done** (`nebula-settings.ts` is the one place for the desktop's settings; the build
+      (`build-dconf.js`) writes a dconf profile `user-db:user` + `file-db:<abs path>` and a defaults database to one
+      place for all users, `packages/gateway/dist/dconf/`, and `session-environment.ts` sets `DCONF_PROFILE` to it. dconf 0.40 (Ubuntu 24.04) supports `file-db:` and an absolute `DCONF_PROFILE`, so no
+      root; `dconf-cli` isn't installed by default, so the database (GVDB) is written by our own
       code, checked against `dconf compile`'s output and read by libdconf/`gsettings`. `DCONF_PROFILE` is not in
       `dbus-update-activation-environment` (the bus is the user's, shared with their other desktops). For the install
-      script: `toKeyfile()` gives the keyfile if a system-wide database is ever wanted. Checked in `decorations.sh`
+      script: run `node dist/build-dconf.js` where nebula is installed (the profile holds the database's absolute path;
+      a session refuses a profile naming another database); `toKeyfile()` gives a keyfile if dconf's own system
+      databases are ever wanted. Checked in `decorations.sh`
       (gsettings in a session; screenshot of gtk4-demo: minimize, maximize, close) and unit tests
       (`nebula-settings.test.ts`); outside our sessions the user's value is still `'appmenu:close'`; compositor-proxy
       156, viewer 79, gateway 16 unit tests, `test-gateway.sh` 23 s; Chrome by hand). Was: **The desktop's defaults for apps that read GSettings** (GTK before 4.21 outside Flatpak, and Chrome through
@@ -1089,7 +1091,8 @@ single large item never stalls the link. Initial window before any estimate: 64 
 ### Last
 
 13. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
-    is manual (see `packages/gateway` docs). Could later also enable kernel BBR (see
+    is manual (see `packages/gateway` docs). Must run `node packages/gateway/dist/build-dconf.js` in the installed tree
+    (regenerates the dconf profile with the installed path, see 4c step 3). Could later also enable kernel BBR (see
     [Transport and congestion control](#transport-and-congestion-control)); not for now, to keep installation simple.
 
 14. **Two-factor sign-in via PAM prompts** (lowest priority of all). Only makes sense once the core infrastructure is
