@@ -1,4 +1,4 @@
-import { Rect } from './gl/renderer'
+import type { Rect } from './windows'
 
 export type Easing = (t: number) => number
 

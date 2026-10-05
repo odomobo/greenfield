@@ -1,6 +1,8 @@
 import { Connection } from './connection'
+import { AlphaCompositor } from './alpha-video'
 import { KeyFrameNeeded, SurfaceDecoder } from './decoder'
-import { Rect, Renderer } from './gl/renderer'
+import { SurfaceView } from './surface-view'
+import { WindowView } from './window-view'
 import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
 import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 import { modifiersOf } from './modifiers'
@@ -8,7 +10,8 @@ import { ClipboardSync, isPasteChord } from './clipboard'
 import { dragHasFiles, dropAllowed, droppedFiles, uploadFiles } from './file-drop'
 import { PointerLock } from './pointer-lock'
 import { wheelClick } from './wheel'
-import { acceptsInput, cursorRect, mapRect, rootWindow, stackChildrenAboveParents } from './windows'
+import { acceptsInput, cursorRect, mapRect, Rect, rootWindow, stackChildrenAboveParents } from './windows'
+import { isWholePixelScale, Size } from './surface-geometry'
 import { WindowSync } from './window-sync'
 import { resizedRect } from './resize'
 import {
@@ -26,8 +29,6 @@ type WindowChange = DistributiveOmit<Extract<ViewerMessage, { seq: number }>, 's
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 
 type Pick = { window: SceneWindow; surface: string; sx: number; sy: number }
-
-type Size = { width: number; height: number }
 
 /**
  * A Move or Size from the window menu (not asked for by the app): it follows the pointer without a button held, keys
@@ -98,6 +99,11 @@ export type ShellWindow = SceneWindow & { shownMinimized: boolean; icon?: string
  * The viewer side of a session: shows the server's window scene and acts as its window manager. Everything that
  * doesn't need session state happens here (rendering, hit testing, implicit grabs, interactive move/resize, placement);
  * decisions are reported to the server, which stores them.
+ *
+ * The desktop is an element holding one element per window (window-view.ts), stacked in DOM order, each with a canvas
+ * per surface (surface-view.ts): content is drawn into those canvases as it arrives, and the layout (moves, stretching
+ * while resizing, animations) is CSS transforms applied in a requestAnimationFrame callback (`layout`) when something
+ * changed. The browser does the compositing, clipping and hit testing.
  */
 export class Desktop {
   private windows: SceneWindow[] = []
@@ -115,6 +121,14 @@ export class Desktop {
   private output: Size = { width: 0, height: 0 }
   private readonly placementSent = new Set<string>()
   private readonly decoders = new Map<string, SurfaceDecoder>()
+  /** the content of every surface that has had any (also surfaces that aren't in the scene: cursors, drag icons) */
+  private readonly surfaceViews = new Map<string, SurfaceView>()
+  private readonly windowViews = new Map<string, WindowView>()
+  /** the windows' elements; the layer above holds the client cursor and the drag icon */
+  private readonly windowLayer = document.createElement('div')
+  private readonly floatingLayer = document.createElement('div')
+  /** one WebGL context for all video with alpha */
+  private readonly alphaCompositor = new AlphaCompositor()
   private readonly keyFrameRequested = new Set<string>()
   private cursor: Cursor = { kind: 'default' }
   /** a drag and drop between remote apps is going on (the server says so), with its icon surface */
@@ -152,20 +166,26 @@ export class Desktop {
   /** the click that finished a menu interaction: its release isn't the app's */
   private swallowRelease = false
 
-  private renderScheduled = false
+  private layoutScheduled = false
   private lastFrameTimestamp = 0
   private refreshInterval = 16
 
+  /**
+   * `container` is the element the desktop is shown in: it gets the keyboard, the pointer (and its capture and lock)
+   * and the window elements.
+   */
   constructor(
-    private readonly canvas: HTMLCanvasElement,
-    private readonly renderer: Renderer,
+    private readonly container: HTMLElement,
     private readonly connection: Connection,
   ) {
+    this.windowLayer.className = 'window-layer'
+    this.floatingLayer.className = 'floating-layer'
+    container.append(this.windowLayer, this.floatingLayer)
     this.pointerLock = new PointerLock(
       {
-        request: () => canvas.requestPointerLock() as Promise<void> | void,
+        request: () => container.requestPointerLock() as Promise<void> | void,
         exit: () => document.exitPointerLock(),
-        locked: () => document.pointerLockElement === canvas,
+        locked: () => document.pointerLockElement === container,
       },
       (message) => connection.send(message),
     )
@@ -175,9 +195,9 @@ export class Desktop {
     // Observing the size in device pixels also catches pixel ratio changes (zoom, another monitor) where supported.
     const resizeObserver = new ResizeObserver(() => this.outputChanged())
     try {
-      resizeObserver.observe(canvas, { box: 'device-pixel-content-box' })
+      resizeObserver.observe(container, { box: 'device-pixel-content-box' })
     } catch {
-      resizeObserver.observe(canvas)
+      resizeObserver.observe(container)
     }
     this.watchPixelRatio()
     // zooming and moving between monitors also fire resize (the media query alone isn't reliable everywhere)
@@ -193,17 +213,26 @@ export class Desktop {
   /** The scale last sent to the server. */
   private reportedScale = 1
 
-  /** The canvas was resized or the device pixel ratio changed (browser zoom, another monitor). */
+  /** The size of the desktop in CSS pixels, and the device pixel ratio. */
+  private measureOutput(): { width: number; height: number; scale: number } {
+    return {
+      width: Math.max(1, Math.round(this.container.clientWidth)),
+      height: Math.max(1, Math.round(this.container.clientHeight)),
+      scale: window.devicePixelRatio || 1,
+    }
+  }
+
+  /** The desktop was resized or the device pixel ratio changed (browser zoom, another monitor). */
   private outputChanged() {
-    const { width, height, scale } = this.renderer.resize()
+    const { width, height, scale } = this.measureOutput()
     this.output = { width, height }
     this.reportedScale = scale
     this.connection.send({ type: 'output', width, height, scale })
     this.keepWindowsVisible()
-    this.scheduleRender()
+    this.scheduleLayout()
   }
 
-  /** A pixel ratio change doesn't always resize the canvas (e.g. moving the browser to another monitor). */
+  /** A pixel ratio change doesn't always resize the desktop (e.g. moving the browser to another monitor). */
   private watchPixelRatio() {
     matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
       'change',
@@ -220,11 +249,11 @@ export class Desktop {
    */
   reset(): void {
     this.clear()
-    const { width, height, scale } = this.renderer.resize()
+    const { width, height, scale } = this.measureOutput()
     this.output = { width, height }
     this.reportedScale = scale
     this.connection.send({ type: 'hello', output: { width, height, scale } })
-    if (document.hasFocus() && document.activeElement === this.canvas) {
+    if (document.hasFocus() && document.activeElement === this.container) {
       this.connection.send({ type: 'focus', focused: true })
     }
   }
@@ -239,7 +268,14 @@ export class Desktop {
     this.decoders.clear()
     this.frameSizes.clear()
     this.keyFrameRequested.clear()
-    this.renderer.clearAll()
+    for (const view of this.windowViews.values()) {
+      view.dispose()
+    }
+    this.windowViews.clear()
+    for (const view of this.surfaceViews.values()) {
+      view.dispose()
+    }
+    this.surfaceViews.clear()
     this.windows = []
     this.sync.clear()
     for (const override of this.resizeOverrides.values()) {
@@ -255,7 +291,7 @@ export class Desktop {
     this.interaction?.menu?.stop()
     this.interaction = undefined
     this.buttons = 0
-    this.scheduleRender()
+    this.scheduleLayout()
     this.onWindowsChanged([])
   }
 
@@ -270,7 +306,7 @@ export class Desktop {
         shownX: position.x,
         shownY: position.y,
         shownGeometry: this.shownGeometry(window),
-        hasContent: window.surfaces.every((surface) => this.renderer.hasContent(surface.id)),
+        hasContent: window.surfaces.every((surface) => this.surfaceViews.get(surface.id)?.hasContent),
       }
     })
   }
@@ -359,7 +395,7 @@ export class Desktop {
 
   /** Give the keyboard to the session. */
   focus(): void {
-    this.canvas.focus()
+    this.container.focus()
   }
 
   /**
@@ -395,7 +431,7 @@ export class Desktop {
     }
     this.finishMenuInteraction(false)
     this.activateWindow(id)
-    this.pointer = this.canvasPoint(this.clientPointer)
+    this.pointer = this.outputPoint(this.clientPointer)
     this.interaction = {
       mode: 'move',
       window: id,
@@ -403,7 +439,7 @@ export class Desktop {
       startPosition: this.windowPosition(window),
       menu: this.menuInteraction(),
     }
-    this.canvas.style.cursor = 'move'
+    this.container.style.cursor = 'move'
   }
 
   /** The window menu's Size: the edge or corner nearest the pointer (or the first arrow key's) follows it. */
@@ -414,7 +450,7 @@ export class Desktop {
     }
     this.finishMenuInteraction(false)
     this.activateWindow(id)
-    this.pointer = this.canvasPoint(this.clientPointer)
+    this.pointer = this.outputPoint(this.clientPointer)
     const startRect = this.shownGeometry(window)
     const edges = nearestEdges(startRect, this.pointer)
     const previous = this.resizeOverrides.get(window.id)
@@ -428,11 +464,11 @@ export class Desktop {
       startRect,
       menu: { ...this.menuInteraction(), original: startRect },
     }
-    this.canvas.style.cursor = resizeCursor(edges)
+    this.container.style.cursor = resizeCursor(edges)
   }
 
-  private canvasPoint(client: Point): Point {
-    const rect = this.canvas.getBoundingClientRect()
+  private outputPoint(client: Point): Point {
+    const rect = this.container.getBoundingClientRect()
     return { x: client.x - rect.left, y: client.y - rect.top }
   }
 
@@ -440,7 +476,7 @@ export class Desktop {
   private menuInteraction(): MenuInteraction {
     const move = (event: PointerEvent) => {
       this.clientPointer = { x: event.clientX, y: event.clientY }
-      this.pointer = this.canvasPoint(this.clientPointer)
+      this.pointer = this.outputPoint(this.clientPointer)
       if (this.interaction?.menu) {
         this.continueInteraction()
       }
@@ -508,7 +544,7 @@ export class Desktop {
           interaction.menu.nudge = { x: 0, y: 0 }
           interaction.edges = edges
           interaction.menu.keyChosen = true
-          this.canvas.style.cursor = resizeCursor(edges)
+          this.container.style.cursor = resizeCursor(edges)
         }
       }
       interaction.menu.nudge = {
@@ -539,9 +575,9 @@ export class Desktop {
       this.sync.setMinimized(root.id, false)
     }
     this.sendWindowChange({ type: 'window.activate', window: id })
-    this.canvas.focus()
+    this.container.focus()
     this.notifyWindowsChanged()
-    this.scheduleRender()
+    this.scheduleLayout()
   }
 
   minimizeWindow(id: string): void {
@@ -555,7 +591,7 @@ export class Desktop {
     // the server moves the keyboard focus to the next window
     this.sendWindowChange({ type: 'window.minimize', window: window.id, minimized: true })
     this.notifyWindowsChanged()
-    this.scheduleRender()
+    this.scheduleLayout()
   }
 
   setMaximized(id: string, maximized: boolean): void {
@@ -592,32 +628,104 @@ export class Desktop {
   }
 
   /**
-   * The window's current content scaled to fit maxWidth x maxHeight, for previews. Works for minimized windows too.
+   * Draw the window's current content, scaled to fit maxWidth x maxHeight, into a canvas (resized to the image), for
+   * previews. Works for minimized windows too (their canvases keep their content). False if there's nothing to draw.
    */
-  renderPreview(id: string, maxWidth: number, maxHeight: number): ImageData | undefined {
+  drawPreview(id: string, target: HTMLCanvasElement, maxWidth: number, maxHeight: number): boolean {
     const window = this.windows.find((w) => w.id === id)
     if (window === undefined || window.geometry.width <= 0 || window.geometry.height <= 0) {
-      return undefined
+      return false
     }
     const { geometry } = window
     const scale = Math.min(maxWidth / geometry.width, maxHeight / geometry.height, 1)
     const width = Math.max(1, Math.round(geometry.width * scale))
     const height = Math.max(1, Math.round(geometry.height * scale))
+    if (target.width !== width || target.height !== height) {
+      target.width = width
+      target.height = height
+    }
+    const context = target.getContext('2d')
+    if (context === null) {
+      return false
+    }
+    context.clearRect(0, 0, width, height)
+    context.imageSmoothingQuality = 'high'
     // with its child windows (dialogs), cropped to the window
-    const draws = this.windows
-      .filter((w) => this.rootOf(w) === window)
-      .flatMap((w) =>
-        w.surfaces.map((surface) => ({
-          surface: surface.id,
-          rect: {
-            x: (w.x - window.x + surface.x - geometry.x) * scale,
-            y: (w.y - window.y + surface.y - geometry.y) * scale,
-            width: surface.width * scale,
-            height: surface.height * scale,
-          },
-        })),
-      )
-    return this.renderer.snapshot(draws, width, height)
+    for (const w of this.windows.filter((w) => this.rootOf(w) === window)) {
+      for (const surface of w.surfaces) {
+        const view = this.surfaceViews.get(surface.id)
+        if (view?.hasContent) {
+          context.drawImage(
+            view.canvas,
+            (w.x - window.x + surface.x - geometry.x) * scale,
+            (w.y - window.y + surface.y - geometry.y) * scale,
+            surface.width * scale,
+            surface.height * scale,
+          )
+        }
+      }
+    }
+    return true
+  }
+
+  /**
+   * Luminance (0-255) of an output region, top to bottom, one value per output pixel (sampled at its center), of the
+   * windows composited as they are shown. For tests.
+   */
+  debugReadLuma(x: number, y: number, width: number, height: number): number[] {
+    const ratio = window.devicePixelRatio || 1
+    const bufferX = Math.floor(x * ratio)
+    const bufferY = Math.floor(y * ratio)
+    const bufferWidth = Math.max(1, Math.ceil((x + width) * ratio) - bufferX)
+    const bufferHeight = Math.max(1, Math.ceil((y + height) * ratio) - bufferY)
+    const canvas = document.createElement('canvas')
+    canvas.width = bufferWidth
+    canvas.height = bufferHeight
+    const context = canvas.getContext('2d', { willReadFrequently: true })!
+    context.fillStyle = getComputedStyle(this.container.closest('#desktop-view') ?? this.container).backgroundColor
+    context.fillRect(0, 0, bufferWidth, bufferHeight)
+    context.setTransform(ratio, 0, 0, ratio, -bufferX, -bufferY)
+    for (const window of this.windows) {
+      if (this.isHidden(window)) {
+        continue
+      }
+      context.globalAlpha = this.animatedState(window)?.opacity ?? 1
+      for (const { surface, rect } of this.surfaceRects(window)) {
+        const view = this.surfaceViews.get(surface.id)
+        if (view?.hasContent) {
+          context.imageSmoothingEnabled = !isWholePixelScale(rect, view.canvas, ratio)
+          context.drawImage(view.canvas, rect.x, rect.y, rect.width, rect.height)
+        }
+      }
+    }
+    const pixels = context.getImageData(0, 0, bufferWidth, bufferHeight).data
+    const luma: number[] = []
+    for (let row = 0; row < height; row++) {
+      const bufferRow = Math.min(bufferHeight - 1, Math.floor((y + row + 0.5) * ratio) - bufferY)
+      for (let column = 0; column < width; column++) {
+        const bufferColumn = Math.min(bufferWidth - 1, Math.floor((x + column + 0.5) * ratio) - bufferX)
+        const i = (bufferRow * bufferWidth + bufferColumn) * 4
+        luma.push(Math.round(0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]))
+      }
+    }
+    return luma
+  }
+
+  /** The size of a surface's content (the app's buffer, in pixels, whatever size the surface is shown at). For tests. */
+  debugContentSize(surface: string): Size | undefined {
+    return this.surfaceViews.get(surface)?.contentSize
+  }
+
+  /**
+   * The pixels of a region of a surface's own content (RGBA, not premultiplied, row by row), straight from its
+   * canvas. For tests.
+   */
+  debugSurfacePixels(surface: string, x: number, y: number, width: number, height: number): number[] | undefined {
+    const view = this.surfaceViews.get(surface)
+    if (view === undefined || !view.hasContent) {
+      return undefined
+    }
+    return [...view.canvas.getContext('2d', { willReadFrequently: true })!.getImageData(x, y, width, height).data]
   }
 
   // -------------------------------------------------------------------------------------------------------------------
@@ -626,7 +734,7 @@ export class Desktop {
   /** The taskbar button rect, in output coordinates, or a spot above the window if there's no button. */
   private minimizedRect(window: SceneWindow, from: Rect): Rect {
     const target = this.minimizeTarget(window.id)
-    const canvasRect = this.canvas.getBoundingClientRect()
+    const canvasRect = this.container.getBoundingClientRect()
     const centerX = target ? target.x + target.width / 2 - canvasRect.x : from.x + from.width / 2
     const centerY = target ? target.y + target.height / 2 - canvasRect.y : -24
     // shrink to about twice the button's width
@@ -690,7 +798,7 @@ export class Desktop {
       fromOpacity: 1,
       toOpacity: 1,
     })
-    this.scheduleRender()
+    this.scheduleLayout()
   }
 
   /** Where a window rests when it's not animating: its scene geometry (or the rect of a resize in progress). */
@@ -772,7 +880,7 @@ export class Desktop {
       if (state.kind === 'maximize' || state.kind === 'unmaximize') {
         if (state.deadline === undefined) {
           state.deadline = now + RESIZE_SETTLE_TIMEOUT
-          setTimeout(() => this.scheduleRender(), RESIZE_SETTLE_TIMEOUT + 1)
+          setTimeout(() => this.scheduleLayout(), RESIZE_SETTLE_TIMEOUT + 1)
         }
         // hold the end rect until the client committed; a scene update or the deadline ends it
         if (!this.animationSettled(window, state) && now < state.deadline) {
@@ -805,7 +913,7 @@ export class Desktop {
         break
       case 'drag':
         this.drag = message.active ? { icon: message.icon } : undefined
-        this.scheduleRender()
+        this.scheduleLayout()
         break
       case 'cursor':
         this.cursor = message
@@ -863,8 +971,8 @@ export class Desktop {
         (decoded) => {
           this.videoFramesDecoded++
           this.keyFrameRequested.delete(surface)
-          this.renderer.upload(surface, decoded)
-          this.scheduleRender()
+          this.viewFor(surface).drawFrame(decoded, this.alphaCompositor)
+          this.contentChanged(surface)
         },
         (error) => {
           this.videoFramesFailed++
@@ -886,12 +994,30 @@ export class Desktop {
         (decoded) => {
           this.keyFrameRequested.delete(surface)
           this.patchesApplied++
-          this.renderer.patch(surface, decoded)
-          this.scheduleRender()
+          this.viewFor(surface).drawPatch(decoded)
+          this.contentChanged(surface)
         },
         (error) => this.decodeFailed(surface, error),
       )
       .finally(applied)
+  }
+
+  /** The content of a surface, created when first needed (it's in the DOM once a window or the cursor shows it). */
+  private viewFor(surface: string): SurfaceView {
+    let view = this.surfaceViews.get(surface)
+    if (view === undefined) {
+      view = new SurfaceView(surface)
+      this.surfaceViews.set(surface, view)
+    }
+    return view
+  }
+
+  /** A surface got new content: the layout may have to follow (its size), and a cursor or drag icon moves with it. */
+  private contentChanged(surface: string) {
+    this.scheduleLayout()
+    if (this.isFloating(surface)) {
+      this.placeFloating()
+    }
   }
 
   /** Ask the server for the whole surface again (once until something decodes). */
@@ -983,17 +1109,18 @@ export class Desktop {
     }
     // also covers positions chosen by the server or client (e.g. dialogs) and windows coming back after a reattach
     this.keepWindowsVisible()
-    // Content of surfaces that are gone. The cursor surface isn't part of any window.
-    const cursorSurface = this.cursor.kind === 'surface' ? this.cursor.surface : this.drag?.icon?.surface
-    for (const surface of [...this.decoders.keys()]) {
-      if (!surfaces.has(surface) && surface !== cursorSurface && !this.isLiveSurface(surface)) {
+    // Content of surfaces that are gone. The cursor and drag icon surfaces aren't part of any window.
+    for (const surface of new Set([...this.decoders.keys(), ...this.surfaceViews.keys()])) {
+      if (!surfaces.has(surface) && !this.isFloating(surface) && !this.isLiveSurface(surface)) {
         this.decoders.get(surface)?.close()
         this.decoders.delete(surface)
         this.frameSizes.delete(surface)
-        this.renderer.delete(surface)
+        this.surfaceViews.get(surface)?.dispose()
+        this.surfaceViews.delete(surface)
       }
     }
-    this.scheduleRender()
+    this.syncWindowViews()
+    this.scheduleLayout()
     this.notifyWindowsChanged()
   }
 
@@ -1047,28 +1174,28 @@ export class Desktop {
   }
 
   /**
-   * Where each surface of a window is shown, in output coordinates. A window being resized is stretched so its
-   * geometry fills the override rect.
+   * Where the window's origin (the origin of its surfaces' coordinates) is shown, in output coordinates, and by how
+   * much its content is stretched. A window being resized is stretched so its geometry fills the override rect.
    */
-  private surfaceRects(window: SceneWindow): { surface: SceneSurface; rect: Rect; scaleX: number; scaleY: number }[] {
+  private windowTransform(window: SceneWindow): { x: number; y: number; scaleX: number; scaleY: number } {
     const target = this.animatedState(window)?.rect ?? this.resizeOverrides.get(window.id)?.rect
     const { geometry } = window
     if (target === undefined || geometry.width <= 0 || geometry.height <= 0) {
-      const position = this.windowPosition(window)
-      return window.surfaces.map((surface) => ({
-        surface,
-        rect: { x: position.x + surface.x, y: position.y + surface.y, width: surface.width, height: surface.height },
-        scaleX: 1,
-        scaleY: 1,
-      }))
+      return { ...this.windowPosition(window), scaleX: 1, scaleY: 1 }
     }
     const scaleX = target.width / geometry.width
     const scaleY = target.height / geometry.height
+    return { x: target.x - geometry.x * scaleX, y: target.y - geometry.y * scaleY, scaleX, scaleY }
+  }
+
+  /** Where each surface of a window is shown, in output coordinates (see windowTransform). */
+  private surfaceRects(window: SceneWindow): { surface: SceneSurface; rect: Rect; scaleX: number; scaleY: number }[] {
+    const { x, y, scaleX, scaleY } = this.windowTransform(window)
     return window.surfaces.map((surface) => ({
       surface,
       rect: {
-        x: target.x + (surface.x - geometry.x) * scaleX,
-        y: target.y + (surface.y - geometry.y) * scaleY,
+        x: x + surface.x * scaleX,
+        y: y + surface.y * scaleY,
         width: surface.width * scaleX,
         height: surface.height * scaleY,
       },
@@ -1113,7 +1240,7 @@ export class Desktop {
       const visible = this.keepVisible(window, position)
       if (visible.x !== position.x || visible.y !== position.y) {
         this.moveWindow(window.id, visible)
-        this.scheduleRender()
+        this.scheduleLayout()
       }
     }
   }
@@ -1121,48 +1248,122 @@ export class Desktop {
   // -------------------------------------------------------------------------------------------------------------------
   // rendering
 
-  scheduleRender(): void {
-    if (this.renderScheduled) {
+  /** Windows that came or went, and their stacking order: the window elements follow the scene. */
+  private syncWindowViews() {
+    const live = new Set<string>()
+    let expected = this.windowLayer.firstChild
+    for (const window of this.windows) {
+      live.add(window.id)
+      let view = this.windowViews.get(window.id)
+      if (view === undefined) {
+        view = new WindowView(window.id)
+        this.windowViews.set(window.id, view)
+      }
+      view.setSurfaces(window.surfaces.map((surface) => this.viewFor(surface.id)))
+      // the windows are stacked in the scene's order, bottom to top (moving only what's out of place)
+      if (view.element === expected) {
+        expected = expected.nextSibling
+      } else {
+        this.windowLayer.insertBefore(view.element, expected)
+      }
+    }
+    for (const [id, view] of [...this.windowViews]) {
+      if (!live.has(id)) {
+        view.dispose()
+        this.windowViews.delete(id)
+      }
+    }
+  }
+
+  /** Apply the layout (see `layout`) in the next animation frame, once however often it's asked for. */
+  scheduleLayout(): void {
+    if (this.layoutScheduled) {
       return
     }
-    this.renderScheduled = true
+    this.layoutScheduled = true
     requestAnimationFrame(() => {
-      this.renderScheduled = false
-      this.render()
+      this.layoutScheduled = false
+      this.layout()
     })
   }
 
-  private render() {
+  /**
+   * Move, stretch and fade the window elements to where they are shown now (animations, resizes and moves in progress
+   * included). Content isn't drawn here: that happens when it arrives.
+   */
+  private layout() {
     const animating = this.advanceAnimations()
-    this.renderer.beginFrame()
+    const pixelRatio = window.devicePixelRatio || 1
     for (const window of this.windows) {
-      if (this.isHidden(window)) {
+      const view = this.windowViews.get(window.id)
+      if (view === undefined) {
         continue
       }
-      const opacity = this.animatedState(window)?.opacity ?? 1
-      for (const { surface, rect } of this.surfaceRects(window)) {
-        this.renderer.drawSurface(surface.id, rect, opacity)
-      }
+      const kind = this.animations.get(this.rootOf(window).id)?.kind
+      const { x, y, scaleX, scaleY } = this.windowTransform(window)
+      view.layout({
+        x,
+        y,
+        scaleX,
+        scaleY,
+        opacity: this.animatedState(window)?.opacity ?? 1,
+        hidden: this.isHidden(window),
+        inert: kind === 'minimize' || kind === 'restore',
+        pixelRatio,
+        surfaces: window.surfaces.map(({ x, y, width, height }) => ({ x, y, width, height })),
+      })
     }
     if (animating) {
-      this.scheduleRender()
+      this.scheduleLayout()
+    }
+    this.placeFloating()
+  }
+
+  /** Whether the surface is the client cursor's or the drag's icon. */
+  private isFloating(surface: string): boolean {
+    return (
+      (this.cursor.kind === 'surface' && this.cursor.surface === surface) || this.drag?.icon?.surface === surface
+    )
+  }
+
+  /**
+   * The client cursor and the drag icon follow the pointer in a layer above the windows (they don't take part in
+   * hit testing), moved right when the pointer does.
+   */
+  private placeFloating() {
+    const shown = new Set<SurfaceView>()
+    const place = (surface: string, rect: Rect | undefined) => {
+      const view = this.surfaceViews.get(surface)
+      if (view === undefined || rect === undefined || !view.hasContent) {
+        return
+      }
+      shown.add(view)
+      if (view.canvas.parentElement !== this.floatingLayer) {
+        this.floatingLayer.append(view.canvas)
+      }
+      view.canvas.style.transform = `translate(${rect.x}px, ${rect.y}px)`
+      view.place({ x: 0, y: 0, width: rect.width, height: rect.height }, rect, window.devicePixelRatio || 1)
     }
     if (this.cursor.kind === 'surface') {
       const { surface, hotspot } = this.cursor
-      const rect = cursorRect(this.pointer, hotspot, this.cursor.size, this.cursorSize(surface))
-      if (rect) {
-        this.renderer.drawSurface(surface, rect)
-      }
+      place(surface, cursorRect(this.pointer, hotspot, this.cursor.size, this.cursorSize(surface)))
     }
     const icon = this.drag?.icon
     const iconSize = icon && this.cursorSize(icon.surface)
     if (icon && iconSize) {
-      this.renderer.drawSurface(icon.surface, {
+      place(icon.surface, {
         x: this.pointer.x + icon.x,
         y: this.pointer.y + icon.y,
         width: iconSize.width,
         height: iconSize.height,
       })
+    }
+    // what isn't the cursor or the icon anymore goes (its content stays for the next time it's used)
+    for (const element of [...this.floatingLayer.children]) {
+      const view = this.surfaceViews.get((element as HTMLElement).dataset.surface ?? '')
+      if (view === undefined || !shown.has(view)) {
+        element.remove()
+      }
     }
   }
 
@@ -1178,39 +1379,41 @@ export class Desktop {
   private applyCursor() {
     switch (this.cursor.kind) {
       case 'default':
-        this.canvas.style.cursor = 'default'
+        this.container.style.cursor = 'default'
         break
       case 'hidden':
       case 'surface':
-        // client cursors are drawn by the renderer
-        this.canvas.style.cursor = 'none'
+        // client cursors are drawn by us (the floating layer)
+        this.container.style.cursor = 'none'
         break
       case 'named':
-        this.canvas.style.cursor = this.cursor.name
+        this.container.style.cursor = this.cursor.name
         break
     }
-    this.scheduleRender()
+    this.scheduleLayout()
   }
 
   // -------------------------------------------------------------------------------------------------------------------
   // input
 
+  /**
+   * The surface under a point (output coordinates): the browser hit tests the stacked elements, top first; a surface
+   * whose input region doesn't cover the point (e.g. a client side shadow) lets input fall through to what's underneath.
+   */
   private pick(point: Point): Pick | undefined {
-    for (let w = this.windows.length - 1; w >= 0; w--) {
-      const window = this.windows[w]
-      const kind = this.animations.get(this.rootOf(window).id)?.kind
-      if (this.isHidden(window) || kind === 'minimize' || kind === 'restore') {
+    const bounds = this.container.getBoundingClientRect()
+    for (const element of document.elementsFromPoint(bounds.left + point.x, bounds.top + point.y)) {
+      const id = element instanceof HTMLCanvasElement ? element.dataset.surface : undefined
+      const window = id === undefined ? undefined : this.windows.find((w) => w.surfaces.some((s) => s.id === id))
+      const placed = window && this.surfaceRects(window).find(({ surface }) => surface.id === id)
+      if (window === undefined || placed === undefined) {
         continue
       }
-      const rects = this.surfaceRects(window)
-      for (let s = rects.length - 1; s >= 0; s--) {
-        const { surface, rect, scaleX, scaleY } = rects[s]
-        const sx = (point.x - rect.x) / scaleX
-        const sy = (point.y - rect.y) / scaleY
-        // outside the input region (e.g. a client side shadow) input goes to whatever is underneath
-        if (acceptsInput(surface, sx, sy)) {
-          return { window, surface: surface.id, sx, sy }
-        }
+      const { surface, rect, scaleX, scaleY } = placed
+      const sx = (point.x - rect.x) / scaleX
+      const sy = (point.y - rect.y) / scaleY
+      if (acceptsInput(surface, sx, sy)) {
+        return { window, surface: surface.id, sx, sy }
       }
     }
     return undefined
@@ -1251,11 +1454,11 @@ export class Desktop {
   }
 
   private installInputHandlers() {
-    const canvas = this.canvas
-    const point = (event: MouseEvent): Point => ({ x: event.offsetX, y: event.offsetY })
+    const container = this.container
+    const point = (event: MouseEvent): Point => this.outputPoint({ x: event.clientX, y: event.clientY })
 
-    canvas.addEventListener('contextmenu', (event) => event.preventDefault())
-    // (the release of a click that dropped a window may come outside the canvas)
+    container.addEventListener('contextmenu', (event) => event.preventDefault())
+    // (the release of a click that dropped a window may come outside the desktop)
     document.addEventListener('pointerup', () => {
       this.swallowRelease = false
     })
@@ -1267,7 +1470,7 @@ export class Desktop {
       { capture: true },
     )
 
-    canvas.addEventListener('pointermove', (event) => {
+    container.addEventListener('pointermove', (event) => {
       if (event.pointerType === 'touch') {
         this.touchEvent(event, 'move')
         return
@@ -1278,7 +1481,7 @@ export class Desktop {
       }
       this.pointer = point(event)
       if (this.cursor.kind === 'surface' || this.drag?.icon) {
-        this.scheduleRender()
+        this.placeFloating()
       }
       if (this.interaction) {
         this.continueInteraction()
@@ -1292,10 +1495,10 @@ export class Desktop {
       })
     })
 
-    canvas.addEventListener('pointerdown', (event) => {
+    container.addEventListener('pointerdown', (event) => {
       void this.clipboard.retryPending()
-      canvas.focus()
-      canvas.setPointerCapture(event.pointerId)
+      container.focus()
+      container.setPointerCapture(event.pointerId)
       this.pointerLock.gesture()
       if (event.pointerType === 'touch') {
         this.touchEvent(event, 'down')
@@ -1324,14 +1527,14 @@ export class Desktop {
     // The mouse's back/forward buttons (3/4) belong to the remote app, not the browser's history. Browsers navigate on
     // their release, so cancel every event of the press. (They're forwarded with the other buttons above and below.)
     for (const type of ['mousedown', 'mouseup', 'auxclick'] as const) {
-      canvas.addEventListener(type, (event) => {
+      container.addEventListener(type, (event) => {
         if (event.button === 3 || event.button === 4) {
           event.preventDefault()
         }
       })
     }
 
-    canvas.addEventListener('pointerup', (event) => {
+    container.addEventListener('pointerup', (event) => {
       if (event.pointerType === 'touch') {
         this.touchEvent(event, 'up')
         return
@@ -1361,7 +1564,7 @@ export class Desktop {
       }
     })
 
-    canvas.addEventListener('pointercancel', (event) => {
+    container.addEventListener('pointercancel', (event) => {
       if (event.pointerType === 'touch') {
         this.touchEvent(event, 'cancel')
         return
@@ -1375,7 +1578,7 @@ export class Desktop {
       this.buttons = 0
     })
 
-    canvas.addEventListener(
+    container.addEventListener(
       'wheel',
       (event) => {
         event.preventDefault()
@@ -1412,15 +1615,15 @@ export class Desktop {
         })
       }
     }
-    canvas.addEventListener('dragenter', fileDragOver)
-    canvas.addEventListener('dragover', fileDragOver)
-    canvas.addEventListener('dragleave', (event) => {
+    container.addEventListener('dragenter', fileDragOver)
+    container.addEventListener('dragover', fileDragOver)
+    container.addEventListener('dragleave', (event) => {
       if (this.fileDragAt && dragHasFiles(event.dataTransfer)) {
         this.fileDragAt = undefined
         this.connection.send({ type: 'file-drag', over: false, ...this.target(point(event), event.timeStamp) })
       }
     })
-    canvas.addEventListener('drop', (event) => {
+    container.addEventListener('drop', (event) => {
       if (!dragHasFiles(event.dataTransfer)) {
         return
       }
@@ -1481,16 +1684,16 @@ export class Desktop {
       this.clipboard.onPasteEvent(event.clipboardData?.getData('text/plain'))
     })
     window.addEventListener('focus', () => void this.clipboard.retryPending())
-    canvas.addEventListener('keydown', (event) => key(event, true))
-    canvas.addEventListener('keyup', (event) => key(event, false))
-    canvas.addEventListener('focus', () => this.connection.send({ type: 'focus', focused: true }))
-    canvas.addEventListener('blur', () => this.connection.send({ type: 'focus', focused: false }))
-    // A hidden page (another tab, a minimized browser) gets no key events either, even if the canvas keeps focus: the
+    container.addEventListener('keydown', (event) => key(event, true))
+    container.addEventListener('keyup', (event) => key(event, false))
+    container.addEventListener('focus', () => this.connection.send({ type: 'focus', focused: true }))
+    container.addEventListener('blur', () => this.connection.send({ type: 'focus', focused: false }))
+    // A hidden page (another tab, a minimized browser) gets no key events either, even if the desktop keeps focus: the
     // server releases the held keys when told the focus is gone.
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') {
         this.connection.send({ type: 'focus', focused: false })
-      } else if (document.activeElement === canvas) {
+      } else if (document.activeElement === container) {
         this.connection.send({ type: 'focus', focused: true })
       }
     })
@@ -1517,7 +1720,7 @@ export class Desktop {
    * mouse's: the finger counts as a pressed button for it.
    */
   private touchEvent(event: PointerEvent, phase: 'down' | 'move' | 'up' | 'cancel') {
-    const point = { x: event.offsetX, y: event.offsetY }
+    const point = this.outputPoint({ x: event.clientX, y: event.clientY })
     this.pointer = point
     if (phase === 'down') {
       const pick = this.pick(point)
@@ -1584,7 +1787,7 @@ export class Desktop {
         startPointer: this.pressPointer,
         startPosition: this.windowPosition(window),
         }
-      this.canvas.style.cursor = 'grabbing'
+      this.container.style.cursor = 'grabbing'
     } else {
       const startRect = this.shownGeometry(window)
       const previous = this.resizeOverrides.get(window.id)
@@ -1637,7 +1840,7 @@ export class Desktop {
     const x = edges & EDGE_LEFT ? rect.x + rect.width - geometry.width : rect.x
     const y = edges & EDGE_TOP ? rect.y + rect.height - geometry.height : rect.y
     this.moveWindow(window.id, this.keepVisible(window, { x: x - geometry.x, y: y - geometry.y }))
-    this.scheduleRender()
+    this.scheduleLayout()
   }
 
   private continueInteraction() {
@@ -1651,14 +1854,14 @@ export class Desktop {
       // shown where the pointer is right away (held against scenes while dragging); the server is told the final
       // position when the drag ends
       this.sync.setPosition(interaction.window, position)
-      this.scheduleRender()
+      this.scheduleLayout()
     } else {
       const rect = this.resizeRect(interaction)
       const override = this.resizeOverrides.get(interaction.window)
       if (override) {
         override.rect = rect
       }
-      this.scheduleRender()
+      this.scheduleLayout()
       // nothing is sent while dragging: the app is told the final size when the drag ends
     }
   }
@@ -1685,7 +1888,7 @@ export class Desktop {
         // Escape in Size: the window was never resized, nothing was sent
         clearTimeout(override.settleTimer)
         this.resizeOverrides.delete(interaction.window)
-        this.scheduleRender()
+        this.scheduleLayout()
         return
       }
       override.rect = rect
@@ -1707,7 +1910,7 @@ export class Desktop {
       if (this.clientCaughtUp(window, override.finalSize)) {
         this.settleResize(window)
       }
-      this.scheduleRender()
+      this.scheduleLayout()
     }
   }
 

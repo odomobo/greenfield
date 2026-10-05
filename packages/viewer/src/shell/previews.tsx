@@ -18,7 +18,7 @@ const PREVIEW_REFRESH_MS = 250
 /**
  * The window previews of a taskbar group, shown under its button: one card per window with its title, a close button and a
  * snapshot of its content, refreshed at a fixed rate straight onto the cards' canvases (no React
- * state - the images never pass through a render).
+ * state - the images never pass through a render, nor through JavaScript memory).
  */
 export function WindowPreview({ entry }: { entry: PreviewPopup }) {
   const { desktop } = useCore()
@@ -37,15 +37,7 @@ export function WindowPreview({ entry }: { entry: PreviewPopup }) {
 
   const refreshImages = useCallback(() => {
     for (const [id, canvas] of canvases.current) {
-      const image = desktop.renderPreview(id, PREVIEW_WIDTH, PREVIEW_HEIGHT)
-      if (image === undefined) {
-        continue
-      }
-      if (canvas.width !== image.width || canvas.height !== image.height) {
-        canvas.width = image.width
-        canvas.height = image.height
-      }
-      canvas.getContext('2d')?.putImageData(image, 0, 0)
+      desktop.drawPreview(id, canvas, PREVIEW_WIDTH, PREVIEW_HEIGHT)
     }
   }, [desktop])
 

@@ -8,28 +8,26 @@ import { PopupLayer } from '../shell/popup-layer'
 import { NotificationsPanel, Toasts } from '../shell/notifications'
 
 /**
- * The desktop: the taskbar at the top, the session canvas below it (the output of the remote compositor, see
- * desktop.ts) and the reconnect overlay. The core (connection, renderer, window manager, shell controller) is
- * mounted once behind the canvas ref (see app.tsx) and provided to the shell components through its context.
+ * The desktop: the taskbar at the top, the session output below it (the output of the remote compositor, see
+ * desktop.ts) and the reconnect overlay. The core (connection, window manager, shell controller) is
+ * mounted once behind the output ref (see app.tsx) and provided to the shell components through its context.
  */
 export function DesktopView({
   core,
-  canvasRef,
-  viewRef,
+  outputRef,
   appsMenuActions,
   onReconnect,
   onBackToSessions,
 }: {
   core: Core | null
-  canvasRef: RefObject<HTMLCanvasElement>
-  viewRef: RefObject<HTMLDivElement>
+  outputRef: RefObject<HTMLDivElement>
   appsMenuActions: AppsMenuActions
   onReconnect: () => void
   onBackToSessions: () => void
 }) {
   const view = useStore(appStore)
   const connection = view.connection
-  // the overlay covers the canvas whenever the session is unreachable; reconnecting shows its own message
+  // the overlay covers the output whenever the session is unreachable; reconnecting shows its own message
   const overlayHidden =
     connection.kind === 'connected' || connection.kind === 'connecting' || connection.kind === 'signed-out'
   const overlayMessage =
@@ -42,12 +40,12 @@ export function DesktopView({
           : ''
   return (
     <CoreContext.Provider value={core}>
-      <div id="desktop-view" ref={viewRef} hidden={view.view !== 'desktop'}>
+      <div id="desktop-view" hidden={view.view !== 'desktop'}>
         {/* the taskbar is empty until the core is mounted (the very first render only) */}
         {core === null ? <header id="taskbar" /> : <Taskbar />}
-        {/* the canvas is always there: the core is mounted behind it (app.tsx) */}
+        {/* the output is always there: the core is mounted behind it (app.tsx). Its content (the window elements) belongs to desktop.ts, not to React. */}
         <main id="output-container">
-          <canvas id="output" tabIndex={0} ref={canvasRef} />
+          <div id="output" tabIndex={0} ref={outputRef} />
           <div id="overlay" hidden={overlayHidden}>
             <div id="overlay-message">{overlayMessage}</div>
             {connection.kind === 'taken-over' && (
