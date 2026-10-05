@@ -37,6 +37,11 @@ Since wave 2 B, X11 apps run too (XWayland).
   (foot, Qt; also when the app has no preference), and X11 managed windows are decorated unless `_MOTIF_WM_HINTS` has no title
   (`wlr_core_xwayland.c`); both emit `toplevel-decorated(sid, decorated)`. The viewer draws the frame, the policy
   (`WlrCompositor.ts`) subtracts it when maximizing and centering dialogs.
+- xdg-shell is version 6 (Core item 4b): `setBounds(sid, w, h)` sets a toplevel's configure bounds (the policy sends
+  the output minus our frame from the first commit on; false before that); wlroots advertises its default
+  `wm_capabilities` (window menu, maximize, fullscreen, minimize), and `show_window_menu` is reported as
+  `toplevel-request-window-menu(sid, x, y)` (main surface coordinates), which the viewer answers with our window menu.
+  The `suspended` state isn't used.
 - `native/wlr-core/src/xwayland_sockets.c`: replaces wlroots' `xwayland/sockets.c` at link time (see the gotchas).
 - `native/wlr-core/src/wlr_core_encoder.c`: the existing GStreamer encoder (`native/encoding`), compiled into the same
   addon against the system libwayland (`shim/westfield.h`), fed from wlroots buffers. `src/westfield-egl.c`,
