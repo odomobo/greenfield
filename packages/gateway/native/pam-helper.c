@@ -179,7 +179,7 @@ static int do_session(const char *username, char **command) {
     // read by pam_systemd when it registers the session with logind
     pam_putenv(pamh, "XDG_SESSION_TYPE=wayland");
     pam_putenv(pamh, "XDG_SESSION_CLASS=user");
-    pam_putenv(pamh, "XDG_SESSION_DESKTOP=greenfield");
+    pam_putenv(pamh, "XDG_SESSION_DESKTOP=nebula");
 
     result = pam_acct_mgmt(pamh, 0);
     if (result == PAM_SUCCESS) {

@@ -41,8 +41,8 @@ export function setupSessionEnvironment() {
   }
 
   env.XDG_SESSION_TYPE = 'wayland'
-  env.XDG_CURRENT_DESKTOP = 'greenfield'
-  env.XDG_SESSION_DESKTOP = 'greenfield'
+  env.XDG_CURRENT_DESKTOP = 'nebula'
+  env.XDG_SESSION_DESKTOP = 'nebula'
   // our portals config (prefers the gtk backend) without touching the user's own configuration
   const configDir = path.resolve(__dirname, '../xdg')
   env.XDG_CONFIG_DIRS = [configDir, env.XDG_CONFIG_DIRS ?? '/etc/xdg'].join(':')
