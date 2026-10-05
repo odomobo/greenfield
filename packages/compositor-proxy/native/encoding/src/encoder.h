@@ -1,6 +1,7 @@
 #ifndef APP_ENDPOINT_ENCODING_ENCODER_H
 #define APP_ENDPOINT_ENCODING_ENCODER_H
 
+#include <stdbool.h>
 #include "westfield.h"
 
 // encoder data interface, we don't know its contents
@@ -54,6 +55,10 @@ frame_encoder_encode(struct frame_encoder **frame_encoder_pp, const struct frame
 
 int
 frame_encoder_request_key_unit(struct frame_encoder **frame_encoder_pp);
+
+/* The quality of the frames from the next one on (a constant QP: higher, or lower while bandwidth is short). */
+int
+frame_encoder_set_quality(struct frame_encoder **frame_encoder_pp, bool high);
 
 int
 frame_encoder_destroy(struct frame_encoder **frame_encoder_pp);

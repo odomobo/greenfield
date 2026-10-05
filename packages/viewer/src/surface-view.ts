@@ -63,18 +63,24 @@ export class SurfaceView {
   }
 
   /**
-   * Draw a lossless patch into the content, replacing the pixels under it. The surface keeps showing what it had
-   * elsewhere; on a size change the old content is stretched to the new size until patches replace it.
+   * Draw a patch into the content, replacing the pixels under it. The surface keeps showing what it had elsewhere; on
+   * a size change the old content is stretched to the new size until patches replace it. A JPEG with alpha's two
+   * images are combined by the shared compositor (without WebGL its color is shown without the alpha). Closes the
+   * patch's bitmaps.
    */
-  drawPatch(patch: DecodedPatch): void {
+  drawPatch(patch: DecodedPatch, compositor: AlphaCompositor): void {
+    let combined: ImageBitmap | undefined
     try {
       this.resize(patch.surfaceSize, true)
       const { x, y, width, height } = patch.rect
+      combined = patch.alpha && compositor.combineImages(patch.bitmap, patch.alpha)
       this.context.clearRect(x, y, width, height)
-      this.context.drawImage(patch.bitmap, x, y)
+      this.context.drawImage(combined ?? patch.bitmap, x, y)
       this.contentDrawn = true
     } finally {
+      combined?.close()
       patch.bitmap.close()
+      patch.alpha?.close()
     }
   }
 

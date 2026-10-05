@@ -1,5 +1,5 @@
 /**
- * Patch encoding (the QOI cascade of the native nebula-patch-addon, see patch-encoder.ts) on a few worker threads, each
+ * Patch encoding (the QOI cascade or JPEG of the native nebula-patch-addon, see patch-encoder.ts) on a few worker threads, each
  * with its own OS thread and nice level (see "Encode scheduling" in ROADMAP.md). Streaming surfaces' patches go to a pool
  * at the lowest priority: relentless encoding only gets the CPU nothing else wants. Normal surfaces' patches go to a
  * pool at normal priority (nice 0). The encode runs on the worker's own thread, so the nice level applies to all of it.
@@ -16,7 +16,14 @@ export const STREAMING_ENCODE_NICE = 19
 export const NORMAL_ENCODE_WORKERS = 4
 export const NORMAL_ENCODE_NICE = 0
 
-export type WorkerRequest = { id: number; pixels: Uint8Array; width: number; height: number; opaque: boolean }
+export type WorkerRequest = {
+  id: number
+  pixels: Uint8Array
+  width: number
+  height: number
+  opaque: boolean
+  lossy: boolean
+}
 export type WorkerReply =
   | { type: 'ready'; tid: number }
   | { type: 'patch'; id: number; patch: EncodedPatch }
@@ -91,14 +98,14 @@ export class PatchWorkerPool {
 
   /**
    * Encode RGBA pixels with the cascade (see `encodePatch`). `opaque`: the alpha is all 255 (or irrelevant), the patch
-   * is encoded as RGB. The pixels' buffer is transferred when possible.
+   * is encoded as RGB. `lossy`: JPEG if that is smaller. The pixels' buffer is transferred when possible.
    */
-  encode(rgba: Uint8Array, width: number, height: number, opaque: boolean): Promise<EncodedPatch> {
+  encode(rgba: Uint8Array, width: number, height: number, opaque: boolean, lossy = false): Promise<EncodedPatch> {
     if (this.destroyed) {
       return Promise.reject(new Error('The streaming encoder was destroyed.'))
     }
     return new Promise((resolve, reject) => {
-      this.queue.push({ request: { id: this.nextId++, pixels: rgba, width, height, opaque }, resolve, reject })
+      this.queue.push({ request: { id: this.nextId++, pixels: rgba, width, height, opaque, lossy }, resolve, reject })
       this.dispatch()
     })
   }

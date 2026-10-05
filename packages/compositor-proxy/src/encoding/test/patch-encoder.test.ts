@@ -277,3 +277,74 @@ test('wrong sizes throw', () => {
   assert.throws(() => encodePatch(new Uint8Array(15), 2, 2, false), /don't match/)
   assert.throws(() => encodePatch(new Uint8Array(0), 0, 0, false), /don't match/)
 })
+
+// --- lossy patches: JPEG when it is smaller ---
+
+/** The frame header of a baseline JPEG: its size and its components' sampling factors (h << 4 | v). */
+function jpegFrame(bytes: Uint8Array): { width: number; height: number; sampling: number[] } {
+  assert.deepEqual([bytes[0], bytes[1]], [0xff, 0xd8], 'starts with SOI')
+  assert.deepEqual([bytes[bytes.length - 2], bytes[bytes.length - 1]], [0xff, 0xd9], 'ends with EOI')
+  let p = 2
+  while (p + 4 <= bytes.length) {
+    assert.equal(bytes[p], 0xff, 'a marker')
+    const marker = bytes[p + 1]
+    const length = (bytes[p + 2] << 8) | bytes[p + 3]
+    if (marker === 0xc0) {
+      const height = (bytes[p + 5] << 8) | bytes[p + 6]
+      const width = (bytes[p + 7] << 8) | bytes[p + 8]
+      const components = bytes[p + 9]
+      const sampling = []
+      for (let c = 0; c < components; c++) {
+        sampling.push(bytes[p + 10 + c * 3 + 1])
+      }
+      return { width, height, sampling }
+    }
+    p += 2 + length
+  }
+  assert.fail('no baseline frame header (SOF0)')
+}
+
+test('lossy: noise goes out as a 4:4:4 JPEG, much smaller than lossless', () => {
+  const rgba = noise(64, 48, true)
+  const lossless = encodePatch(rgba, 64, 48, true)
+  const encoded = encodePatch(rgba, 64, 48, true, true)
+  assert.equal(encoded.format, PatchFormat.JPEG)
+  assert.equal(encoded.channels, 3)
+  assert.ok(encoded.data.length < lossless.data.length / 2, `${encoded.data.length} of ${lossless.data.length}`)
+  assert.deepEqual(jpegFrame(encoded.data), { width: 64, height: 48, sampling: [0x11, 0x11, 0x11] })
+})
+
+test('lossy with alpha: the color JPEG and a grayscale JPEG of the alpha, after the color JPEG\'s length', () => {
+  const rgba = noise(40, 30, false)
+  const encoded = encodePatch(rgba, 40, 30, false, true)
+  assert.equal(encoded.format, PatchFormat.JPEG_ALPHA)
+  assert.equal(encoded.channels, 4)
+  const data = encoded.data
+  const colorLength = new DataView(data.buffer, data.byteOffset).getUint32(0, true)
+  const color = data.subarray(4, 4 + colorLength)
+  const alpha = data.subarray(4 + colorLength)
+  assert.deepEqual(jpegFrame(color), { width: 40, height: 30, sampling: [0x11, 0x11, 0x11] })
+  assert.deepEqual(jpegFrame(alpha), { width: 40, height: 30, sampling: [0x11] })
+})
+
+test('lossy: UI-like content stays lossless when that is smaller, and round trips exactly', () => {
+  for (const opaque of [false, true]) {
+    const rgba = ui(128, 64, opaque)
+    const encoded = encodePatch(rgba, 128, 64, opaque, true)
+    assert.equal(encoded.format, PatchFormat.QOI_LZ4)
+    assert.deepEqual(decode(encoded, 128, 64), expected(rgba, opaque))
+  }
+})
+
+test('lossy: patches of one pixel or one row are encoded too', () => {
+  for (const opaque of [false, true]) {
+    for (const [width, height] of [
+      [1, 1],
+      [1, 40],
+      [200, 1],
+    ]) {
+      const encoded = encodePatch(noise(width, height, opaque), width, height, opaque, true)
+      assert.ok(encoded.data.length > 0)
+    }
+  }
+})

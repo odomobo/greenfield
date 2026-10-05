@@ -5,7 +5,10 @@
  * callback, forever. It writes the number of frames it has committed to the file given as the first argument, about
  * twice a second.
  *
- * Usage: busy-client <frames file> [width height]
+ * With a pause file (fourth argument): while that file exists it draws nothing new (it still asks for frame callbacks,
+ * committing without damage), and it writes its last frame, as RGBA bytes, to "<pause file>.rgba" once.
+ *
+ * Usage: busy-client <frames file> [width height [pause file]]
  */
 #define _GNU_SOURCE
 #include <stdbool.h>
@@ -27,6 +30,8 @@ static struct wl_surface *surface;
 static int width = 640;
 static int height = 480;
 static const char *frames_file;
+static const char *pause_file;
+static bool dumped;
 static bool configured;
 static unsigned long frames;
 static unsigned long noise = 12345;
@@ -37,6 +42,8 @@ struct buffer {
     bool busy;
 };
 static struct buffer buffers[2];
+/* the buffer last committed with new content */
+static struct buffer *last;
 
 static double
 now_ms(void) {
@@ -69,8 +76,39 @@ create_buffer(struct buffer *b) {
 static void frame_done(void *data, struct wl_callback *callback, uint32_t time);
 static const struct wl_callback_listener frame_listener = {frame_done};
 
+/* The last frame as RGBA bytes, to "<pause file>.rgba" (written to a temporary name first, then renamed). */
+static void
+dump_last_frame(void) {
+    char path[4096], temporary[4096];
+    snprintf(path, sizeof(path), "%s.rgba", pause_file);
+    snprintf(temporary, sizeof(temporary), "%s.rgba.part", pause_file);
+    FILE *file = fopen(temporary, "w");
+    if (file == NULL || last == NULL) {
+        return;
+    }
+    for (int i = 0; i < width * height; i++) {
+        uint32_t argb = last->pixels[i];
+        uint8_t rgba[4] = {(argb >> 16) & 0xff, (argb >> 8) & 0xff, argb & 0xff, argb >> 24};
+        fwrite(rgba, 1, 4, file);
+    }
+    fclose(file);
+    rename(temporary, path);
+}
+
 static void
 paint(void) {
+    if (pause_file && access(pause_file, F_OK) == 0) {
+        if (!dumped) {
+            dumped = true;
+            dump_last_frame();
+        }
+        // nothing new, but keep the callbacks coming to notice the end of the pause
+        struct wl_callback *callback = wl_surface_frame(surface);
+        wl_callback_add_listener(callback, &frame_listener, NULL);
+        wl_surface_commit(surface);
+        return;
+    }
+    dumped = false;
     struct buffer *b = !buffers[0].busy ? &buffers[0] : &buffers[1];
     unsigned long t = frames;
     for (int y = 0; y < height; y++) {
@@ -86,6 +124,7 @@ paint(void) {
     wl_surface_attach(surface, b->buffer, 0, 0);
     wl_surface_damage_buffer(surface, 0, 0, width, height);
     wl_surface_commit(surface);
+    last = b;
     frames++;
 }
 
@@ -153,6 +192,9 @@ main(int argc, char **argv) {
     if (argc >= 4) {
         width = atoi(argv[2]);
         height = atoi(argv[3]);
+    }
+    if (argc >= 5) {
+        pause_file = argv[4];
     }
     display = wl_display_connect(NULL);
     if (!display) {

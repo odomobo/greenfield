@@ -1171,7 +1171,7 @@ export class Desktop {
           this.patchesApplied++
           const kind = `${patch.format}/${patch.channels}`
           this.patchKinds[kind] = (this.patchKinds[kind] ?? 0) + 1
-          this.viewFor(surface).drawPatch(decoded)
+          this.viewFor(surface).drawPatch(decoded, this.alphaCompositor)
           this.contentChanged(surface)
         },
         (error) => this.decodeFailed(surface, error),

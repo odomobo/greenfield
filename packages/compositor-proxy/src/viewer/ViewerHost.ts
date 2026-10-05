@@ -3,7 +3,7 @@ import { createLogger } from '../Logger.js'
 import { onViewerFeedback, setViewerAttached } from '../FramePacing.js'
 import type { EncodingSink } from '../encoding/SurfaceEncoder.js'
 import { AudioPacket, CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
-import { ControlMessage, ViewerTransport, WebSocketViewerTransport } from './ViewerTransport.js'
+import { ControlMessage, SimulatedLink, ViewerTransport, WebSocketViewerTransport } from './ViewerTransport.js'
 
 const logger = createLogger('viewer-host')
 
@@ -73,11 +73,16 @@ export class ViewerHost {
   constructor(
     private readonly scene: WindowSceneEndpoint,
     private readonly content: SurfaceContent,
+    private readonly options: { link?: SimulatedLink } = {},
   ) {
     const isAttached = () => this.transport !== undefined
+    const isBandwidthLimited = () => this.transport?.bandwidthLimited ?? false
     content.setFrameSink({
       get active() {
         return isAttached()
+      },
+      get bandwidthLimited() {
+        return isBandwidthLimited()
       },
       sendFrame: (surfaceKey, frame, surfaceClass, done) => {
         if (this.transport) {
@@ -135,7 +140,7 @@ export class ViewerHost {
       this.audioEndpoint?.detach()
     }
 
-    const transport = new WebSocketViewerTransport(ws)
+    const transport = new WebSocketViewerTransport(ws, { link: this.options.link })
     this.transport = transport
     transport.onKeyFrameNeeded = (surface) => this.content.requestKeyFrame(surface)
     transport.onMessage = (message) => this.onMessage(transport, message)

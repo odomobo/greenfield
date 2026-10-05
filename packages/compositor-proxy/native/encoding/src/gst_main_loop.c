@@ -25,6 +25,9 @@ do_gst_encoded_frame_finalize(struct encoded_frame *encoded_frame);
 extern void
 do_gst_frame_encoder_request_key_unit(struct frame_encoder **frame_encoder_pp);
 
+extern void
+do_gst_frame_encoder_set_quality(struct frame_encoder **frame_encoder_pp, bool high);
+
 struct gf_gst_main_loop {
     GMainLoop *main;
     struct SyncSource *src;
@@ -37,6 +40,7 @@ enum gf_message_type {
     frame_encoder_free_type,
     encoded_frame_finalize_type,
     frame_encoder_request_key_unit_type,
+    frame_encoder_set_quality_type,
 };
 
 struct gf_message {
@@ -64,6 +68,10 @@ struct gf_message {
         struct {
             struct frame_encoder **frame_encoder_pp;
         } frame_encoder_request_key_unit;
+        struct {
+            struct frame_encoder **frame_encoder_pp;
+            bool high;
+        } frame_encoder_set_quality;
     } body;
 };
 
@@ -176,6 +184,10 @@ main_loop_handle_message(struct gf_message *message) {
         case frame_encoder_request_key_unit_type:
             do_gst_frame_encoder_request_key_unit(message->body.frame_encoder_request_key_unit.frame_encoder_pp);
             break;
+        case frame_encoder_set_quality_type:
+            do_gst_frame_encoder_set_quality(message->body.frame_encoder_set_quality.frame_encoder_pp,
+                                             message->body.frame_encoder_set_quality.high);
+            break;
     }
     return G_SOURCE_CONTINUE;
 }
@@ -278,6 +290,17 @@ frame_encoder_request_key_unit(struct frame_encoder **frame_encoder_pp) {
 
     message->type = frame_encoder_request_key_unit_type;
     message->body.frame_encoder_request_key_unit.frame_encoder_pp = frame_encoder_pp;
+
+    return send_message(message);
+}
+
+int
+frame_encoder_set_quality(struct frame_encoder **frame_encoder_pp, bool high) {
+    struct gf_message *message = g_new0(struct gf_message, 1);
+
+    message->type = frame_encoder_set_quality_type;
+    message->body.frame_encoder_set_quality.frame_encoder_pp = frame_encoder_pp;
+    message->body.frame_encoder_set_quality.high = high;
 
     return send_message(message);
 }

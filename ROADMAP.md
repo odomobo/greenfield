@@ -175,7 +175,8 @@ A surface has a **priority class** and an **encoding**, decided separately:
 
 - **Class**: *normal* (medium priority) or *streaming* (low priority). Control messages (scene, input, cursor, shell,
   clipboard, audio later) are above both and always go first.
-- **Encoding**: *lossless patches* (raw / QOI / QOI + LZ4, below), or *video* (H.264 of the whole surface). Video is only possible with GPU acceleration
+- **Encoding**: *patches* (lossless: raw / QOI / QOI + LZ4; or JPEG for streaming surfaces while bandwidth is short,
+  below), or *video* (H.264 of the whole surface). Video is only possible with GPU acceleration
   (below) and only used for streaming surfaces.
 
 A surface's class and encoding are per surface (a window's subsurfaces and popups each have their own). The viewer
@@ -193,9 +194,9 @@ doesn't need to know a surface's class; nothing about it is in the scene protoco
   device is present, else `none`. The gateway logs the choice. An explicit encoder that then fails to create (no
   device, missing element) is logged once and the session continues as `none`.
 - `none` means no video encoder is ever created: the encoder pool has size 0 and the GStreamer video pipelines are
-  never built. The x264 code in `native/encoding/src/gst_frame_encoder.c` stays for now (unused; GPU acceleration is
-  to be revisited, see wave 4 G). **Video on CPU only is to be removed entirely** (decided 2026-10-05): the x264
-  encoder and the CPU alpha path (alpha bytes written as I420 luma for x264) go; video exists only with a GPU.
+  never built. **There is no video on the CPU** (decided 2026-10-05, done in item 5b phase 2): the x264 encoder and
+  the CPU alpha path (alpha bytes written as I420 luma for x264) are gone from `native/encoding/src/gst_frame_encoder.c`;
+  video exists only with a GPU, and every buffer takes the GL pipelines there.
 - A buffer whose pixels can't be read (`readPixels` fails; today only an unsupported SHM format, as there are no GPU
   buffers without the GLES2 renderer) is sent as video if an encoder exists, regardless of class. With `none` it
   can't be shown: log once per surface and send nothing for it.
@@ -274,7 +275,8 @@ Changing class:
 
 ### QOI patches, and lossy encoding only when bandwidth is short
 
-(Decided 2026-10-05; the lossless cascade is built (item 5b phase 1), the lossy half is item 5b phase 2. Why: PNG encoding hogs the CPU even on a Ryzen 7600, and a
+(Decided 2026-10-05; the lossless cascade is built (item 5b phase 1), the lossy half too (item 5b phase 2, as built:
+see the end of this section). Why: PNG encoding hogs the CPU even on a Ryzen 7600, and a
 small VPS has far less. The QOI spike measured our PNG at 75–145 ms of CPU per 1080p frame, QOI + LZ4 at 3.5–4.8 ms on
 UI content and about 26 ms on noise.)
 
@@ -321,6 +323,34 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
   Whenever a surface leaves a lossy mode (bandwidth recovers, or it returns to the normal class), refresh only the
   areas known to be lossy, losslessly, and only after its pending damage has been sent. Flapping between lossless and
   lossy is then harmless (refreshes stay bounded by the lossy area); hysteresis is optional tuning.
+
+**As built** (item 5b phase 2, scene protocol 18):
+
+- **Bandwidth-limited** is judged by the transport (`viewer/bandwidth.ts`, `BandwidthMonitor`, one per connection), on
+  1 s periods, from two measures: the share of the period during which streaming items waited in the transport while
+  the congestion controller (or the socket's safety limit) held them back, and the period's demand counted losslessly
+  (lossy patches at the lossless bytes per pixel last measured for their surface, or 3 times their size if none was;
+  lower-quality video frames at twice their size) against the controller's `max_bw`. Limited after 2 periods in a row
+  held back at least 80% of the time (one isn't enough: Startup and ProbeRTT hold data back for a period on a busy link
+  that keeps up); recovered after a period held back under 50% whose lossless demand fits in 70% of `max_bw`, at least
+  2 s after it became limited. On the simulated link (`test/sim-link.ts`, 20 Mbit/s): a stream at 40-80% of the link
+  never makes it limited, an endless one does within 2-3 s. Transitions are logged ("Bandwidth-limited: ...", "No
+  longer bandwidth-limited: ..."). The sink tells the encoders (`EncodingSink.bandwidthLimited`).
+- **JPEG or lossless, whichever is smaller** (a deviation from "JPEG patches while limited"): a streaming surface's
+  patches captured while limited are encoded with the lossless cascade *and* as JPEG (quality 70, 4:4:4,
+  libjpeg-turbo, `JPEG_QUALITY` in `patch-encoder.ts`), and the smaller goes out. UI content is often smaller
+  losslessly (QOI + LZ4), and then nothing needs refreshing; QOI costs a fraction of the JPEG encode.
+- **Lossy areas** are tracked per surface (`SurfaceEncoder.lossyArea`, at most 32 rectangles, else their bounding
+  box), updated in send order (each patch as it goes to the sink, so a later lossless patch always clears an earlier
+  lossy one), the whole surface while it streams video. Refresh: once the surface doesn't go lossy anymore (demoted, or
+  bandwidth recovered) and it has no unsent work (nothing queued, nothing in its slots), its lossy areas are queued as
+  lossless patches (logged: "sending its N lossy pixels again, losslessly").
+- **Video** has a constant QP, no bitrate cap: `QP_HIGH` 24 normally, `QP_LOW` 32 while limited (nvh264enc
+  `rc-mode=constqp`/`qp-const`, vaapih264enc `rate-control=cqp`/`init-qp`), switched while the encoder runs with a key
+  frame (`setQuality`). Untested: no GPU here.
+- **Viewer**: JPEG patches are decoded by the browser (`createImageBitmap` of a Blob) in the patch worker; a JPEG with
+  alpha's two images are combined on the main thread by the shared WebGL compositor (`alpha-video.ts`,
+  `AlphaCompositor.combineImages`), which also gives video its alpha; alpha of 254 or more counts as opaque there.
 
 ### Per-surface slots
 
@@ -1128,7 +1158,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
    - Not verified by ear (needs the user): sound quality, clicks at underruns, drift over a long listen, recovery after
      a network hiccup, real apps (Firefox/Chrome video), and Chrome's behavior on a machine with real audio output.
 
-### Next: QOI patches
+### QOI patches and lossy encoding (done)
 
 5b. **QOI instead of PNG for patches** (user's request, 2026-10-05; the design is in [Encoding
     policy](#qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)). Today every patch is a PNG from our
@@ -1155,7 +1185,9 @@ single large item never stalls the link. Initial window before any estimate: 64 
        - PNG stays only for images that aren't surfaces (an X11 app's `_NET_WM_ICON` window icon, read from an X
          property and sent as a data URL); `png.ts` and `png-worker.ts` otherwise go. Protocol version bump.
        - Afterwards, check the encoding policy's tuning (pool sizes, the relentless thresholds), measured with PNG's
-         costs. (Still to do.)
+         costs. **Done (2026-10-05):** left as they are (the user found them good). `scripts/e2e/cpu.sh` again: busy
+         client 9.5 s of CPU in 10 s, 5416 patches, 1.76 ms per patch; foot 1.3 s, 0.72 ms per patch; the 1080p busy
+         client is still promoted (busy.sh).
        - Status (built 2026-10-05, scene protocol 16): `native/patch` (`nebula-patch-addon`, QOI + LZ4 vendored with
          their licences in `native/patch/vendor`) encodes synchronously; `PatchWorkerPool` (was `StreamingPngPool`,
          `patch-worker.ts` was `png-worker.ts`) runs it on 2 worker threads at nice 19 for the streaming class and on 4
@@ -1178,11 +1210,29 @@ single large item never stalls the link. Initial window before any estimate: 64 
          patches arrive opaque and decoded in the worker). Not covered by a test: the opaque-region path of
          `readPixels` (needs a client that sets an opaque region; the format and scan paths are exercised by foot and
          the busy client).
-    3. **Phase 2: the four cases for the streaming class** (Encoding policy): the bandwidth-limited signal from the
+    3. **Done.** **Phase 2: the four cases for the streaming class** (Encoding policy): the bandwidth-limited signal from the
        controller; not limited: QOI patches (no GPU) or higher-quality video (GPU); limited: JPEG / JPEG with alpha
        patches (no GPU) or lower-quality video (GPU); fixed-quality video with variable bitrate; per-area lossy
        tracking and intelligent lossless refreshes; alpha >= 254 opaque in the shared shader. Also remove video on CPU
        only (x264 and its CPU alpha path).
+       - Status (built 2026-10-05, scene protocol 18; details under "As built" in [Encoding
+         policy](#qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)): `PatchFormat.JPEG` (3) and
+         `JPEG_ALPHA` (4: u32le length of the color JPEG, the color JPEG, a grayscale JPEG of the alpha;
+         `splitJpegAlpha`). `nebula-patch-addon` links the system's libjpeg-turbo (`libjpeg-dev`, a new build
+         requirement) and takes a JPEG quality (`encodePatch(rgba, w, h, opaque, lossy)`); `viewer/bandwidth.ts`;
+         lossy areas and refreshes in `SurfaceEncoder`; constant-QP hardware video with `setQuality`; x264 and the CPU
+         video path deleted. New dev-only gateway option `--dev-link-kbps <n>` (with `--dev-auth`): the session sends
+         to its viewer through a simulated link of n kbit/s (a FIFO in the transport), to try this by hand.
+       - Tests: compositor-proxy 190 (was 170: the monitor's rules and the monitor with the real controller on the
+         simulated link, 11; lossy patches, refreshes and video quality in `SurfaceEncoder`, 5; JPEG encoding, 4),
+         viewer 123 (was 116: the formats and `splitJpegAlpha`; 4 jitter-buffer tests fail since 5ef434a, unrelated),
+         gateway 32. New `scripts/e2e/lossy.sh` (about 11 s): the busy client on an 8 Mbit/s simulated link becomes
+         streaming, the link limited, JPEG patches arrive; paused, bandwidth recovers and the viewer shows its last frame
+         exactly. `video.sh` also feeds a JPEG and a JPEG with alpha (made by the page) and checks their pixels and that
+         near-opaque alpha comes out 255. `test-gateway.sh`: 13 scripts, about 25 s.
+       - Not verified: the GPU half (no GPU here: whether nvh264enc and vaapih264enc take a QP change while playing, and
+         the QPs' look); a real slow link (only the simulated one); real apps with transparency as JPEG with alpha (only
+         the page-made test images).
 
 ### Lower priority
 
@@ -1263,7 +1313,8 @@ single large item never stalls the link. Initial window before any estimate: 64 
     0.5 has another configuration format), `gstreamer1.0-pulseaudio` (`pulsesrc`), `gstreamer1.0-plugins-base`
     (`opusenc`, `audioconvert`) and `gstreamer1.0-plugins-good` (`rtpopuspay`, `rtpstreampay`), `util-linux`
     (`setpriv`). New build requirements from the QOI patches (item 5b): `clang` and `lld` (`wasm-ld`, for the viewer's
-    wasm patch decoder; the build fails with "install lld (apt install lld)" if it is missing). The audio configuration is generated by the build (`dist/audio-config`), nothing else to install. Must
+    wasm patch decoder; the build fails with "install lld (apt install lld)" if it is missing), and from item 5b
+    phase 2 `libjpeg-dev` (libjpeg-turbo, for JPEG patches; at run time `libjpeg-turbo8`). The audio configuration is generated by the build (`dist/audio-config`), nothing else to install. Must
     not enable or touch the user's own PipeWire units. Could later also enable kernel BBR (see
     [Transport and congestion control](#transport-and-congestion-control)); not for now, to keep installation simple.
 
@@ -1276,6 +1327,10 @@ single large item never stalls the link. Initial window before any estimate: 64 
 - GPU (dmabuf) buffers on a machine with a GPU.
 - GPU acceleration path of Core 2: `--encoder auto` picking `vaapih264`/`nvh264`, and streaming surfaces sent as
   hardware video (key frame on promotion, crisp patch render on demotion, video frames in slots). Only unit tested.
+- Item 5b phase 2's video: constant QP (`QP_HIGH` 24, `QP_LOW` 32) on nvh264enc and vaapih264enc, and whether they take
+  a QP change while playing (`setQuality`); if not, the pipelines have to be rebuilt on a change.
+- Lossy encoding on a real slow link (only the simulated `--dev-link-kbps` one is tested): when it goes lossy, how JPEG
+  at quality 70 looks, how often it flaps.
 - Congestion control on real links: slow, distant (100-300 ms), Wi-Fi and mobile. Only the simulated link and
   loopback are tested.
 - Congestion control sharing a bottleneck with other traffic (a download filling the router's buffer). Not in the

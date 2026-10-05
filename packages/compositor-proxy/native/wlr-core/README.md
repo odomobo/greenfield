@@ -193,31 +193,26 @@ XWayland (wave 2 B):
 
 Since Core 2a the encoder is only used with GPU acceleration (`--encoder nvh264|vaapih264`, or `auto` finding one) and
 only for streaming surfaces (see "Encoding policy" in ROADMAP.md). With `--encoder none` (what `auto` resolves to
-without a GPU) no encoder is ever created and everything is sent as lossless (QOI) patches; there is no x264 fallback. The x264 CPU
-path below is still in the file, unused and untested since, until GPU acceleration is revisited (wave 4 G). The notes
-that follow describe it as it was built.
+without a GPU) no encoder is ever created and everything is sent as patches. Since item 5b phase 2 there is no video on
+the CPU at all: the x264 encoder, its CPU pipelines (`videoconvert ! videobox ! x264enc`) and the CPU alpha path are
+gone. None of the following is tested here (no GPU).
 
-- **Two paths, picked per buffer.** x264 with shared memory buffers (the case here: no GPU) takes the CPU pipelines
-  (`appsrc ! videoconvert ! videobox ! x264enc`; the alpha stream is built by `shm_frame_buffer_to_new_alpha_sample`:
-  alpha bytes as the luma of an I420 frame, no GL). dmabuf buffers and the hardware encoders (nvh264, vaapih264) take the
-  GL pipelines (glupload, glshader, glcolorconvert, gldownload). Pipelines are created when a path is first used (the
-  CPU ones at warm-up); the dmabuf/GL path is untested here (no `/dev/dri`). Switching paths forces a key frame.
-- **The knobs** are the `X264_*` defines at the top of the file: speed preset, quantizer (CRF) and the VBV cap
-  (`bitrate` + `vbv-buf-capacity`) for the opaque and alpha streams, and the padding multiple. With `pass=qual`,
-  x264enc's `bitrate` is not a target but the VBV max rate (checked: it caps a noise stream), and `vbv-buf-capacity=0`
-  turns the cap off (unbounded bitrate). Superfast keeps CABAC and 8x8dct, so `profile=high` still holds and matches
-  the viewer's `avc1.64001f`; keep the two consistent if you change the preset to ultrafast (no CABAC, no 8x8dct).
+- **One path.** Every buffer (shared memory or dmabuf) takes the GL pipelines: glupload, glshader (padding and alpha
+  extraction), glcolorconvert, (gldownload), the encoder. They're created at warm-up.
+- **Fixed quality, variable bitrate**: constant QP, no bitrate cap (nvh264enc `rc-mode=constqp`, `qp-const`;
+  vaapih264enc `rate-control=cqp`, `init-qp`). Two levels, `QP_HIGH` and `QP_LOW` at the top of the file:
+  `setQuality(encoder, high)` (TypeScript: `WlrEncoder.setQuality`, called by `SurfaceEncoder` before each frame:
+  low while the transport says bandwidth is short) sets the encoder element's QP property while it runs (the element is
+  named `encoder` in every pipeline) and forces a key frame. Whether these encoders pick up a QP change while playing
+  is unverified (on hardware): if they don't, the pipelines have to be rebuilt on a change.
 - **Padding is at the top left**: the image is in the bottom right corner of the coded frame (the viewer's renderer
-  crops with `encodedSize`). The CPU path does it with `videobox` (negative left/top), the GL path in the shader. The
-  videobox is configured by the appsrc pad probe before the caps of a new size reach it. Padding is black (alpha 0 in the
-  alpha stream); coded sizes are multiples of 16 for x264 (the hardware encoders keep 128, untested at 16).
-- The alpha luma is BT.601 limited range (0 is 16, 255 is 235), what the viewer's shader expects; the opaque CPU path
-  asks videoconvert for `colorimetry=bt601` for the same reason.
+  crops with `encodedSize`), done in the shader. The shader's output size is set by the appsrc pad probe before the
+  caps of a new size reach it. Padding is black (alpha 0 in the alpha stream); coded sizes are multiples of 128.
 - Encoded frames are matched to their results on the pipelines' threads: the result queue has a mutex, and
-  `has_split_alpha` is set before the first buffer is pushed (the CPU path is fast enough to race it).
-- Checked with a scratch C harness around `do_gst_frame_encoder_*` and `openh264dec` (no libav here): the decoded
-  frame has the image bottom right, alpha ramp and padding right, delta frames decode, and a size change mid-stream
-  starts a new SPS (openh264dec in gst drops one frame there; the browser doesn't). The e2e used to check that the viewer
+  `has_split_alpha` is set before the first buffer is pushed (a fast encoder could race it).
+- (Back when it had the x264 path:) checked with a scratch C harness around `do_gst_frame_encoder_*` and `openh264dec`:
+  the decoded frame has the image bottom right, alpha ramp and padding right, delta frames decode, and a size change
+  mid-stream starts a new SPS (openh264dec in gst drops one frame there; the browser doesn't). The e2e used to check that the viewer
   decodes foot's video frames without failures (`__viewerTest.videoFrames()`); since Core 2a it runs with
   `--encoder none` and checks patches instead, so the viewer's video decoding is only covered by its unit tests.
 

@@ -12,7 +12,7 @@
 #   scripts/e2e/hidpi.sh     the viewer's device pixel ratio (2, 1.5, back to 1) reaches apps: foot renders at that scale;
 #   scripts/e2e/input.sh     wheel and touchpad scrolling, X11 apps started from a terminal ending at logout, window icons.
 #   scripts/e2e/video.sh     the viewer's video path: H.264 frames (x264enc, no session needed) are fed to the viewer: opaque and
-#                            with alpha, cropping, colors, transparency, patches over video.
+#                            with alpha, cropping, colors, transparency, patches over video, JPEG patches with and without alpha.
 #   scripts/e2e/decorations.sh  window decorations: foot and X11 apps get our title bar (xdg-decoration, _MOTIF_WM_HINTS), moved,
 #                            maximized, resized and closed by it, a GTK app keeps its own, the frame is crisp at pixel ratios 1 and 2.
 #   scripts/e2e/x11-move.sh  X11 apps moving their own windows (a small test client built with gcc): a square dragging
@@ -20,6 +20,8 @@
 #                            pointer puts it and ends where it was dragged to.
 #   scripts/e2e/busy.sh      a relentless client (a small test client built with gcc, committing a full frame on every
 #                            frame callback) is shown as patches and paced, and foot stays responsive meanwhile.
+#   scripts/e2e/lossy.sh     the busy client on a simulated 8 Mbit/s link: it goes lossy (JPEG patches), and once it stops
+#                            drawing its lossy areas are sent again losslessly (the viewer shows its last frame exactly).
 #
 # Each can also be run on its own (they take GATEWAY_PORT). They start the gateway with --dev-auth --dev-time-scale,
 # which shortens its sign-in delays; see the header of scripts/e2e/auth.sh. Requires foot, dbus-daemon, notify-send,
@@ -29,7 +31,7 @@
 #
 #   scripts/test-gateway.sh
 # The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it and the next one, desktop
-# and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen, decorations eighteen, x11-move twenty, audio twenty-two).
+# and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen, decorations eighteen, x11-move twenty, audio twenty-two, lossy twenty-four).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
@@ -39,7 +41,7 @@ START="$EPOCHREALTIME"
 pids=()
 names=()
 i=0
-for part in auth desktop x11 clipboard dnd hidpi input busy video decorations x11-move audio; do
+for part in auth desktop x11 clipboard dnd hidpi input busy video decorations x11-move audio lossy; do
   port=$((BASE_PORT + i * 2))
   i=$((i + 1))
   # prefix every line with the script's name; the exit status is the script's, not sed's
@@ -65,6 +67,6 @@ done
 seconds=$(((${EPOCHREALTIME/./} - ${START/./}) / 10000))
 printf 'all end-to-end scripts took %d.%02d s\n' $((seconds / 100)) $((seconds % 100))
 if [ "$status" = 0 ]; then
-  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, the video path and audio"
+  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, lossy encoding on a slow link, the video path and audio"
 fi
 exit "$status"

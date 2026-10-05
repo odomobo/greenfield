@@ -79,4 +79,6 @@ export type SessionStart = {
   renderDevice: string
   /** test only (see --dev-time-scale): divides how long apps get to quit when the session ends; 1 in production */
   timeScale: number
+  /** test only (see --dev-link-kbps): the simulated link to the viewer in kbit/s; 0 in production */
+  linkKbps: number
 }

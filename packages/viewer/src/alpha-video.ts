@@ -12,9 +12,10 @@ const VERTEX_SHADER = `
   }
 `
 
-// The browser converts both frames to RGB (the alpha stream's frame is gray: its luma is the alpha channel, in the
-// same limited range as everything the encoder writes, which the conversion expands). The canvas wants premultiplied
-// colors, the encoder's are not.
+// The browser converts both images to RGB (the alpha image is gray: its luma is the alpha channel; a video's is in the
+// same limited range as everything the encoder writes, which the conversion expands). Lossy coding rounds: alpha of
+// 254 or more counts as fully opaque, so opaque areas don't come out slightly transparent. The canvas wants
+// premultiplied colors, the encoder's are not.
 const FRAGMENT_SHADER = `
   precision mediump float;
   uniform sampler2D u_color;
@@ -22,6 +23,9 @@ const FRAGMENT_SHADER = `
   varying vec2 v_texCoord;
   void main() {
     float alpha = clamp(texture2D(u_alpha, v_texCoord).r, 0.0, 1.0);
+    if (alpha >= 253.5 / 255.0) {
+      alpha = 1.0;
+    }
     gl_FragColor = vec4(texture2D(u_color, v_texCoord).rgb * alpha, alpha);
   }
 `
@@ -55,9 +59,10 @@ function createTexture(gl: WebGLRenderingContext): WebGLTexture {
 }
 
 /**
- * Combines the color and alpha streams of a video frame with alpha into one image. The only WebGL context of the page,
- * shared by all windows (browsers allow few contexts per page, so never one per window): each frame is drawn into
- * it and handed over as an ImageBitmap, which the window's own 2D canvas draws.
+ * Combines a color image and a gray image of its alpha into one image: the color and alpha streams of a video frame
+ * with alpha, or the two JPEGs of a JPEG with alpha patch. The only WebGL context of the page, shared by all windows
+ * (browsers allow few contexts per page, so never one per window): each image is drawn into it and handed over as an
+ * ImageBitmap, which the window's own 2D canvas draws.
  */
 export class AlphaCompositor {
   private canvas = new OffscreenCanvas(1, 1)
@@ -69,36 +74,56 @@ export class AlphaCompositor {
    * WebGL isn't available: the caller shows the color stream without its alpha then.
    */
   combine(frame: DecodedFrame): ImageBitmap | undefined {
-    const gpu = this.setup()
-    if (gpu === undefined || frame.alpha === undefined) {
+    if (frame.alpha === undefined) {
       return undefined
     }
-    const { gl } = gpu
-    const { width, height } = frame.size
-    if (this.canvas.width !== width || this.canvas.height !== height) {
-      this.canvas.width = width
-      this.canvas.height = height
-    }
-    gl.viewport(0, 0, width, height)
-    const upload = (texture: WebGLTexture, unit: number, video: VideoFrame) => {
-      gl.activeTexture(gl.TEXTURE0 + unit)
-      gl.bindTexture(gl.TEXTURE_2D, texture)
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
-    }
-    upload(gpu.color, 0, frame.opaque)
-    upload(gpu.alpha, 1, frame.alpha)
     // texture coordinates of the image inside the padded frame
     const visible = frame.opaque.visibleRect
     const frameWidth = visible?.width ?? frame.opaque.codedWidth
     const frameHeight = visible?.height ?? frame.opaque.codedHeight
     const source = videoSourceRect(frame.size, frame.encodedSize)
-    gl.uniform4f(
-      gpu.src,
+    return this.draw(frame.opaque, frame.alpha, frame.size, [
       source.x / frameWidth,
       source.y / frameHeight,
       (source.x + source.width) / frameWidth,
       (source.y + source.height) / frameHeight,
-    )
+    ])
+  }
+
+  /**
+   * A JPEG with alpha patch's image (its size, premultiplied alpha) from its color image and its alpha image (gray, in
+   * full range). The caller closes it and the two images. Undefined if WebGL isn't available.
+   */
+  combineImages(color: ImageBitmap, alpha: ImageBitmap): ImageBitmap | undefined {
+    return this.draw(color, alpha, { width: color.width, height: color.height }, [0, 0, 1, 1])
+  }
+
+  /** Draw the part `source` (texture coordinates u0, v0, u1, v1) of the two images as an image of `size`. */
+  private draw(
+    color: TexImageSource,
+    alpha: TexImageSource,
+    size: { width: number; height: number },
+    source: [number, number, number, number],
+  ): ImageBitmap | undefined {
+    const gpu = this.setup()
+    if (gpu === undefined) {
+      return undefined
+    }
+    const { gl } = gpu
+    const { width, height } = size
+    if (this.canvas.width !== width || this.canvas.height !== height) {
+      this.canvas.width = width
+      this.canvas.height = height
+    }
+    gl.viewport(0, 0, width, height)
+    const upload = (texture: WebGLTexture, unit: number, image: TexImageSource) => {
+      gl.activeTexture(gl.TEXTURE0 + unit)
+      gl.bindTexture(gl.TEXTURE_2D, texture)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image)
+    }
+    upload(gpu.color, 0, color)
+    upload(gpu.alpha, 1, alpha)
+    gl.uniform4f(gpu.src, ...source)
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     return this.canvas.transferToImageBitmap()
   }

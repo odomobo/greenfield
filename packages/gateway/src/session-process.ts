@@ -42,10 +42,17 @@ process.once('message', (message: SessionStart) => {
   })
 })
 
-async function start({ socketPath, encoder, timeScale }: SessionStart) {
+async function start({ socketPath, encoder, timeScale, linkKbps }: SessionStart) {
   const { audioDir } = setupSessionEnvironment()
 
-  const { viewerHost, apps } = startWlrootsCompositor({ h264Encoder: encoder === 'none' ? undefined : encoder })
+  const { viewerHost, apps } = startWlrootsCompositor({
+    h264Encoder: encoder === 'none' ? undefined : encoder,
+    // kbit/s to bytes per ms
+    link: linkKbps > 0 ? { bytesPerMs: linkKbps / 8 } : undefined,
+  })
+  if (linkKbps > 0) {
+    logger.info(`Sending to the viewer through a simulated link of ${linkKbps} kbit/s (--dev-link-kbps).`)
+  }
   // Apps get WAYLAND_DISPLAY when launched; it's not set in this process: GStreamer's GL would connect to our own
   // display as a client.
   viewerHost.shell = new ShellService(apps)

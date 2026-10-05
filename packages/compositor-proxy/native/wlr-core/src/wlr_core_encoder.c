@@ -71,7 +71,7 @@ encoded_frame_to_node_buffer_cb(napi_env env, napi_value js_callback, void *cont
     napi_call_function(env, global, js_callback, 1, &buffer_value, &result);
 }
 
-// createFrameEncoder(type: 'x264' | 'nvh264' | 'vaapih264', onFrame) -> encoder
+// createFrameEncoder(type: 'nvh264' | 'vaapih264', onFrame) -> encoder
 static napi_value
 createFrameEncoder(napi_env env, napi_callback_info info) {
     size_t argc = 2;
@@ -116,6 +116,20 @@ requestKeyUnit(napi_env env, napi_callback_info info) {
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     napi_get_value_external(env, argv[0], (void **) &node_frame_encoder);
     frame_encoder_request_key_unit(&node_frame_encoder->encoder);
+    return undefined(env);
+}
+
+// setQuality(encoder, high): the quality of the frames from the next one on
+static napi_value
+setQuality(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    struct node_frame_encoder *node_frame_encoder;
+    bool high;
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    napi_get_value_external(env, argv[0], (void **) &node_frame_encoder);
+    napi_get_value_bool(env, argv[1], &high);
+    frame_encoder_set_quality(&node_frame_encoder->encoder, high);
     return undefined(env);
 }
 
@@ -188,6 +202,7 @@ wlr_core_encoder_init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("createFrameEncoder", createFrameEncoder),
             DECLARE_NAPI_METHOD("destroyFrameEncoder", destroyFrameEncoder),
             DECLARE_NAPI_METHOD("requestKeyUnit", requestKeyUnit),
+            DECLARE_NAPI_METHOD("setQuality", setQuality),
             DECLARE_NAPI_METHOD("encodeFrame", encodeFrame),
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

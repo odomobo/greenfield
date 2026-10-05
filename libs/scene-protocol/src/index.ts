@@ -10,8 +10,9 @@
  * proxy encoder (u32 bufferId, u32 bufferCreationSerial, u32 contentSerial, u16 encoding type, ...). The whole surface.
  * PATCH payload (server -> viewer): u16le surface key length, surface key, then (all u32le) contentSerial, surface
  * width, surface height, x, y, width, height, then u8 format (`PatchFormat`), u8 channels (3 or 4), followed by the
- * pixels of that rectangle of the surface in that format: raw (RGB or RGBA, rows top to bottom), QOI, or the LZ4 block
- * of a QOI stream (see `PatchFormat`). The rectangle's width and height are the image's.
+ * pixels of that rectangle of the surface in that format: raw (RGB or RGBA, rows top to bottom), QOI, the LZ4 block
+ * of a QOI stream, a JPEG, or a JPEG with a grayscale JPEG of its alpha (see `PatchFormat`). The rectangle's width and
+ * height are the image's.
  *
  * FILE payload (viewer -> server): u32le file id, then the next bytes of that file: files dragged from the user's
  * computer onto the desktop are uploaded in chunks, announced by a `file-drop` message (ids, names, sizes), see there.
@@ -36,9 +37,11 @@
  * the viewer sends a fresh ACK (same `received`) whenever its last report was over that, or the server would wait
  * forever. Control envelopes are never acknowledged.
  *
- * A surface is either streamed as video (FRAME, H.264) or updated with lossless patches (raw, QOI or QOI + LZ4) (PATCH) of its changed
- * areas, see the encoding policy in ROADMAP.md. Frames and patches of one surface arrive in order and are applied in
- * order: a patch draws over whatever the surface showed (including the last video frame), a video frame replaces it.
+ * A surface is either streamed as video (FRAME, H.264) or updated with patches (PATCH) of its changed areas: lossless
+ * (raw, QOI or QOI + LZ4), or, for streaming surfaces while bandwidth is short, lossy (JPEG, JPEG with alpha), which a
+ * lossless patch replaces once bandwidth recovers. See the encoding policy in ROADMAP.md. Frames and patches of one
+ * surface arrive in order and are applied in order: a patch draws over whatever the surface showed (including the last
+ * video frame), a video frame replaces it.
  *
  * Window state (position, size, stacking, minimized, maximized) is the server's. The viewer changes it optimistically
  * (a drag shows the window where the pointer is right away) and reconciles with sequence numbers: every window.* change
@@ -70,7 +73,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 17
+export const PROTOCOL_VERSION = 18
 
 /**
  * The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). The
@@ -520,7 +523,7 @@ export function isDataEnvelope(data: Uint8Array): boolean {
 
 /**
  * How a patch's pixels are encoded (the format tag). Raw, QOI and QOI + LZ4 are lossless (the cascade of "Encoding
- * policy" in ROADMAP.md). 3 and 4 are reserved for JPEG and JPEG with alpha (lossy patches, later).
+ * policy" in ROADMAP.md); JPEG and JPEG with alpha are lossy, sent only for streaming surfaces while bandwidth is short.
  */
 export enum PatchFormat {
   /** width x height x channels bytes, RGB (opaque) or RGBA, rows top to bottom */
@@ -529,9 +532,34 @@ export enum PatchFormat {
   QOI = 1,
   /** the LZ4 block (no frame, no length prefix) of a QOI stream; the viewer decompresses it into a buffer of the QOI size bound */
   QOI_LZ4 = 2,
+  /** a baseline JPEG (4:4:4) of an opaque rectangle; channels is 3 */
+  JPEG = 3,
+  /**
+   * two baseline JPEGs: u32le length of the first, the color image (4:4:4, its alpha left out), then a grayscale JPEG
+   * whose one channel is the alpha (straight, not premultiplied); channels is 4. The viewer combines them like a video
+   * frame's color and alpha streams.
+   */
+  JPEG_ALPHA = 4,
 }
 
-/** A lossless update of a rectangle of a surface, see the PATCH envelope. */
+/** The color and alpha JPEGs of a JPEG_ALPHA patch (views into `data`). Throws if the lengths don't add up. */
+export function splitJpegAlpha(data: Uint8Array): { color: Uint8Array; alpha: Uint8Array } {
+  if (data.byteLength < 4) {
+    throw new Error('A JPEG with alpha patch is too short.')
+  }
+  const colorLength = new DataView(data.buffer, data.byteOffset, 4).getUint32(0, true)
+  if (colorLength === 0 || 4 + colorLength >= data.byteLength) {
+    throw new Error('A JPEG with alpha patch has a bad color length.')
+  }
+  return { color: data.subarray(4, 4 + colorLength), alpha: data.subarray(4 + colorLength) }
+}
+
+/** True for the formats that don't reproduce the pixels exactly. */
+export function isLossyPatchFormat(format: PatchFormat): boolean {
+  return format === PatchFormat.JPEG || format === PatchFormat.JPEG_ALPHA
+}
+
+/** An update of a rectangle of a surface, see the PATCH envelope. */
 export type Patch = {
   contentSerial: number
   /** size of the whole surface at the time the patch was made */
@@ -540,7 +568,7 @@ export type Patch = {
   rect: { x: number; y: number; width: number; height: number }
   /** how `data` is encoded */
   format: PatchFormat
-  /** 3 if the rectangle is opaque (the alpha was dropped), else 4 */
+  /** 3 if the rectangle is opaque (the alpha was dropped), else 4 (JPEG: 3, JPEG_ALPHA: 4) */
   channels: 3 | 4
   /** the rectangle's pixels in `format` */
   data: Uint8Array

@@ -303,13 +303,15 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
           new Promise<void>((resolve) =>
             desktop.handleFrame(surface, Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)), resolve),
           ),
-        // the same for a lossless patch: the raw RGBA pixels of the rectangle (base64, a RAW patch: it goes through the
-        // patch decoder worker like any other) and the size of the whole surface
+        // the same for a patch: the pixels of the rectangle (base64; by default raw RGBA, a RAW patch: it goes through
+        // the patch decoder worker like any other) and the size of the whole surface
         injectPatch: (
           surface: string,
           surfaceSize: { width: number; height: number },
           rect: { x: number; y: number; width: number; height: number },
-          rgba: string,
+          data: string,
+          format: PatchFormat = PatchFormat.RAW,
+          channels: 3 | 4 = 4,
         ) =>
           new Promise<void>((resolve) =>
             desktop.handlePatch(
@@ -318,9 +320,9 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
                 contentSerial: 0,
                 surfaceSize,
                 rect,
-                format: PatchFormat.RAW,
-                channels: 4,
-                data: Uint8Array.from(atob(rgba), (c) => c.charCodeAt(0)),
+                format,
+                channels,
+                data: Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
               },
               resolve,
             ),

@@ -181,13 +181,16 @@ declare namespace wlrCore {
   export function provideFiles(list: string): void
 
   export function createFrameEncoder(
-    encoderType: 'nvh264' | 'x264' | 'vaapih264',
+    encoderType: 'nvh264' | 'vaapih264',
     frameEncoded: (sample: Buffer | undefined) => void,
   ): FrameEncoder
 
   export function destroyFrameEncoder(encoder: FrameEncoder): void
 
   export function requestKeyUnit(encoder: FrameEncoder): void
+
+  /** The quality (a constant QP) of the frames from the next one on, which starts with a key frame if it changed. */
+  export function setQuality(encoder: FrameEncoder, high: boolean): void
 
   /** Encode the surface's current buffer; it stays locked (not released to the client) until encoded. */
   export function encodeFrame(encoder: FrameEncoder, sid: number, contentSerial: number, creationSerial: number): void

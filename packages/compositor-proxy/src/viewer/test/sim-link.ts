@@ -81,6 +81,10 @@ export type LinkConfig = {
   seed?: number
   /** called after every ack the controller processed (for debugging) */
   trace?: (now: number, controller: CongestionController) => void
+  /** called at the end of every pump: whether data waits, held back by the controller */
+  onPump?: (now: number, held: boolean, controller: CongestionController) => void
+  /** called for every item handed to the network */
+  onTransmit?: (now: number, size: number) => void
 }
 
 export type ItemRecord = {
@@ -253,6 +257,7 @@ export function simulate(config: LinkConfig, source: Source, durationMs: number)
     while (pendingControl.length && pendingControl[0] <= now) {
       controlDelays.push(now - pendingControl.shift()!)
     }
+    let held = false
     for (;;) {
       const size = source.peek(now)
       if (size === undefined) {
@@ -261,6 +266,7 @@ export function simulate(config: LinkConfig, source: Source, durationMs: number)
       }
       controller.setDataWaiting(true)
       if (!controller.canSend(size, now)) {
+        held = true
         const at = controller.nextSendTime(size, now)
         if (at !== Infinity && at < wakeAt) {
           wakeAt = at
@@ -276,8 +282,10 @@ export function simulate(config: LinkConfig, source: Source, durationMs: number)
       source.take(now)
       controller.onSend(size, now)
       noteState(now)
+      config.onTransmit?.(now, size)
       transmit(size, now)
     }
+    config.onPump?.(now, held, controller)
     const next = source.nextProduction(now)
     if (next !== Infinity && next > now) {
       scheduleProduction(next)

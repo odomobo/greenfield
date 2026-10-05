@@ -7,12 +7,12 @@ import type * as WlrCoreAddon from '../addons/wlr-core-addon'
 import { createLogger } from '../Logger.js'
 import { scheduleFrameCallback } from '../FramePacing.js'
 import { EncoderPool } from '../encoding/EncoderPool.js'
-import { EncodingContext, EncodingSink, SurfaceEncoder, SurfaceHost } from '../encoding/SurfaceEncoder.js'
+import { EncodingContext, EncodingSink, SurfaceEncoder, SurfaceHost, VideoQuality } from '../encoding/SurfaceEncoder.js'
 import { encodePng } from '../encoding/png.js'
 import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool } from '../encoding/PatchWorkerPool.js'
 import { Rect } from '../encoding/region.js'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
-import { ControlMessage } from '../viewer/ViewerTransport.js'
+import { ControlMessage, SimulatedLink } from '../viewer/ViewerTransport.js'
 import { frameInsets, type SceneRect, type SceneSurface, type SceneWindow } from '@gfld/scene-protocol'
 import { EvDevKeyCode } from './keys.js'
 import { Apps } from './Apps.js'
@@ -69,6 +69,7 @@ const LINES_PER_CLICK = 3
 /** A pooled GStreamer video encoder that encodes surfaces' current wlroots buffers. */
 class WlrEncoder {
   private readonly native: WlrCoreAddon.FrameEncoder
+  private quality: VideoQuality = 'high'
   private readonly queue: { resolve: (frame: Buffer) => void; reject: (error: Error) => void }[] = []
 
   constructor(
@@ -100,6 +101,13 @@ class WlrEncoder {
 
   requestKeyUnit(): void {
     this.wlr.requestKeyUnit(this.native)
+  }
+
+  setQuality(quality: VideoQuality): void {
+    if (quality !== this.quality) {
+      this.quality = quality
+      this.wlr.setQuality(this.native, quality === 'high')
+    }
   }
 
   destroy(): void {
@@ -143,6 +151,7 @@ type Window = {
 
 const inactiveSink: EncodingSink = {
   active: false,
+  bandwidthLimited: false,
   sendFrame: (_surface, _frame, _class, done) => done(false),
   sendPatch: (_surface, _patch, _class, done) => done(false),
   requireKeyFrame: () => undefined,
@@ -190,6 +199,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     const forwardingSink: EncodingSink = {
       get active() {
         return currentSink().active
+      },
+      get bandwidthLimited() {
+        return currentSink().bandwidthLimited
       },
       sendFrame: (surface, frame, surfaceClass, done) => this.sink.sendFrame(surface, frame, surfaceClass, done),
       sendPatch: (surface, patch, surfaceClass, done) => this.sink.sendPatch(surface, patch, surfaceClass, done),
@@ -1197,7 +1209,12 @@ function inputRegion(rects: Int32Array, width: number, height: number): SceneRec
 }
 
 /** Start the session's Wayland side on wlroots, with its app processes. */
-export function startWlrootsCompositor(config: { h264Encoder?: H264Encoder; videoStreams?: number }): {
+export function startWlrootsCompositor(config: {
+  h264Encoder?: H264Encoder
+  videoStreams?: number
+  /** development only: a simulated slow link to the viewer (see SimulatedLink) */
+  link?: SimulatedLink
+}): {
   viewerHost: ViewerHost
   compositor: WlrCompositor
   apps: Apps
@@ -1217,7 +1234,7 @@ export function startWlrootsCompositor(config: { h264Encoder?: H264Encoder; vide
   const apps = new Apps(compositor.waylandDisplay)
   apps.x11Display = compositor.x11Display
   compositor.clientListener = apps
-  return { viewerHost: new ViewerHost(compositor, compositor), compositor, apps }
+  return { viewerHost: new ViewerHost(compositor, compositor, { link: config.link }), compositor, apps }
 }
 
 /** The scene's size limit fields: only the ones that are set (0 is unbounded). */

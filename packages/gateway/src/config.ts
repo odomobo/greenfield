@@ -30,6 +30,8 @@ export type GatewayConfig = {
   viewerDir: string
   /** dev auth only: divides the sign-in delays so tests run fast (1 = production timing) */
   timeScale: number
+  /** dev auth only: sessions send to their viewer through a simulated link of this many kbit/s (0: none) */
+  linkKbps: number
 }
 
 const usage = `Usage: gateway [options]
@@ -45,11 +47,13 @@ const usage = `Usage: gateway [options]
   --allowed-origin <origin>  additionally accepted Origin (repeatable), e.g. https://desktop.example.com
   --encoder <auto|none|nvh264|vaapih264>
                              video encoder for busy windows (default auto: vaapih264 or nvh264 if the machine has
-                             GPU acceleration, else none). With none everything is sent as PNG patches.
+                             GPU acceleration, else none). With none everything is sent as patches.
   --render-device <path>     (default /dev/dri/renderD128)
   --dev-auth                 DEVELOPMENT ONLY: no PAM, no privilege separation. Sessions run as the current user,
                              who logs in with the password from $GREENFIELD_DEV_PASSWORD. Loopback only.
   --dev-time-scale <n>       with --dev-auth only: divide the failed-sign-in delay and the presence timeouts by n (tests)
+  --dev-link-kbps <n>        with --dev-auth only: sessions send to their viewer through a simulated link of n kbit/s
+                             (a FIFO that drains at that rate), to try the encoding on a slow link (tests)
 `
 
 function fail(message: string): never {
@@ -101,6 +105,7 @@ export function parseConfig(argv: string[]): GatewayConfig {
         'render-device': { type: 'string', default: '/dev/dri/renderD128' },
         'dev-auth': { type: 'boolean', default: false },
         'dev-time-scale': { type: 'string', default: '1' },
+        'dev-link-kbps': { type: 'string', default: '0' },
       },
     }).values
   } catch (e: any) {
@@ -134,6 +139,13 @@ export function parseConfig(argv: string[]): GatewayConfig {
   }
   if (timeScale !== 1 && !values['dev-auth']) {
     fail('--dev-time-scale is only allowed together with --dev-auth')
+  }
+  const linkKbps = Number(values['dev-link-kbps'])
+  if (!Number.isFinite(linkKbps) || linkKbps < 0) {
+    fail('invalid --dev-link-kbps')
+  }
+  if (linkKbps !== 0 && !values['dev-auth']) {
+    fail('--dev-link-kbps is only allowed together with --dev-auth')
   }
   const authMode: AuthMode = values['dev-auth'] ? 'dev' : 'pam'
   let devUser: string | undefined
@@ -178,6 +190,7 @@ export function parseConfig(argv: string[]): GatewayConfig {
     runtimeDir,
     authMode,
     timeScale,
+    linkKbps,
     devUser,
     devPassword,
     webUser: values['web-user']!,

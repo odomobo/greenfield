@@ -5,9 +5,11 @@ import { createLogger } from '../Logger.js'
 import type { SurfaceClass } from '../encoding/policy.js'
 import { setSocketSendBuffer, setTcpNotSentLowat } from '../socket-options.js'
 import { CongestionController } from './congestion.js'
+import { BandwidthMonitor } from './bandwidth.js'
 
 /** What the transport needs of a congestion controller (tests pass one that never holds anything back). */
-export type Congestion = Pick<CongestionController, 'canSend' | 'nextSendTime' | 'onSend' | 'onAck' | 'setDataWaiting'>
+export type Congestion = Pick<CongestionController, 'canSend' | 'nextSendTime' | 'onSend' | 'onAck' | 'setDataWaiting'> &
+  Partial<Pick<CongestionController, 'bandwidthEstimate'>>
 import {
   AudioPacket,
   decodeViewerEnvelope,
@@ -16,6 +18,7 @@ import {
   encodeFrame,
   encodePatch,
   isKeyFrame,
+  isLossyPatchFormat,
   Patch,
   ViewerAck,
 } from './protocol.js'
@@ -76,6 +79,12 @@ export interface ViewerTransport {
   /** Drop the unsent patches of this surface. */
   dropPatches(surface: string): void
 
+  /**
+   * The link is short of bandwidth for the streaming class (see bandwidth.ts): its surfaces go lossy (JPEG patches,
+   * lower-quality video) while it is.
+   */
+  readonly bandwidthLimited: boolean
+
   close(code: number, reason: string): void
 
   readonly closed: boolean
@@ -114,8 +123,16 @@ const MAX_UNSENT_FRAMES_PER_SURFACE = 3
 
 type QueuedEntry = { readonly surfaceClass: SurfaceClass; readonly done?: (sent: boolean) => void } & (
   | { readonly kind: 'frame'; readonly frame: Uint8Array }
-  | { readonly kind: 'patch'; readonly envelope: Uint8Array }
+  | { readonly kind: 'patch'; readonly envelope: Uint8Array; readonly pixels: number; readonly lossy: boolean }
 )
+
+/**
+ * DEVELOPMENT ONLY (the gateway's --dev-link-kbps): a simulated bottleneck of this many bytes per ms between the
+ * transport and the socket. Everything sent (control messages and audio too, in order) waits in a FIFO and leaves at
+ * that rate, as through a slow link with a deep buffer, so the congestion controller sees the queue and the bandwidth.
+ * As with a real socket, a write is done (the item's slot is free) as soon as the FIFO took it.
+ */
+export type SimulatedLink = { bytesPerMs: number }
 
 function dropEntries(entries: QueuedEntry[]) {
   for (const entry of entries) {
@@ -176,13 +193,30 @@ export class WebSocketViewerTransport implements ViewerTransport {
   private safetyLimitLogged = false
   private audioDropLogged = false
   private _closed = false
+  private readonly bandwidth: BandwidthMonitor
+  private readonly link?: SimulatedLink
+  /** the simulated link's queue (see SimulatedLink) and when it is free again */
+  private readonly linkQueue: { data: Uint8Array; at: number }[] = []
+  private linkFreeAt = 0
+  private linkTimer?: NodeJS.Timeout
 
   constructor(
     private readonly ws: WebSocket,
-    options: { now?: () => number; congestion?: Congestion } = {},
+    options: { now?: () => number; congestion?: Congestion; link?: SimulatedLink } = {},
   ) {
     this.now = options.now ?? (() => performance.now())
     this.congestion = options.congestion ?? new CongestionController({ now: this.now() })
+    this.link = options.link
+    this.bandwidth = new BandwidthMonitor(
+      this.now(),
+      () => this.congestion.bandwidthEstimate ?? 0,
+      (limited, period) =>
+        logger.info(
+          limited
+            ? `Bandwidth-limited: streaming surfaces go lossy (held back ${Math.round(period.held * 100)}% of the last second).`
+            : `No longer bandwidth-limited: streaming surfaces go lossless again (held back ${Math.round(period.held * 100)}%, lossless demand ${Math.round(period.demand * 100)}% of the bandwidth).`,
+        ),
+    )
     ws.binaryType = 'nodebuffer'
     this.limitSocketBacklog()
     ws.on('message', (data: Buffer, isBinary: boolean) => {
@@ -211,6 +245,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
     ws.on('close', (code, reason) => {
       this._closed = true
       this.clearPacingTimer()
+      this.clearLink()
       this.dropAll()
       this.onClose(code, reason.toString())
     })
@@ -219,6 +254,10 @@ export class WebSocketViewerTransport implements ViewerTransport {
 
   get closed(): boolean {
     return this._closed
+  }
+
+  get bandwidthLimited(): boolean {
+    return this.bandwidth.limited(this.now())
   }
 
   send(message: OutgoingMessage): void {
@@ -237,7 +276,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
     } else if (message.priority === 'frame') {
       this.queueFrame(message.surface, message.frame, message.surfaceClass, message.done)
     } else {
-      this.queuePatch(message.surface, encodePatch(message.surface, message.patch), message.surfaceClass, message.done)
+      this.queuePatch(message.surface, message.patch, message.surfaceClass, message.done)
     }
     this.pump()
   }
@@ -255,7 +294,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
     }
     // after queued control messages (normally none wait), before any data item
     this.flushControl()
-    this.ws.send(encodeAudio(packet), { binary: true })
+    this.write(encodeAudio(packet))
   }
 
   close(code: number, reason: string): void {
@@ -264,6 +303,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
     }
     this._closed = true
     this.clearPacingTimer()
+    this.clearLink()
     this.dropAll()
     this.controlQueue.length = 0
     this.ws.close(code, reason)
@@ -335,13 +375,15 @@ export class WebSocketViewerTransport implements ViewerTransport {
     }
   }
 
-  private queuePatch(
-    surface: string,
-    envelope: Uint8Array,
-    surfaceClass: SurfaceClass,
-    done?: (sent: boolean) => void,
-  ) {
-    const entry: QueuedEntry = { kind: 'patch', envelope, surfaceClass, done }
+  private queuePatch(surface: string, patch: Patch, surfaceClass: SurfaceClass, done?: (sent: boolean) => void) {
+    const entry: QueuedEntry = {
+      kind: 'patch',
+      envelope: encodePatch(surface, patch),
+      pixels: patch.rect.width * patch.rect.height,
+      lossy: isLossyPatchFormat(patch.format),
+      surfaceClass,
+      done,
+    }
     const chain = this.pendingFrames.get(surface)
     if (chain === undefined) {
       this.pendingFrames.set(surface, [entry])
@@ -432,6 +474,8 @@ export class WebSocketViewerTransport implements ViewerTransport {
     this.flushControl()
 
     this.congestion.setDataWaiting(this.pendingFrames.size > 0)
+    // data waits because the controller or the socket holds it back (not because there's none)
+    let held = false
     for (;;) {
       if (this.ws.bufferedAmount > SEND_BUFFERED_LIMIT) {
         // a send's callback pumps again
@@ -439,6 +483,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
           this.safetyLimitLogged = true
           logger.info(`More than ${SEND_BUFFERED_LIMIT} bytes buffered for the viewer, holding data items.`)
         }
+        held = true
         break
       }
       const now = this.now()
@@ -454,6 +499,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
         if (refused !== undefined) {
           // paced: wake up when it's due; waiting for an ack (or the viewer's backlog report): the ack pumps
           this.schedulePacing(this.congestion.nextSendTime(refused, now), now)
+          held = true
         }
         break
       }
@@ -464,24 +510,80 @@ export class WebSocketViewerTransport implements ViewerTransport {
           this.keyFrameSent.add(surface)
         }
         data = encodeFrame(surface, entry.frame)
+        this.bandwidth.onSent({ kind: 'frame', surface, surfaceClass: entry.surfaceClass, bytes: data.length }, now)
       } else {
         data = entry.envelope
+        this.bandwidth.onSent(
+          {
+            kind: 'patch',
+            surface,
+            surfaceClass: entry.surfaceClass,
+            bytes: data.length,
+            pixels: entry.pixels,
+            lossy: entry.lossy,
+          },
+          now,
+        )
       }
       this.congestion.onSend(data.length, now)
       // The callback fires once the data was handed to the kernel. With TCP_NOTSENT_LOWAT that means most of it has
       // actually left; the slot it took is free from then on.
-      this.ws.send(data, { binary: true }, () => {
+      this.write(data, () => {
         entry.done?.(true)
         this.pump()
       })
     }
     this.congestion.setDataWaiting(this.pendingFrames.size > 0)
+    this.bandwidth.setHeld(held && this.findHead('streaming') !== undefined, this.now())
   }
 
   private flushControl() {
     while (this.controlQueue.length) {
-      this.ws.send(this.controlQueue.shift()!, { binary: true }, () => this.pump())
+      this.write(this.controlQueue.shift()!, () => this.pump())
     }
+  }
+
+  /** Hand bytes to the socket (through the simulated link, if there is one); `sent` once the socket took them. */
+  private write(data: Uint8Array, sent?: () => void) {
+    if (this.link === undefined) {
+      this.ws.send(data, { binary: true }, sent)
+      return
+    }
+    const now = this.now()
+    this.linkFreeAt = Math.max(now, this.linkFreeAt) + data.byteLength / this.link.bytesPerMs
+    this.linkQueue.push({ data, at: this.linkFreeAt })
+    this.scheduleLink(now)
+    if (sent) {
+      queueMicrotask(sent)
+    }
+  }
+
+  private scheduleLink(now: number) {
+    if (this.linkTimer !== undefined || this.linkQueue.length === 0) {
+      return
+    }
+    this.linkTimer = setTimeout(
+      () => {
+        this.linkTimer = undefined
+        const now = this.now()
+        while (this.linkQueue.length && this.linkQueue[0].at <= now) {
+          const { data } = this.linkQueue.shift()!
+          if (this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(data, { binary: true })
+          }
+        }
+        this.scheduleLink(now)
+      },
+      Math.max(0, Math.ceil(this.linkQueue[0].at - now)),
+    )
+  }
+
+  private clearLink() {
+    if (this.linkTimer !== undefined) {
+      clearTimeout(this.linkTimer)
+      this.linkTimer = undefined
+    }
+    this.linkQueue.length = 0
   }
 
   private schedulePacing(at: number, now: number) {

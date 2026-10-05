@@ -149,6 +149,7 @@ class FakeCore {
     },
     destroyFrameEncoder: () => undefined,
     requestKeyUnit: () => undefined,
+    setQuality: () => undefined,
     encodeFrame: () => undefined,
   }
 
@@ -924,6 +925,7 @@ function holdingSink() {
   const held: ((sent: boolean) => void)[] = []
   const sink: EncodingSink = {
     active: true,
+    bandwidthLimited: false,
     sendFrame: (_surface, _frame, _class, done) => held.push(done),
     sendPatch: (_surface, _patch, _class, done) => held.push(done),
     requireKeyFrame: () => undefined,

@@ -1,9 +1,10 @@
 // Builds the video frames scripts/e2e/video.sh feeds to the viewer, printed as JSON ({ opaque, alpha, withAlpha } as
-// base64 FRAME payloads, see scene-protocol's parseEncodedFrame), encoded by GStreamer's x264enc the way the server's CPU
-// path does (compositor-proxy's gst_frame_encoder.c: I420 BT.601 limited range, High profile, byte stream).
+// base64 FRAME payloads, see scene-protocol's parseEncodedFrame), encoded by GStreamer's x264enc in the layout of the
+// server's (hardware) encoders, compositor-proxy's gst_frame_encoder.c: BT.601 limited range, High profile, byte stream.
+// (The server has no x264 encoder anymore; x264enc here just makes test streams without a GPU.)
 //
-// The image is 40x30 pixels in a coded frame of 48x32 (the encoder pads to a multiple of 16 at the top left, the image sits
-// in the bottom right corner):
+// The image is 40x30 pixels in a coded frame of 48x32 (padded to a multiple of 16 at the top left, the image sits in the
+// bottom right corner):
 //   color:  the left half red, the right half blue (the padding black);
 //   alpha:  the left half transparent, the right half opaque, except the bottom 10 rows, which are half transparent.
 // Usage: node video-fixture.js <work dir>

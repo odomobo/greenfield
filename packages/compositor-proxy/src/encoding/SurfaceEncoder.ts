@@ -1,20 +1,25 @@
 /**
  * Per-surface encoding state machine (see "Encoding policy" in ROADMAP.md). A surface is in the normal or the
- * streaming priority class (relentless surfaces, see RelentlessMeter). Its content goes out as lossless patches of
- * the damaged areas, or, for streaming surfaces when a hardware video encoder is available, as H.264 video of the whole
- * surface. Each surface has a few slots for items (patches or video frames) between capture and the socket. Native code
- * is reached only through the injected host, sink and pool, so this runs (and is tested) without it.
+ * streaming priority class (relentless surfaces, see RelentlessMeter). Its content goes out as patches of the damaged
+ * areas, or, for streaming surfaces when a hardware video encoder is available, as H.264 video of the whole surface.
+ * Patches are lossless, except a streaming surface's while the link is short of bandwidth (the sink says so): those may
+ * be JPEG. The areas whose last update was lossy (JPEG patches, video) are tracked and sent again losslessly once the
+ * surface no longer goes lossy. Each surface has a few slots for items (patches or video frames) between capture and
+ * the socket. Native code is reached only through the injected host, sink and pool, so this runs (and is tested)
+ * without it.
  */
-import type { Patch } from '@gfld/scene-protocol'
+import { isLossyPatchFormat, type Patch } from '@gfld/scene-protocol'
 import { EncoderPool } from './EncoderPool.js'
 import type { EncodedPatch } from './patch-encoder.js'
 import { MAX_PATCH_PIXELS, PeriodFractions, planPatches, RelentlessMeter, SurfaceClass } from './policy.js'
-import { area, clip, intersect, Rect } from './region.js'
+import { area, boundingBox, clip, disjoint, intersect, Rect, subtract } from './region.js'
 
 /** Items (patches or video frames) of one surface that may exist between capture and the socket. */
 export const SURFACE_SLOTS = 2
 /** Patches of normal surfaces encoding at once (on libuv's thread pool). */
 export const MAX_NORMAL_ENCODES = 4
+/** A surface's lossy area in more pieces than this is tracked as its bounding box (refreshing a little more). */
+export const MAX_LOSSY_RECTS = 32
 
 export type BufferInfo = {
   bufferId: number
@@ -24,8 +29,13 @@ export type BufferInfo = {
   height: number
 }
 
+/** Video has a fixed quality target (and a variable bitrate): higher, or lower while bandwidth is short. */
+export type VideoQuality = 'high' | 'low'
+
 export interface VideoEncoder {
   requestKeyUnit(): void
+  /** the quality of the frames encoded from now on (cheap when it doesn't change) */
+  setQuality(quality: VideoQuality): void
   destroy(): void
 }
 
@@ -33,6 +43,8 @@ export interface VideoEncoder {
 export interface EncodingSink {
   /** true if a viewer is attached; nothing is encoded without one */
   readonly active: boolean
+  /** the link is short of bandwidth: streaming surfaces go lossy (JPEG patches, lower-quality video) */
+  readonly bandwidthLimited: boolean
   /** `done` must be called exactly once: when the frame was handed to the network (true) or dropped (false) */
   sendFrame(surface: string, frame: Uint8Array, surfaceClass: SurfaceClass, done: (sent: boolean) => void): void
   /** `done` must be called exactly once: when the patch was handed to the network (true) or dropped (false) */
@@ -78,6 +90,8 @@ type CapturedPatch = {
   serial: number
   epoch: number
   surfaceClass: SurfaceClass
+  /** may be encoded lossily (JPEG), if that's smaller */
+  lossy: boolean
 }
 
 /** What the patch pump needs of a surface. */
@@ -89,6 +103,8 @@ export interface PatchSource {
   readonly surfaceClass: SurfaceClass
   /** Takes a slot, which the pump gives back with `releaseSlot` once the patch is sent or dropped. */
   capturePatch(): CapturedPatch | undefined
+  /** A patch goes to the sink now (called in capture order): whether its area is now lossy or lossless. */
+  patchSending(rect: Rect, lossy: boolean): void
   releaseSlot(): void
   /** false if results captured at this epoch are stale (class switched, surface destroyed) */
   isCurrent(epoch: number): boolean
@@ -116,6 +132,12 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   private videoWanted?: 'delta' | 'key'
   /** video encodings in flight, they still read their buffer */
   private readonly videoInFlight = new Set<Promise<void>>()
+  /**
+   * The areas whose last update sent was lossy (disjoint, at most MAX_LOSSY_RECTS): sent again losslessly once the
+   * surface no longer goes lossy. Updated in send order, so a later lossless patch always clears what an earlier lossy
+   * one marked (and never the other way round).
+   */
+  private lossyArea: Rect[] = []
 
   constructor(
     readonly key: string,
@@ -175,12 +197,23 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     return this.queued
   }
 
+  /** The areas whose last update was lossy, for tests. */
+  get lossyRegion(): readonly Rect[] {
+    return this.lossyArea
+  }
+
+  /** New patches may be lossy: a streaming surface while the link is short of bandwidth. */
+  private get goesLossy(): boolean {
+    return this.surfaceClass === 'streaming' && this.context.sink.bandwidthLimited
+  }
+
   /**
    * The surface committed a new buffer with this damage (buffer coordinates). Returns when no encoding still needs the
    * buffer.
    */
   commit(damage: Rect[]): Promise<void> {
     const result = this.commitNow(damage)
+    this.refreshLossy()
     this.updateBusy()
     return result
   }
@@ -237,6 +270,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     if (buffer && !this._destroyed) {
       this.updateBusy()
       void this.evaluate(this.context.now(), buffer)
+      this.refreshLossy()
+      this.updateBusy()
     }
   }
 
@@ -333,9 +368,18 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
         serial: buffer.contentSerial,
         epoch: this.epoch,
         surfaceClass: this.surfaceClass,
+        lossy: this.goesLossy,
       }
     }
     return undefined
+  }
+
+  patchSending(rect: Rect, lossy: boolean): void {
+    if (lossy) {
+      this.markLossy([rect])
+    } else if (this.lossyArea.length) {
+      this.lossyArea = subtract(this.lossyArea, [rect])
+    }
   }
 
   /** An item was handed to the socket or dropped: its slot is free again. */
@@ -347,7 +391,42 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       this.context.pump.schedule(this)
     }
     void this.pumpVideo()
+    this.refreshLossy()
     this.updateBusy()
+  }
+
+  private markLossy(region: Rect[]) {
+    let lossy = disjoint([...this.lossyArea, ...region])
+    if (lossy.length > MAX_LOSSY_RECTS) {
+      const box = boundingBox(lossy)
+      lossy = box ? [box] : []
+    }
+    this.lossyArea = lossy
+  }
+
+  /**
+   * Once the surface no longer goes lossy (it was demoted, or bandwidth recovered) and its pending damage is sent (none
+   * queued, nothing in its slots), send its lossy areas again, losslessly.
+   */
+  private refreshLossy() {
+    if (
+      this.lossyArea.length === 0 ||
+      this._destroyed ||
+      this.lease !== undefined ||
+      this.hasUnsentWork ||
+      this.goesLossy ||
+      !this.context.sink.active
+    ) {
+      return
+    }
+    const buffer = this.host.currentBuffer()
+    if (buffer === undefined || this.patchUnsupported) {
+      return
+    }
+    const region = this.lossyArea
+    this.lossyArea = []
+    this.context.logger.info?.(`Surface ${this.key}: sending its ${area(region)} lossy pixels again, losslessly.`)
+    this.queuePatches(region, boundsOf(buffer))
   }
 
   isCurrent(epoch: number): boolean {
@@ -423,16 +502,23 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this.epoch++
     this.queued = []
     this.context.sink.dropPatches(this.key)
+    const buffer = this.host.currentBuffer()
+    if (buffer) {
+      // video is lossy all over
+      this.lossyArea = [boundsOf(buffer)]
+    }
     return this.requestVideo(true)
   }
 
-  /** Stop the video: a crisp lossless image of the whole surface replaces it. */
+  /** Stop the video: a crisp lossless image of the whole surface replaces it (unless the surface still goes lossy). */
   private stopVideo(buffer: BufferInfo) {
     this.releaseLease()
     this.videoWanted = undefined
     this.epoch++
     this.queued = []
     if (this.context.sink.active) {
+      // the whole surface is about to be sent, a lossy part of it marks itself again
+      this.lossyArea = []
       this.queuePatches([boundsOf(buffer)], boundsOf(buffer))
     }
     this.updateBusy()
@@ -466,6 +552,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     }
     this.videoWanted = undefined
     this.slotsUsed++
+    lease.setQuality(sink.bandwidthLimited ? 'low' : 'high')
     const epoch = this.epoch
     const surfaceClass = this.surfaceClass
     let released = false
@@ -508,7 +595,13 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   }
 }
 
-export type PatchEncode = (rgba: Uint8Array, width: number, height: number, opaque: boolean) => Promise<EncodedPatch>
+export type PatchEncode = (
+  rgba: Uint8Array,
+  width: number,
+  height: number,
+  opaque: boolean,
+  lossy?: boolean,
+) => Promise<EncodedPatch>
 
 /** A pool of worker threads that encodes patches (PatchWorkerPool): the low priority one is the streaming class's. */
 export interface StreamingEncodePool {
@@ -629,7 +722,13 @@ export class PatchPump {
       }
       encoding.then(finished, finished)
     } else {
-      encoding = this.streaming.encode(captured.pixels, captured.rect.width, captured.rect.height, captured.opaque)
+      encoding = this.streaming.encode(
+        captured.pixels,
+        captured.rect.width,
+        captured.rect.height,
+        captured.opaque,
+        captured.lossy,
+      )
     }
     const previous = this.sendTails.get(surface) ?? resolved
     const tail = previous
@@ -640,6 +739,7 @@ export class PatchPump {
             done()
             return
           }
+          surface.patchSending(captured.rect, isLossyPatchFormat(encoded.format))
           this.sink.sendPatch(
             surface.key,
             { contentSerial: captured.serial, surfaceSize: captured.surfaceSize, rect: captured.rect, ...encoded },
@@ -693,6 +793,8 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
   }
 
   tick(): void {
+    // (reading it also lets the sink judge its bandwidth on time, when no surface asks)
+    void this.sink.bandwidthLimited
     for (const surface of this.surfaces) {
       surface.tick()
     }

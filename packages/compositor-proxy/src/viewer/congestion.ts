@@ -278,6 +278,11 @@ export class CongestionController {
     return this.backlogBytes - this.largestPendingBytes > this.backlogHoldBytes
   }
 
+  /** The bottleneck bandwidth estimate (max_bw), in bytes per ms; 0 while unknown. */
+  get bandwidthEstimate(): number {
+    return this.max_bw
+  }
+
   /** Items sent and not yet acked. */
   get itemsInFlight(): number {
     return this.sent.length

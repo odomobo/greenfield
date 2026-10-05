@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { decodeEnvelope, encodePatch, PatchFormat, PROTOCOL_VERSION } from '@gfld/scene-protocol'
+import {
+  decodeEnvelope,
+  encodePatch,
+  isLossyPatchFormat,
+  PatchFormat,
+  PROTOCOL_VERSION,
+  splitJpegAlpha,
+} from '@gfld/scene-protocol'
 
 describe('the PATCH envelope', () => {
-  for (const format of [PatchFormat.RAW, PatchFormat.QOI, PatchFormat.QOI_LZ4]) {
+  for (const format of [PatchFormat.RAW, PatchFormat.QOI, PatchFormat.QOI_LZ4, PatchFormat.JPEG, PatchFormat.JPEG_ALPHA]) {
     for (const channels of [3, 4] as const) {
       it(`round trips format ${PatchFormat[format]} with ${channels} channels`, () => {
         const data = new Uint8Array([1, 2, 3, 4, 5, 250])
@@ -49,5 +56,32 @@ describe('the PATCH envelope', () => {
 
   it('format tags are stable (JPEG and JPEG with alpha are reserved after them)', () => {
     assert.deepEqual([PatchFormat.RAW, PatchFormat.QOI, PatchFormat.QOI_LZ4], [0, 1, 2])
+  })
+})
+
+describe('lossy patch formats', () => {
+  it('are JPEG and JPEG with alpha only', () => {
+    assert.deepEqual(
+      [PatchFormat.RAW, PatchFormat.QOI, PatchFormat.QOI_LZ4, PatchFormat.JPEG, PatchFormat.JPEG_ALPHA].map(
+        isLossyPatchFormat,
+      ),
+      [false, false, false, true, true],
+    )
+  })
+
+  it("a JPEG with alpha splits into the color JPEG (after its u32le length) and the alpha JPEG", () => {
+    const data = new Uint8Array([3, 0, 0, 0, 10, 11, 12, 20, 21])
+    const { color, alpha } = splitJpegAlpha(data.subarray(0))
+    assert.deepEqual([...color], [10, 11, 12])
+    assert.deepEqual([...alpha], [20, 21])
+    // also from a view into a larger message
+    const message = new Uint8Array([9, 9, ...data])
+    assert.deepEqual([...splitJpegAlpha(message.subarray(2)).alpha], [20, 21])
+  })
+
+  it('a JPEG with alpha whose lengths do not add up is rejected', () => {
+    assert.throws(() => splitJpegAlpha(new Uint8Array([1, 0])))
+    assert.throws(() => splitJpegAlpha(new Uint8Array([0, 0, 0, 0, 1])))
+    assert.throws(() => splitJpegAlpha(new Uint8Array([5, 0, 0, 0, 1, 2, 3, 4, 5])), 'no alpha JPEG')
   })
 })

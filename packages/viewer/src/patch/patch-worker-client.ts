@@ -2,13 +2,16 @@ import type { Patch } from '../protocol'
 import type { PatchDecodeReply, PatchDecodeRequest } from './patch-worker'
 import PatchWorker from './patch-worker.ts?worker'
 
+/** A decoded patch: its image, and for a JPEG with alpha the alpha as a second image (in its red channel). */
+export type PatchImages = { bitmap: ImageBitmap; alpha?: ImageBitmap }
+
 /** Decodes patches in a Web Worker (started on first use). */
 export class PatchDecoderClient {
   private worker?: Worker
   private nextId = 1
-  private readonly pending = new Map<number, { resolve: (bitmap: ImageBitmap) => void; reject: (error: Error) => void }>()
+  private readonly pending = new Map<number, { resolve: (images: PatchImages) => void; reject: (error: Error) => void }>()
 
-  decode(patch: Patch): Promise<ImageBitmap> {
+  decode(patch: Patch): Promise<PatchImages> {
     const worker = this.start()
     const id = this.nextId++
     // our own copy: `patch.data` is a view into the received message, which must not travel along with it
@@ -37,9 +40,10 @@ export class PatchDecoderClient {
         if (pending === undefined) {
           if ('bitmap' in reply) {
             reply.bitmap.close()
+            reply.alpha?.close()
           }
         } else if ('bitmap' in reply) {
-          pending.resolve(reply.bitmap)
+          pending.resolve({ bitmap: reply.bitmap, alpha: reply.alpha })
         } else {
           pending.reject(new Error(reply.error))
         }

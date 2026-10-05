@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # End-to-end test of the viewer's video path in a headless browser (the other scripts run with --encoder none, so no video
-# reaches the viewer there). Needs no session: H.264 frames encoded with GStreamer's x264enc, the way the server's CPU
-# encode path does (scripts/e2e/video-fixture.js), are fed to the viewer through its test hook, and the pixels of the surface's
-# canvas are checked:
+# reaches the viewer there). Needs no session: H.264 frames encoded with GStreamer's x264enc in the stream layout the
+# server's hardware encoders produce (scripts/e2e/video-fixture.js), are fed to the viewer through its test hook, and
+# the pixels of the surface's canvas are checked:
 #   1. opaque video: the image is cropped out of the padded frame (the bottom right corner) and its colors are right
 #      (red left, blue right), drawn straight from the decoder's frame;
 #   2. video with alpha: the left half is transparent, the right half opaque, the bottom rows half transparent, and the colors
 #      are right (the shared WebGL context combines the color and alpha streams);
-#   3. patches drawn over video replace its pixels (transparent ones too), and a patch of another size stretches what was there.
+#   3. patches drawn over video replace its pixels (transparent ones too), and a patch of another size stretches what was there;
+#   4. lossy patches: a JPEG, and a JPEG with alpha (its two images combined by the same shared WebGL context as video
+#      with alpha), where alpha of 254 or more comes out fully opaque.
 #
 # Requires: gst-launch-1.0 with x264enc, playwright-cli (for its Playwright library and Chrome), curl, node, the built
 # packages (yarn build). Usage: scripts/e2e/video.sh   (GATEWAY_PORT)
@@ -106,4 +108,44 @@ near "the old content, stretched" "$(alpha_pixel 76 56)" "0,0,255,128"
 near "the patch" "$(alpha_pixel 1 1)" "255,255,0,255"
 echo "    ok"
 
-echo "PASS: video: opaque frames are cropped and colored right, video with alpha is transparent where it should be, patches replace pixels"
+step "lossy patches: a JPEG, and a JPEG with alpha combined like video with alpha"
+# JPEGs made by the page (OffscreenCanvas), as base64: a 16x8 rectangle, the left half one color and the right half another
+JPEG_JS='async (left, right) => {
+    const canvas = new OffscreenCanvas(16, 8)
+    const context = canvas.getContext("2d")
+    context.fillStyle = left
+    context.fillRect(0, 0, 8, 8)
+    context.fillStyle = right
+    context.fillRect(8, 0, 8, 8)
+    return new Uint8Array(await (await canvas.convertToBlob({ type: "image/jpeg", quality: 0.95 })).arrayBuffer())
+  }'
+jpeg_pixel() { pw_eval "() => window.__viewerTest.surfacePixels('test/jpeg', $1, $2, 1, 1).join(',')" | tr -d '"'; }
+pw_eval "async () => {
+  const jpeg = $JPEG_JS
+  const base64 = (bytes) => btoa(String.fromCharCode(...bytes))
+  // opaque: red and blue
+  await window.__viewerTest.injectPatch('test/jpeg', { width: 40, height: 30 }, { x: 0, y: 0, width: 16, height: 8 },
+    base64(await jpeg('#ff0000', '#0000ff')), 3, 3)
+  // with alpha: green, opaque on the left and transparent on the right
+  const color = await jpeg('#00ff00', '#00ff00')
+  const alpha = await jpeg('#ffffff', '#000000')
+  const data = new Uint8Array(4 + color.length + alpha.length)
+  new DataView(data.buffer).setUint32(0, color.length, true)
+  data.set(color, 4)
+  data.set(alpha, 4 + color.length)
+  await window.__viewerTest.injectPatch('test/jpeg', { width: 40, height: 30 }, { x: 0, y: 16, width: 16, height: 8 },
+    base64(data), 4, 4)
+  return true
+}" >/dev/null
+[ "$(pw_eval "() => window.__viewerTest.patchKinds()['3/3'] > 0 && window.__viewerTest.patchKinds()['4/4'] > 0")" = true ] ||
+  fail "the JPEG patches weren't applied: $(pw_eval "() => JSON.stringify(window.__viewerTest.patchKinds())")"
+near "a JPEG, left" "$(jpeg_pixel 3 4)" "255,0,0,255"
+near "a JPEG, right" "$(jpeg_pixel 12 4)" "0,0,255,255"
+near "a JPEG with alpha, opaque half" "$(jpeg_pixel 3 20)" "0,255,0,255"
+near "a JPEG with alpha, transparent half" "$(jpeg_pixel 12 20)" "0,0,0,0"
+# the alpha JPEG rounds 255 down here and there: 254 and up count as opaque
+OPAQUE_ALPHAS="$(pw_eval "() => { const p = window.__viewerTest.surfacePixels('test/jpeg', 0, 16, 6, 8); return [...new Set(p.filter((_, i) => i % 4 === 3))].join(',') }" | tr -d '"')"
+[ "$OPAQUE_ALPHAS" = 255 ] || fail "the opaque half of the JPEG with alpha should be fully opaque, its alphas: $OPAQUE_ALPHAS"
+echo "    ok"
+
+echo "PASS: video: opaque frames are cropped and colored right, video with alpha is transparent where it should be, patches replace pixels, lossy patches too"

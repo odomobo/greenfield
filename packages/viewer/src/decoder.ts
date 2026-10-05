@@ -18,11 +18,13 @@ export type DecodedFrame = {
 /** one worker for all surfaces: patches of a surface are applied in order (SurfaceDecoder's queue) */
 const patchDecoder = new PatchDecoderClient()
 
-/** A decoded lossless update of a rectangle of a surface. */
+/** A decoded update of a rectangle of a surface. */
 export type DecodedPatch = {
   surfaceSize: { width: number; height: number }
   rect: { x: number; y: number; width: number; height: number }
   bitmap: ImageBitmap
+  /** a JPEG with alpha's alpha, in its red channel: combined with `bitmap` by the AlphaCompositor */
+  alpha?: ImageBitmap
 }
 
 const decoderConfig: VideoDecoderConfig = {
@@ -116,10 +118,10 @@ export class SurfaceDecoder {
     return this.enqueue(async () => {
       // the surface is on patches now, its video stream (if any) is over: the next one starts with a key frame
       this.close()
-      // decoded in a Web Worker (wasm QOI + LZ4), the exact pixels as for the PNGs before: no color space conversion,
-      // no premultiplication round trip
-      const bitmap = await patchDecoder.decode(patch)
-      return { surfaceSize: patch.surfaceSize, rect: patch.rect, bitmap }
+      // decoded in a Web Worker (wasm QOI + LZ4, the browser's JPEG decoder), the exact pixels of lossless patches: no
+      // color space conversion, no premultiplication round trip
+      const { bitmap, alpha } = await patchDecoder.decode(patch)
+      return { surfaceSize: patch.surfaceSize, rect: patch.rect, bitmap, alpha }
     })
   }
 

@@ -376,6 +376,7 @@ export class Monitor {
       encoder: this.encoder,
       renderDevice: this.config.renderDevice,
       timeScale: this.config.timeScale,
+      linkKbps: this.config.linkKbps,
     }
     child.send(start)
     log.info(`Started session ${id} for ${user.username}.`)

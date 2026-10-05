@@ -26,10 +26,10 @@ describe('the AUDIO envelope', () => {
     assert.equal(envelope.kind === 'audio' && envelope.timestamp, 16)
   })
 
-  it('starts with the protocol version (17) and kind 6, and has a header of 8 bytes', () => {
+  it('starts with the protocol version (18) and kind 6, and has a header of 8 bytes', () => {
     const bytes = encodeAudio({ seq: 1, timestamp: 2, opus: new Uint8Array(10) })
-    assert.equal(PROTOCOL_VERSION, 17)
-    assert.deepEqual([...bytes.subarray(0, 2)], [17, 6])
+    assert.equal(PROTOCOL_VERSION, 18)
+    assert.deepEqual([...bytes.subarray(0, 2)], [18, 6])
     assert.equal(bytes.length, 18)
   })
 
