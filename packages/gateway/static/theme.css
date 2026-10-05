@@ -66,8 +66,10 @@
   --color-frame-inactive: var(--surface-passive);
   --color-frame-text: #ffffff;
   --color-frame-text-inactive: #a9b0bf;
-  --color-frame-border: var(--surface-edge);
-  --color-frame-border-active: var(--surface-edge);
+  /* opaque: --surface-edge only reads as dark gray over a surface's own dark glass, and a window's border has none
+     under it (it would light up the picture behind it) */
+  --color-frame-border: #2a2a2a;
+  --color-frame-border-active: #2a2a2a;
   --radius-frame: 8px;
   --color-frame-close: #c42b1c;
   --color-frame-on-close: #ffffff;
