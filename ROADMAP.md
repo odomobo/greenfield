@@ -938,6 +938,34 @@ single large item never stalls the link. Initial window before any estimate: 64 
      the title-bar move and top/left resize presses use our title bar and margin instead of foot's own subsurfaces;
      the "window back into view" check measures the outer rectangle (title bar above the geometry, border).
      `browser-driver.js` got `screenshot-device`.
+4b. **Desktop integration for apps' own title bars: what we support, and the desktop's settings.** GTK4 and Chrome
+   (client-side decorations) show only a close button because they follow the desktop's button layout, and this
+   machine's is upstream GNOME's `appmenu:close` (desktop Ubuntu overrides it to `:minimize,maximize,close` through
+   `ubuntu-settings`, which WSL doesn't have). Our sessions are the desktop environment for their apps, so we supply
+   the settings, the standard way. The shell is called **nebula**: anything new is named that (not "greenfield").
+   - **xdg-shell version 6** (`wlr_xdg_shell_create`, today 3; wlroots 0.17.4 supports 6). Backwards compatible: each
+     client binds the lower of its version and ours, and v4-6 only add things. What newer clients then act on must be
+     accurate:
+     - v4 `configure_bounds` (`wlr_xdg_toplevel_set_bounds`): the largest sensible window, the output minus the
+       taskbar and, for decorated windows, our title bar. Apps may pick different initial sizes (intended); e2e checks
+       that assume today's sizes may need adjusting.
+     - v5 `wm_capabilities`: wlroots advertises window menu, maximize, fullscreen and minimize by default, and apps
+       believe it, so all four must work. New: `show_window_menu` (an app's title bar right-clicked) opens our shared
+       window menu (`windowMenuItems`) at the pointer. Keep it honest per window (e.g. no maximize for fixed-size
+       windows, if toolkits use it).
+     - v6 `suspended`: only sent if we set it; nothing changes now. For later (Lower priority item 6, don't send what
+       can't be seen): if minimized or covered windows are suspended, it must reliably be cleared when they show.
+   - **A nebula Settings backend for `xdg-desktop-portal`** (`org.freedesktop.impl.portal.Settings`, D-Bus name
+     `org.freedesktop.impl.portal.desktop.nebula`), with `nebula-portals.conf` choosing it for Settings and `gtk`, then
+     `kde`, for the rest, and `XDG_CURRENT_DESKTOP=nebula` in our sessions. Apps only talk to the portal; the portal
+     asks the backends the desktop's config names (as GNOME and KDE plug in theirs). It provides
+     `org.gnome.desktop.wm.preferences` `button-layout = ':minimize,maximize,close'` (Windows style, like our frames),
+     and later `org.freedesktop.appearance` (color scheme, accent: read by GTK, Qt and Chromium). First check that
+     GTK4 takes the button layout from the portal. No impersonating the portal frontend, no dconf tricks.
+   - Dependencies: `xdg-desktop-portal` (an installed nebula depends on it), `xdg-desktop-portal-gtk` recommended
+     (file chooser and other dialogs for apps using the portal). Settings work with either, or neither, of the GTK and
+     KDE backends: they're ours. Without the portal, apps fall back to GSettings (today's behaviour).
+   - Verify: the full e2e suite, and by hand gtk4-demo, Chrome and foot (initial sizes, buttons, right-click menu).
 
 ### First extra feature
 
