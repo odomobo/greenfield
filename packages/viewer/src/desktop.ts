@@ -4,7 +4,7 @@ import { KeyFrameNeeded, SurfaceDecoder } from './decoder'
 import { SurfaceView } from './surface-view'
 import { WindowView } from './window-view'
 import { Animation, EASE_IN, EASE_OUT, lerpRect } from './animation'
-import { parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
+import { FrameInsets, frameInsets, parseEncodedFrame, Patch, SceneSurface, SceneWindow, ServerMessage, ViewerMessage } from './protocol'
 import { modifiersOf } from './modifiers'
 import { ClipboardSync, isPasteChord } from './clipboard'
 import { dragHasFiles, dropAllowed, droppedFiles, uploadFiles } from './file-drop'
@@ -14,6 +14,8 @@ import { acceptsInput, cursorRect, mapRect, Rect, rootWindow, stackChildrenAbove
 import { isWholePixelScale, Size } from './surface-geometry'
 import { WindowSync } from './window-sync'
 import { resizedRect } from './resize'
+import { keepOnScreen, outerRect } from './frame-geometry'
+import { FramePart, framePartOf } from './window-frame'
 import {
   arrowOf,
   edgesAfterArrow,
@@ -44,6 +46,13 @@ type MenuInteraction = {
   cancelled: boolean
   /** removes the document listeners of the interaction */
   stop: () => void
+}
+
+/** A press on a window's frame (its title bar, a caption button, the resize margin): what it does when it's released. */
+type FramePress = {
+  window: string
+  /** a caption button pressed: it acts if it's released on it (no pointer capture) */
+  button?: 'minimize' | 'maximize' | 'close'
 }
 
 type Interaction =
@@ -89,6 +98,8 @@ const EDGE_RIGHT = 8
 const MIN_VISIBLE = 80
 /** Give up waiting for a client to commit the final size of a resize after this long. */
 const RESIZE_SETTLE_TIMEOUT = 2000
+/** Two presses on a title bar within this many ms (and a few pixels) are a double click. */
+const DOUBLE_CLICK_MS = 500
 /** Durations of the window state animations, ms. Subtle and short. */
 const STATE_ANIMATION_MS = 150
 
@@ -141,6 +152,17 @@ export class Desktop {
   onWindowsChanged: (windows: ShellWindow[]) => void = () => {
     /* noop */
   }
+  /** The URL of a window's app's icon for its title bar, undefined: the generic icon (the shell knows the icons). */
+  frameIcon: (window: SceneWindow) => string | undefined = (window) => this.windowIcons.get(window.id)
+  /** The window's own icon (X11 _NET_WM_ICON), if it has one. */
+  windowOwnIcon(id: string): string | undefined {
+    return this.windowIcons.get(id)
+  }
+
+  /** Open the window menu of a window at a page position (right click on its title bar). */
+  onWindowMenu: (window: ShellWindow, at: Point) => void = () => {
+    /* noop */
+  }
   /** Where a window goes when minimized (its taskbar button), in page coordinates. */
   minimizeTarget: (window: string) => DOMRect | undefined = () => undefined
 
@@ -161,6 +183,10 @@ export class Desktop {
   /** implicit grab: while a button is held, pointer events go to the surface the press started on */
   private grab?: Pick
   private interaction?: Interaction
+  /** a press on a window's frame is going on (from its button press to the release) */
+  private framePress?: FramePress
+  /** the last press on a title bar, to tell a double click (maximize) from two clicks */
+  private lastTitlePress?: { window: string; time: number; at: Point }
   /** the pointer in page coordinates, wherever it is (a menu's Move and Size start from it) */
   private clientPointer: Point = { x: 0, y: 0 }
   /** the click that finished a menu interaction: its release isn't the app's */
@@ -290,6 +316,7 @@ export class Desktop {
     this.grab = undefined
     this.interaction?.menu?.stop()
     this.interaction = undefined
+    this.framePress = undefined
     this.buttons = 0
     this.scheduleLayout()
     this.onWindowsChanged([])
@@ -452,7 +479,7 @@ export class Desktop {
     this.activateWindow(id)
     this.pointer = this.outputPoint(this.clientPointer)
     const startRect = this.shownGeometry(window)
-    const edges = nearestEdges(startRect, this.pointer)
+    const edges = nearestEdges(outerRect(startRect, frameInsets(window)), this.pointer)
     const previous = this.resizeOverrides.get(window.id)
     clearTimeout(previous?.settleTimer)
     this.resizeOverrides.set(window.id, { rect: startRect, edges })
@@ -779,7 +806,9 @@ export class Desktop {
       if (!window.maximized) {
         this.restoreRects.set(window.id, from)
       }
-      to = { x: 0, y: 0, width: this.output.width, height: this.output.height }
+      // (a decorated window's title bar stays on screen: its content is the output below it)
+      const { top } = frameInsets({ decorated: window.decorated, maximized: true })
+      to = { x: 0, y: top, width: this.output.width, height: this.output.height - top }
     } else {
       // where it was before it was maximized; unknown if it was maximized before we attached: no animation
       to = this.restoreRects.get(window.id)
@@ -931,6 +960,7 @@ export class Desktop {
         } else {
           this.windowIcons.delete(message.window)
         }
+        this.refreshFrames()
         this.notifyWindowsChanged()
         break
       case 'maximize-requested': {
@@ -1102,9 +1132,14 @@ export class Desktop {
       }
       this.placementSent.add(window.id)
       const cascade = 40 + (placedCount++ % 10) * 32
+      const insets = frameInsets(window)
       this.moveWindow(
         window.id,
-        this.keepVisible(window, { x: cascade - window.geometry.x, y: cascade - window.geometry.y }),
+        // (the cascade is where the window's frame starts)
+        this.keepVisible(window, {
+          x: cascade + insets.left - window.geometry.x,
+          y: cascade + insets.top - window.geometry.y,
+        }),
       )
     }
     // also covers positions chosen by the server or client (e.g. dialogs) and windows coming back after a reattach
@@ -1205,21 +1240,12 @@ export class Desktop {
   }
 
   /**
-   * A position for the window such that at least MIN_VISIBLE of its geometry is inside the output and its top edge
-   * (where client side title bars are) isn't above the output, so it can always be grabbed and moved back.
+   * A position for the window such that at least MIN_VISIBLE of its outer rectangle (the geometry with its frame) is
+   * inside the output and its top edge (the title bar's, or where client side title bars are) isn't above the output,
+   * so it can always be grabbed and moved back, and is never under the taskbar.
    */
   private keepVisible(window: SceneWindow, position: Point): Point {
-    const { geometry } = window
-    if (this.output.width <= 0 || this.output.height <= 0) {
-      return position
-    }
-    const visibleWidth = Math.min(MIN_VISIBLE, geometry.width)
-    const visibleHeight = Math.min(MIN_VISIBLE, geometry.height)
-    let x = position.x + geometry.x
-    let y = position.y + geometry.y
-    x = Math.max(visibleWidth - geometry.width, Math.min(x, this.output.width - visibleWidth))
-    y = Math.max(0, Math.min(y, this.output.height - visibleHeight))
-    return { x: Math.round(x - geometry.x), y: Math.round(y - geometry.y) }
+    return keepOnScreen(window.geometry, frameInsets(window), position, this.output, MIN_VISIBLE)
   }
 
   /** Move windows that ended up (mostly) outside the output back in, and tell the server. */
@@ -1273,6 +1299,7 @@ export class Desktop {
         this.windowViews.delete(id)
       }
     }
+    this.refreshFrames()
   }
 
   /** Apply the layout (see `layout`) in the next animation frame, once however often it's asked for. */
@@ -1293,6 +1320,7 @@ export class Desktop {
    */
   private layout() {
     const animating = this.advanceAnimations()
+    this.refreshFrames()
     const pixelRatio = window.devicePixelRatio || 1
     for (const window of this.windows) {
       const view = this.windowViews.get(window.id)
@@ -1311,12 +1339,40 @@ export class Desktop {
         inert: kind === 'minimize' || kind === 'restore',
         pixelRatio,
         surfaces: window.surfaces.map(({ x, y, width, height }) => ({ x, y, width, height })),
+        geometry: window.geometry,
+        insets: this.shownInsets(window),
+        frameStretches: kind === 'minimize' || kind === 'restore',
       })
     }
     if (animating) {
       this.scheduleLayout()
     }
     this.placeFloating()
+  }
+
+  /** The frame a window shows now: a maximize or unmaximize animation shows the end state's (no side borders). */
+  private shownInsets(window: SceneWindow): FrameInsets {
+    return frameInsets({ decorated: window.decorated, maximized: this.shownMaximized(window), fullscreen: window.fullscreen })
+  }
+
+  /** Whether the window is shown maximized: a maximize or unmaximize animation shows its end state. */
+  private shownMaximized(window: SceneWindow): boolean {
+    const kind = this.animations.get(window.id)?.kind
+    return kind === 'maximize' ? true : kind === 'unmaximize' ? false : window.maximized
+  }
+
+  /** Show every window frame's current state (also when something it shows changed without a scene: an icon). */
+  refreshFrames(): void {
+    for (const window of this.windows) {
+      this.windowViews.get(window.id)?.setFrame({
+        title: window.title,
+        icon: this.frameIcon(window),
+        active: window.activated,
+        maximized: this.shownMaximized(window),
+        hasParent: window.parent !== undefined,
+        resizable: isResizable(window),
+      })
+    }
   }
 
   /** Whether the surface is the client cursor's or the drag's icon. */
@@ -1403,6 +1459,10 @@ export class Desktop {
   private pick(point: Point): Pick | undefined {
     const bounds = this.container.getBoundingClientRect()
     for (const element of document.elementsFromPoint(bounds.left + point.x, bounds.top + point.y)) {
+      if (element instanceof HTMLElement && element.dataset.framePart !== undefined) {
+        // a window's frame: not the app's, and it hides what's under it
+        return undefined
+      }
       const id = element instanceof HTMLCanvasElement ? element.dataset.surface : undefined
       const window = id === undefined ? undefined : this.windows.find((w) => w.surfaces.some((s) => s.id === id))
       const placed = window && this.surfaceRects(window).find(({ surface }) => surface.id === id)
@@ -1457,7 +1517,15 @@ export class Desktop {
     const container = this.container
     const point = (event: MouseEvent): Point => this.outputPoint({ x: event.clientX, y: event.clientY })
 
-    container.addEventListener('contextmenu', (event) => event.preventDefault())
+    container.addEventListener('contextmenu', (event) => {
+      event.preventDefault()
+      // right click on a title bar: the window menu, as the taskbar's
+      const frame = framePartOf(event.target)
+      const window = frame?.part === 'title' ? this.windows.find((w) => w.id === frame.window) : undefined
+      if (window) {
+        this.onWindowMenu(this.shellWindowOf(window), { x: event.clientX, y: event.clientY })
+      }
+    })
     // (the release of a click that dropped a window may come outside the desktop)
     document.addEventListener('pointerup', () => {
       this.swallowRelease = false
@@ -1496,6 +1564,12 @@ export class Desktop {
     })
 
     container.addEventListener('pointerdown', (event) => {
+      const frame = framePartOf(event.target)
+      if (frame) {
+        // a window's frame is ours: the app never sees input on it
+        this.frameDown(event, frame, point(event))
+        return
+      }
       void this.clipboard.retryPending()
       container.focus()
       container.setPointerCapture(event.pointerId)
@@ -1535,6 +1609,11 @@ export class Desktop {
     }
 
     container.addEventListener('pointerup', (event) => {
+      if (this.framePress) {
+        this.pointer = point(event)
+        this.frameUp(event)
+        return
+      }
       if (event.pointerType === 'touch') {
         this.touchEvent(event, 'up')
         return
@@ -1574,6 +1653,7 @@ export class Desktop {
         this.endInteraction()
       }
       this.interaction = undefined
+      this.framePress = undefined
       this.grab = undefined
       this.buttons = 0
     })
@@ -1653,6 +1733,14 @@ export class Desktop {
     })
 
     const key = (event: KeyboardEvent, pressed: boolean) => {
+      if (this.framePress && event.key === 'Escape') {
+        // Escape puts back a window being dragged by its frame
+        event.preventDefault()
+        if (pressed) {
+          this.cancelFrameDrag()
+        }
+        return
+      }
       if (this.interaction?.menu) {
         this.menuKey(event, this.interaction as Interaction & { menu: MenuInteraction })
         return
@@ -1777,6 +1865,131 @@ export class Desktop {
     }
   }
 
+  /** A window as the shell sees it. */
+  private shellWindowOf(window: SceneWindow): ShellWindow {
+    return { ...window, shownMinimized: this.isMinimized(window), icon: this.windowIcons.get(window.id) }
+  }
+
+  /**
+   * A button went down on a window's frame. The title bar drags the window (two quick presses maximize or restore it),
+   * the margin and borders resize it, the caption buttons act when released. A press on the frame also activates the
+   * window. None of it reaches the app.
+   */
+  private frameDown(event: PointerEvent, frame: FramePart, at: Point) {
+    event.preventDefault()
+    const window = this.windows.find((w) => w.id === frame.window)
+    if (window === undefined) {
+      return
+    }
+    void this.clipboard.retryPending()
+    this.container.focus()
+    this.pointerLock.gesture()
+    this.pointer = at
+    if (this.framePress || (event.pointerType === 'mouse' && event.button !== 0 && event.button !== 2)) {
+      return
+    }
+    if (!window.activated && frame.part !== 'minimize' && frame.part !== 'close') {
+      this.sendWindowChange({ type: 'window.activate', window: window.id })
+    }
+    if (event.button === 2) {
+      // (the window menu opens on the contextmenu event)
+      return
+    }
+    if (frame.part === 'minimize' || frame.part === 'maximize' || frame.part === 'close') {
+      this.framePress = { window: window.id, button: frame.part }
+      return
+    }
+    this.container.setPointerCapture(event.pointerId)
+    this.framePress = { window: window.id }
+    this.buttons = event.buttons || 1
+    this.pressPointer = at
+    if (frame.part === 'resize') {
+      if (this.canMoveOrSize(window.id)) {
+        this.beginResize(window, frame.edges, at)
+      }
+      return
+    }
+    const last = this.lastTitlePress
+    if (last && last.window === window.id && event.timeStamp - last.time < DOUBLE_CLICK_MS && Math.hypot(at.x - last.at.x, at.y - last.at.y) < 5) {
+      this.lastTitlePress = undefined
+      if (!window.fullscreen && isResizable(window)) {
+        this.setMaximized(window.id, !window.maximized)
+      }
+      return
+    }
+    this.lastTitlePress = { window: window.id, time: event.timeStamp, at }
+    if (this.canMoveOrSize(window.id)) {
+      this.interaction = {
+        mode: 'move',
+        window: window.id,
+        startPointer: at,
+        startPosition: this.windowPosition(window),
+      }
+      this.container.style.cursor = 'default'
+    }
+  }
+
+  /** The button that went down on a frame came up. */
+  private frameUp(event: PointerEvent) {
+    const press = this.framePress!
+    this.framePress = undefined
+    if (this.interaction) {
+      this.endInteraction()
+      this.applyCursor()
+    } else if (press.button !== undefined) {
+      const over = framePartOf(event.target)
+      if (over?.part === press.button && over.window === press.window) {
+        switch (press.button) {
+          case 'minimize':
+            this.minimizeWindow(press.window)
+            break
+          case 'maximize': {
+            const window = this.windows.find((w) => w.id === press.window)
+            if (window) {
+              this.setMaximized(window.id, !window.maximized)
+            }
+            break
+          }
+          case 'close':
+            this.closeWindow(press.window)
+            break
+        }
+      }
+    }
+    this.buttons = event.buttons
+    if (this.buttons === 0) {
+      this.grab = undefined
+    }
+  }
+
+  /** Escape during a drag of a window by its frame: the window goes back, nothing is sent. */
+  private cancelFrameDrag() {
+    const interaction = this.interaction
+    if (interaction === undefined) {
+      return
+    }
+    this.interaction = undefined
+    if (interaction.mode === 'move') {
+      this.sync.setPosition(interaction.window, interaction.startPosition)
+    } else {
+      const override = this.resizeOverrides.get(interaction.window)
+      clearTimeout(override?.settleTimer)
+      this.resizeOverrides.delete(interaction.window)
+    }
+    this.applyCursor()
+    this.scheduleLayout()
+  }
+
+  /** Start dragging edges of a window (an app asked, or the user grabbed its frame), measured from `startPointer`. */
+  private beginResize(window: SceneWindow, edges: number, startPointer: Point) {
+    const startRect = this.shownGeometry(window)
+    const previous = this.resizeOverrides.get(window.id)
+    clearTimeout(previous?.settleTimer)
+    this.resizeOverrides.set(window.id, { rect: startRect, edges })
+    this.interaction = { mode: 'resize', window: window.id, edges, startPointer, startRect }
+    this.container.style.cursor = resizeCursor(edges)
+  }
+
   private startInteraction(message: Extract<ServerMessage, { type: 'interactive' }>) {
     const window = this.windows.find((w) => w.id === message.window)
     if (window === undefined || this.buttons === 0) {
@@ -1793,17 +2006,9 @@ export class Desktop {
         }
       this.container.style.cursor = 'grabbing'
     } else {
-      const startRect = this.shownGeometry(window)
-      const previous = this.resizeOverrides.get(window.id)
-      clearTimeout(previous?.settleTimer)
-      this.resizeOverrides.set(window.id, { rect: startRect, edges: message.edges })
-      this.interaction = {
-        mode: 'resize',
-        window: window.id,
-        edges: message.edges,
-        startPointer: this.pressPointer,
-        startRect,
-      }
+      this.beginResize(window, message.edges, this.pressPointer)
+      // (the app's cursor, not the frame's)
+      this.applyCursor()
     }
     this.continueInteraction()
   }
@@ -1940,6 +2145,16 @@ export class Desktop {
     const message: ViewerMessage = { type: 'feedback', refreshInterval: Math.round(this.refreshInterval) }
     this.connection.send(message)
   }
+}
+
+/** Whether the app lets its window change size (it says so by a minimum size that is its maximum, too). */
+function isResizable(window: SceneWindow): boolean {
+  return !(
+    (window.maxWidth ?? 0) > 0 &&
+    window.maxWidth === window.minWidth &&
+    (window.maxHeight ?? 0) > 0 &&
+    window.maxHeight === window.minHeight
+  )
 }
 
 function noop() {

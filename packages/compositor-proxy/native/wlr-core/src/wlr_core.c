@@ -45,6 +45,7 @@
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/util/log.h>
 #include "node_api.h"
 #include "wlr_core.h"
@@ -294,6 +295,11 @@ gsurf_toplevel_listeners_remove(struct gsurf *gsurf) {
     wl_list_remove(&gsurf->set_title.link);
     wl_list_remove(&gsurf->set_app_id.link);
     wl_list_remove(&gsurf->set_parent.link);
+    if (gsurf->decoration) {
+        wl_list_remove(&gsurf->decoration_request_mode.link);
+        wl_list_remove(&gsurf->decoration_destroy.link);
+        gsurf->decoration = NULL;
+    }
     gsurf->toplevel = NULL;
 }
 
@@ -421,6 +427,46 @@ handle_set_parent(struct wl_listener *listener, void *data) {
     struct gsurf *parent_gsurf = parent ? gsurf_from_surface(gsurf->core, parent->base->surface) : NULL;
     napi_value args[] = {u32(gsurf->core, gsurf->sid), u32(gsurf->core, parent_gsurf ? parent_gsurf->sid : 0)};
     emit(gsurf->core, "toplevel-parent", 2, args);
+}
+
+/*
+ * xdg-decoration: we always draw the frame ourselves (the viewer does), so an app that asks gets server-side mode, and
+ * "toplevel-decorated" tells JavaScript the window has our frame. Apps without a decoration object (GTK) keep theirs.
+ */
+static void
+handle_decoration_request_mode(struct wl_listener *listener, void *data) {
+    struct gsurf *gsurf = wl_container_of(listener, gsurf, decoration_request_mode);
+    // whatever the app asked for (client side, or unset): the answer is a configure that follows set_mode
+    wlr_xdg_toplevel_decoration_v1_set_mode(gsurf->decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+}
+
+static void
+handle_decoration_destroy(struct wl_listener *listener, void *data) {
+    struct gsurf *gsurf = wl_container_of(listener, gsurf, decoration_destroy);
+    wl_list_remove(&gsurf->decoration_request_mode.link);
+    wl_list_remove(&gsurf->decoration_destroy.link);
+    gsurf->decoration = NULL;
+    // the window is undecorated again (the app is expected to draw its own frame now)
+    napi_value args[] = {u32(gsurf->core, gsurf->sid), boolean(gsurf->core, false)};
+    emit(gsurf->core, "toplevel-decorated", 2, args);
+}
+
+static void
+handle_new_toplevel_decoration(struct wl_listener *listener, void *data) {
+    struct core *core = wl_container_of(listener, core, new_toplevel_decoration);
+    struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
+    struct gsurf *gsurf = gsurf_from_surface(core, decoration->toplevel->base->surface);
+    if (gsurf == NULL || gsurf->toplevel != decoration->toplevel || gsurf->decoration != NULL) {
+        return;
+    }
+    gsurf->decoration = decoration;
+    gsurf->decoration_request_mode.notify = handle_decoration_request_mode;
+    wl_signal_add(&decoration->events.request_mode, &gsurf->decoration_request_mode);
+    gsurf->decoration_destroy.notify = handle_decoration_destroy;
+    wl_signal_add(&decoration->events.destroy, &gsurf->decoration_destroy);
+    wlr_xdg_toplevel_decoration_v1_set_mode(decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    napi_value args[] = {u32(core, gsurf->sid), boolean(core, true)};
+    emit(core, "toplevel-decorated", 2, args);
 }
 
 /*
@@ -717,6 +763,9 @@ create(napi_env env, napi_callback_info info) {
     core->xdg_activation = wlr_xdg_activation_v1_create(core->display);
     core->request_activate.notify = handle_request_activate;
     wl_signal_add(&core->xdg_activation->events.request_activate, &core->request_activate);
+    core->decoration_manager = wlr_xdg_decoration_manager_v1_create(core->display);
+    core->new_toplevel_decoration.notify = handle_new_toplevel_decoration;
+    wl_signal_add(&core->decoration_manager->events.new_toplevel_decoration, &core->new_toplevel_decoration);
 
     core->scale = 1;
     core->output_scale = 1;

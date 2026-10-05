@@ -13,7 +13,7 @@ import { StreamingPngPool } from '../encoding/StreamingEncoder.js'
 import { Rect } from '../encoding/region.js'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
 import { ControlMessage } from '../viewer/ViewerTransport.js'
-import type { SceneRect, SceneSurface, SceneWindow } from '@gfld/scene-protocol'
+import { frameInsets, type SceneRect, type SceneSurface, type SceneWindow } from '@gfld/scene-protocol'
 import { EvDevKeyCode } from './keys.js'
 import { Apps } from './Apps.js'
 import { X11Windows } from './X11.js'
@@ -128,6 +128,8 @@ type Window = {
   parent?: number
   placed: boolean
   minimized: boolean
+  /** the viewer draws our frame around it (xdg-decoration server side mode, an X11 window that doesn't say it has none) */
+  decorated: boolean
   /** position of the main surface's origin; a child window's is relative to its parent */
   x: number
   y: number
@@ -309,6 +311,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
           appId: '',
           placed: false,
           minimized: false,
+          decorated: false,
           x: 0,
           y: 0,
           seq: 0,
@@ -338,6 +341,18 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         const window = this.windows.get(args[0])
         if (window) {
           window[type === 'toplevel-title' ? 'title' : 'appId'] = args[1] ?? ''
+          this.scheduleScene()
+        }
+        break
+      }
+      case 'toplevel-decorated': {
+        const window = this.windows.get(args[0])
+        if (window && window.decorated !== Boolean(args[1])) {
+          window.decorated = Boolean(args[1])
+          // a maximized window fills the output below its title bar (and the app's own title bar goes or comes)
+          if (this.wlr.toplevelState(window.sid)?.maximized) {
+            this.setMaximized(window.sid, true)
+          }
           this.scheduleScene()
         }
         break
@@ -517,11 +532,12 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     const parentState = window.parent === undefined ? undefined : this.wlr.toplevelState(window.parent)
     const state = this.wlr.toplevelState(window.sid)
     if (!window.placed && parentState && state) {
-      // a child window (dialog) is centered on its parent, the viewer only places top level windows
-      const [px, py, pw, ph] = parentState.geometry
-      const [cx, cy, cw, ch] = state.geometry
-      window.x = Math.round(px + pw / 2 - (cx + cw / 2))
-      window.y = Math.round(py + ph / 2 - (cy + ch / 2))
+      // a child window (dialog) is centered on its parent, the viewer only places top level windows; the frames are
+      // part of what is centered (the outer rectangles are). Positions are relative to the parent's.
+      const parentOuter = this.outerRect(this.windows.get(window.parent!), parentState)
+      const outer = this.outerRect(window, state)
+      window.x = Math.round(parentOuter.x + parentOuter.width / 2 - (outer.x + outer.width / 2))
+      window.y = Math.round(parentOuter.y + parentOuter.height / 2 - (outer.y + outer.height / 2))
       window.placed = true
     }
     this.stack = this.stack.filter((sid) => sid !== window.sid)
@@ -534,6 +550,21 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   private keyOf(sid: number): string {
     return this.surfaces.get(sid)?.key ?? ''
+  }
+
+  /** The outer rectangle of a window (its geometry with its frame, see the scene protocol), relative to its surface origin. */
+  private outerRect(
+    window: Window | undefined,
+    state: { geometry: [number, number, number, number]; maximized: boolean; fullscreen: boolean },
+  ): SceneRect {
+    const [x, y, width, height] = state.geometry
+    const insets = frameInsets({ decorated: window?.decorated, maximized: state.maximized, fullscreen: state.fullscreen })
+    return {
+      x: x - insets.left,
+      y: y - insets.top,
+      width: width + insets.left + insets.right,
+      height: height + insets.top + insets.bottom,
+    }
   }
 
   private rootOf(window: Window): Window {
@@ -663,7 +694,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   private setMaximized(sid: number, maximized: boolean) {
     if (maximized) {
-      this.wlr.configure(sid, this.output.width, this.output.height, { maximized: true })
+      // the app gets the output minus the frame (a decorated window keeps its title bar on screen)
+      const { top, bottom } = frameInsets({ decorated: this.windows.get(sid)?.decorated, maximized: true })
+      this.wlr.configure(sid, this.output.width, this.output.height - top - bottom, { maximized: true })
     } else {
       this.wlr.configure(sid, 0, 0, { maximized: false })
     }
@@ -763,9 +796,13 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       if (surface === undefined || !surface.mapped || state === undefined) {
         continue
       }
-      // maximized and fullscreen windows cover the output; their own position is kept for when they're restored
+      // maximized and fullscreen windows cover the output (a maximized decorated one below its title bar); their own
+      // position is kept for when they're restored
+      const insets = frameInsets({ decorated: window.decorated, maximized: state.maximized, fullscreen: state.fullscreen })
       const { x, y } =
-        state.maximized || state.fullscreen ? { x: -state.geometry[0], y: -state.geometry[1] } : this.positionOf(window)
+        state.maximized || state.fullscreen
+          ? { x: -state.geometry[0], y: insets.top - state.geometry[1] }
+          : this.positionOf(window)
       this.x11.shownAt(window.sid, x, y)
       if (!this.x11.has(window.sid)) {
         this.popupOrigin(window.sid, x, y)
@@ -779,6 +816,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         activated: this.active === window.sid,
         maximized: state.maximized,
         fullscreen: state.fullscreen,
+        ...(window.decorated ? { decorated: true } : {}),
         minimized: this.rootOf(window).minimized,
         placed: window.placed,
         seq: window.seq,

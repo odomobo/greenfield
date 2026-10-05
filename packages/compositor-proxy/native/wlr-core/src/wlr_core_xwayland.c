@@ -67,6 +67,7 @@ struct xwin {
     struct wl_listener set_parent;
     struct wl_listener set_geometry;
     struct wl_listener set_override_redirect;
+    struct wl_listener set_decorations;
 };
 
 static void
@@ -90,6 +91,18 @@ report_app_id(struct xwin *xwin) {
     const char *app_id = xwin->xsurface->class ? xwin->xsurface->class : xwin->xsurface->instance;
     napi_value args[] = {u32(core, xwin->gsurf->sid), str(core, app_id)};
     emit(core, "toplevel-app-id", 2, args);
+}
+
+/*
+ * Whether the viewer draws our frame around the window: every managed window, unless _MOTIF_WM_HINTS says it has no
+ * title bar (decorations = 0: the app draws its own, or none, as menus and splash screens do).
+ */
+static void
+report_decorated(struct xwin *xwin) {
+    struct core *core = xwin->x11->core;
+    bool decorated = (xwin->xsurface->decorations & WLR_XWAYLAND_SURFACE_DECORATIONS_NO_TITLE) == 0;
+    napi_value args[] = {u32(core, xwin->gsurf->sid), boolean(core, decorated)};
+    emit(core, "toplevel-decorated", 2, args);
 }
 
 /*
@@ -211,6 +224,7 @@ toplevel_start(struct xwin *xwin) {
     report_title(xwin);
     report_app_id(xwin);
     report_icon(xwin);
+    report_decorated(xwin);
     if (transient_for(xwin)) {
         report_parent(xwin);
     }
@@ -316,6 +330,15 @@ handle_dissociate(struct wl_listener *listener, void *data) {
     struct xwin *xwin = wl_container_of(listener, xwin, dissociate);
     if (xwin->gsurf) {
         x11_surface_destroyed(xwin->gsurf);
+    }
+}
+
+/* _MOTIF_WM_HINTS changed. */
+static void
+handle_set_decorations(struct wl_listener *listener, void *data) {
+    struct xwin *xwin = wl_container_of(listener, xwin, set_decorations);
+    if (xwin->toplevel) {
+        report_decorated(xwin);
     }
 }
 
@@ -465,6 +488,7 @@ handle_xwin_destroy(struct wl_listener *listener, void *data) {
     wl_list_remove(&xwin->set_parent.link);
     wl_list_remove(&xwin->set_geometry.link);
     wl_list_remove(&xwin->set_override_redirect.link);
+    wl_list_remove(&xwin->set_decorations.link);
     xwin->xsurface->data = NULL;
     free(xwin);
 }
@@ -495,6 +519,7 @@ handle_new_xsurface(struct wl_listener *listener, void *data) {
     LISTEN(set_parent, set_parent, handle_set_parent);
     LISTEN(set_geometry, set_geometry, handle_set_geometry);
     LISTEN(set_override_redirect, set_override_redirect, handle_set_override_redirect);
+    LISTEN(set_decorations, set_decorations, handle_set_decorations);
 #undef LISTEN
 }
 

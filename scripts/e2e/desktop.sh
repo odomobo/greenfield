@@ -233,7 +233,8 @@ taskbar_menu() {
 watch_animations
 taskbar_menu maximize
 animation_ran maximize
-wait_for "() => { const w = window.__viewerTest.windows()[0]; const o = window.__viewerTest.output(); const g = w.shownGeometry; return w.maximized && g.x === 0 && g.y === 0 && g.width === o.width && g.height === o.height && !Object.keys(window.__viewerTest.animations()).length }" \
+# (foot is decorated by us now: it fills the output below its title bar, which is on screen, below the taskbar)
+wait_for "() => { const w = window.__viewerTest.windows()[0]; const o = window.__viewerTest.output(); const g = w.shownGeometry; const t = document.querySelector('.frame-title').getBoundingClientRect(); const d = document.getElementById('output').getBoundingClientRect(); return w.maximized && w.decorated && t.height > 0 && Math.round(t.top - d.top) === 0 && g.x === 0 && g.y === Math.round(t.height) && g.width === o.width && g.height === o.height - Math.round(t.height) && !Object.keys(window.__viewerTest.animations()).length }" \
   "the window to be maximized" 10
 taskbar_menu unmaximize
 wait_for "() => { const w = window.__viewerTest.windows()[0]; const g = w.shownGeometry; return !w.maximized && [g.x, g.y, g.width, g.height].join(' ') === '$OX $OY $OW $OH' && !Object.keys(window.__viewerTest.animations()).length }" \
@@ -456,6 +457,8 @@ shown_geometry() {
 }
 
 CANVAS_Y="$(pw_eval "() => Math.round(document.getElementById('output').getBoundingClientRect().y)")"
+# the height of our title bar (the frame is outside the window geometry)
+FRAME_T="$(pw_eval "() => Math.round(document.querySelector('.frame-title').getBoundingClientRect().height)")"
 
 # xdg_toplevel.configure events foot has received so far
 configure_count() {
@@ -509,13 +512,13 @@ step "moving with a slow server: late scenes never pull the window back"
 read -r GX GY GW GH < <(shown_geometry)
 # every scene arrives 300 ms late; record where the window is shown while it's dragged right and settles
 pw_eval "() => { window.__viewerTest.delayScenes(300); window.__shownX = []; clearInterval(window.__mover); window.__mover = setInterval(() => window.__shownX.push(window.__viewerTest.windows()[0].shownGeometry.x), 5); return true }" >/dev/null
-# foot's title bar
-pw mousemove $((GX + GW / 2)) $((CANVAS_Y + GY + 12)) >/dev/null
+# our title bar (foot is decorated by the viewer: it draws no title bar of its own), above the window geometry
+pw mousemove $((GX + GW / 2)) $((CANVAS_Y + GY - FRAME_T / 2)) >/dev/null
 pw mousedown >/dev/null
 wait_for "() => window.__viewerTest.interaction() === 'move'" "the move to start" 10
 MOVES0="$(moves_sent)"
 for i in 1 2 3 4; do
-  pw mousemove $((GX + GW / 2 + 15 * i)) $((CANVAS_Y + GY + 12)) >/dev/null
+  pw mousemove $((GX + GW / 2 + 15 * i)) $((CANVAS_Y + GY - FRAME_T / 2)) >/dev/null
 done
 # the window follows the pointer, but the server hears nothing until the drop
 wait_for "() => window.__viewerTest.windows()[0].shownGeometry.x === $((GX + 60))" "the window to follow the pointer" 10
@@ -531,7 +534,7 @@ echo "    samples, never moved back: $MOVES"
 step "resizing from the left edge: immediate, and the right edge stays put"
 read -r GX GY GW GH < <(shown_geometry)
 RIGHT=$((GX + GW))
-# foot draws its left border as a 5px subsurface just outside the window geometry
+# the resize margin of our frame, a few pixels outside the border
 STEPS="$(resize_drag $((GX - 3)) $((CANVAS_Y + GY + GH / 2)) 60 0 | awk '{ printf "%s,%s ", $1, $1 + $3 }')"
 echo "    during the drag (left,right): $STEPS"
 [ "$STEPS" = "$((GX + 20)),$RIGHT $((GX + 40)),$RIGHT $((GX + 60)),$RIGHT " ] ||
@@ -547,8 +550,8 @@ check_drag_quiet
 step "resizing from the top edge keeps the bottom edge in place"
 read -r GX GY GW GH < <(shown_geometry)
 BOTTOM=$((GY + GH))
-# the top border subsurface is just above foot's title bar
-STEPS="$(resize_drag $((GX + GW / 2)) $((CANVAS_Y + GY - 3)) 0 45 | awk '{ printf "%s,%s ", $2, $2 + $4 }')"
+# the margin above our title bar
+STEPS="$(resize_drag $((GX + GW / 2)) $((CANVAS_Y + GY - FRAME_T - 3)) 0 45 | awk '{ printf "%s,%s ", $2, $2 + $4 }')"
 echo "    during the drag (top,bottom): $STEPS"
 [ "$STEPS" = "$((GY + 15)),$BOTTOM $((GY + 30)),$BOTTOM $((GY + 45)),$BOTTOM " ] ||
   fail "the window didn't follow the pointer immediately with its bottom edge fixed: $STEPS"
@@ -567,7 +570,7 @@ echo "    the scene reports the minimum size ${MINW}x${MINH} (foot's xdg_topleve
 grep -aq "set_min_size($MINW, $MINH)" "$WORK/gateway.log" || fail "foot didn't set the minimum size ${MINW}x${MINH} the scene reports"
 # drag the top border down by more than the window is high
 BOTTOM=$((GY + GH))
-STEPS="$(resize_drag $((GX + GW / 2)) $((CANVAS_Y + GY - 3)) 0 $((GH + 60)) | awk '{ printf "%s,%s,%s ", $2, $2 + $4, $4 }')"
+STEPS="$(resize_drag $((GX + GW / 2)) $((CANVAS_Y + GY - FRAME_T - 3)) 0 $((GH + 60)) | awk '{ printf "%s,%s,%s ", $2, $2 + $4, $4 }')"
 echo "    during the drag (top,bottom,height): $STEPS"
 for STEP in $STEPS; do
   IFS=, read -r T B H <<<"$STEP"
@@ -597,7 +600,7 @@ echo "    settled at $GX2,$GY2 ${GW2}x${GH2}"
 # back to the size it had (growing; the left and top borders of the tiny window)
 resize_drag $((GX2 - 3)) $((CANVAS_Y + GY2 + GH2 / 2)) $((GW2 - ORIGW)) 0 >/dev/null
 read -r GX2 GY2 GW2 GH2 < <(shown_geometry; echo)
-resize_drag $((GX2 + GW2 / 2)) $((CANVAS_Y + GY2 - 3)) 0 $((GH2 - ORIGH)) >/dev/null
+resize_drag $((GX2 + GW2 / 2)) $((CANVAS_Y + GY2 - FRAME_T - 3)) 0 $((GH2 - ORIGH)) >/dev/null
 
 step "taskbar preview cards: the title and a close button only; right-clicking a card opens the window menu"
 read -r CARD_X CARD_Y < <(pw_eval "() => { const r = document.querySelector('$TASKBAR_BUTTON').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.bottom - 4) }" | tr -d '"'; echo)
@@ -707,10 +710,10 @@ for global in wp_viewporter wp_presentation xdg_activation_v1 wp_single_pixel_bu
 done
 echo "    ok"
 
-step "shrinking the viewport moves the window back into view"
+step "shrinking the viewport moves the window back into view (its title bar, the top of its frame, stays below the taskbar)"
 read -r GX GY GW GH < <(shown_geometry)
 pw resize 160 500 >/dev/null
-wait_for "() => { const o = window.__viewerTest.output(); const g = window.__viewerTest.windows()[0].shownGeometry; return o.width <= 160 && g.x <= o.width - 80 && g.x + g.width >= 80 && g.y >= 0 && g.y <= o.height - 80 }" \
+wait_for "() => { const o = window.__viewerTest.output(); const g = window.__viewerTest.windows()[0].shownGeometry; return o.width <= 160 && g.x - 1 <= o.width - 80 && g.x + g.width + 1 >= 80 && g.y - $FRAME_T >= 0 && g.y - $FRAME_T <= o.height - 80 }" \
   "the window to be moved back into view" 10
 wait_for "() => { const w = window.__viewerTest.windows()[0]; return w.x === w.shownX && w.y === w.shownY }" \
   "the server to store the new position" 10

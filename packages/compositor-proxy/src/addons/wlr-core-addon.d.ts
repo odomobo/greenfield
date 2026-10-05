@@ -23,6 +23,8 @@ declare namespace wlrCore {
    * - clipboard-text(text): an app set the clipboard selection (not one we set from the browser); its text
    * - pointer-constraint(sid, active, confined): an app's pointer lock (or confinement) became active or ended
    * - toplevel-icon(sid, width, height, rgba | null): an X11 window's _NET_WM_ICON
+   * - toplevel-decorated(sid, decorated): whether the viewer draws our frame around the window (xdg-decoration: server
+   *   side mode given, or the decoration object gone; X11: _MOTIF_WM_HINTS)
    * - x11-geometry(sid): an X11 override-redirect window (menu, tooltip) moved, the window it belongs to changed
    *
    * X11 override-redirect windows aren't toplevels: their surfaces are part of the windowSurfaces() of the X11 window

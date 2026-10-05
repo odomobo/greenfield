@@ -45,10 +45,39 @@
  * `surfaceSize` of a patch, the size of a frame). The viewer draws that content into the logical rectangle, stretched
  * as needed (one device pixel per buffer pixel when the scales agree). Patch rectangles are in buffer pixels.
  *
+ * Window decorations: a window with `decorated` set has a frame drawn by the viewer (a title bar above, a thin border on
+ * the other sides, an invisible resize margin outside), see `frameInsets`. The frame is outside the app's content:
+ * `x`, `y`, `geometry`, the surfaces, input coordinates and `window.move`/`window.resize` all keep meaning the app's
+ * window geometry, exactly as for an undecorated window, so the frame is never part of any of them. Whoever reasons about
+ * the window's outer rectangle (placement, centering a dialog on its parent, keeping a window reachable on screen) adds
+ * `frameInsets` to the geometry: the server does it where it places windows and sizes them to the output (a maximized
+ * decorated window gets the output minus the title bar, at y = TITLE_HEIGHT), the viewer when it draws the frame, hit
+ * tests it and keeps windows reachable. Both use the constants and the function below, so they can't disagree.
+ *
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 11
+export const PROTOCOL_VERSION = 12
+
+/** The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). */
+export const FRAME_TITLE_HEIGHT = 32
+/** The visible border's width on the left, right and bottom of a decorated window, in CSS pixels. */
+export const FRAME_BORDER = 1
+
+/** How far a window's frame reaches beyond the app's window geometry on each side, in CSS pixels. */
+export type FrameInsets = { top: number; left: number; right: number; bottom: number }
+
+/**
+ * The frame around a window's geometry: none for an undecorated or fullscreen window, the title bar alone for a
+ * maximized one (it fills the output, so no borders), the title bar and the borders otherwise.
+ */
+export function frameInsets(window: { decorated?: boolean; maximized?: boolean; fullscreen?: boolean }): FrameInsets {
+  if (!window.decorated || window.fullscreen) {
+    return { top: 0, left: 0, right: 0, bottom: 0 }
+  }
+  const border = window.maximized ? 0 : FRAME_BORDER
+  return { top: FRAME_TITLE_HEIGHT, left: border, right: border, bottom: border }
+}
 
 export const enum EnvelopeKind {
   CONTROL = 1,
@@ -109,6 +138,13 @@ export type SceneWindow = {
   activated: boolean
   maximized: boolean
   fullscreen: boolean
+  /**
+   * The viewer draws a frame (title bar, borders, resize margin) around the window; absent: false, the app draws its
+   * own decorations, or none. Wayland apps that ask for server side decorations (xdg-decoration) and X11 windows that
+   * don't say they have none (_MOTIF_WM_HINTS) are decorated; popups, cursors and drag icons never are. See the top of
+   * this file for what the frame does to the window's geometry.
+   */
+  decorated?: boolean
   /** hidden (shown only in the taskbar); window.activate shows it again */
   minimized: boolean
   /** false until the viewer decided where the window goes (send window.move) */
