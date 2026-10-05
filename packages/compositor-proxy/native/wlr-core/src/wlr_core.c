@@ -944,17 +944,35 @@ setOutputScale(napi_env env, napi_callback_info info) {
     return undefined(env);
 }
 
-// pointerMotion(sid (0: none), sx, sy, timeMs)
+/*
+ * Where a point (output coordinates) is on an X11 surface, by where X11 has its window: Xwayland adds that position to
+ * the surface coordinates to make the root coordinates apps see. The viewer's surface coordinates are by where it shows
+ * the window, a round trip behind a window that moves itself (XMoveWindow while dragging itself): the app would see the
+ * pointer off by its last move and jump there. False (sx, sy untouched) for a Wayland surface.
+ */
+static bool
+x11_surface_point(struct gsurf *gsurf, double x, double y, double *sx, double *sy) {
+    int32_t rx, ry;
+    if (gsurf == NULL || !x11_root_position(gsurf, &rx, &ry)) {
+        return false;
+    }
+    *sx = x - rx;
+    *sy = y - ry;
+    return true;
+}
+
+// pointerMotion(sid (0: none), sx, sy, x, y, timeMs): surface coordinates, and output coordinates (for X11 surfaces)
 static napi_value
 pointerMotion(napi_env env, napi_callback_info info) {
-    napi_value argv[4];
+    napi_value argv[6];
     struct core *core = core_or_throw(env);
-    if (core == NULL || !get_args(env, info, 4, argv)) {
+    if (core == NULL || !get_args(env, info, 6, argv)) {
         return undefined(env);
     }
     struct gsurf *gsurf = gsurf_from_sid(core, arg_u32(env, argv[0]));
     double sx = arg_double(env, argv[1]), sy = arg_double(env, argv[2]);
-    uint32_t time = arg_u32(env, argv[3]);
+    x11_surface_point(gsurf, arg_double(env, argv[3]), arg_double(env, argv[4]), &sx, &sy);
+    uint32_t time = arg_u32(env, argv[5]);
     if (gsurf == NULL) {
         wlr_seat_pointer_notify_clear_focus(core->seat);
         input_pointer_focus_changed(core);

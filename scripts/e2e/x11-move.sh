@@ -3,7 +3,8 @@
 # here with gcc): starts the gateway in dev-auth mode on $GATEWAY_PORT, signs in in a headless browser
 # (scripts/e2e/browser-driver.js), starts a session and, from the Apps menu:
 #   1. launches a borderless square that drags itself: it moves itself on every pointer motion while button 1 is held,
-#      and the window follows (the server takes the position the app asks for, the viewer shows it);
+#      and the window follows (the server takes the position the app asks for, the viewer shows it), over a slow link
+#      (scenes held back) too, never jumping to where the pointer didn't put it;
 #   2. launches a window that moves itself back and forth on a timer and resizes it from our frame meanwhile: while
 #      the resize is dragged the window stays exactly where the pointer puts it (the app's moves happen on the server,
 #      not on screen), and after the release it ends where it was dragged to, at the new size (the viewer's move is the
@@ -80,16 +81,29 @@ launch test-self-drag.desktop "Self Drag Probe"
 wait_for "$(win_is 'Self Drag' 'w.placed && w.hasContent && !w.decorated')" "the square" 20
 wait_for "$(settled)" "the window to settle" 5
 read -r GX GY GW GH < <(geometry_of 'Self Drag'; echo)
+# a slow link: scenes reach the viewer 150 ms late, so it shows the square a while behind where the app moved it (the
+# pointer's position on the square must still be by where X11 has it, or the app sees the pointer off by its last move
+# and jumps there: the square would flicker to places the pointer never put it)
+pw_eval "() => { window.__viewerTest.delayScenes(150); return true }" >/dev/null
+pw_eval "() => { const t = window.__dragTrace = { at: new Set(), on: true }; const tick = () => { const w = window.__viewerTest.windows().find((w) => w.title === 'Self Drag'); if (w) t.at.add(w.x + ',' + w.y); if (t.on) requestAnimationFrame(tick) }; tick(); return true }" >/dev/null
 pointer_at $((GX + 100)) $((GY + 100))
 pw mousedown >/dev/null
-for step in 1 2 3 4; do
-  pointer_at $((GX + 100 + step * 15)) $((GY + 100 + step * 10))
+for step in $(seq 1 12); do
+  pointer_at $((GX + 100 + step * 5)) $((GY + 100 + step * 3))
 done
 # the app asks, the server moves it, the scene shows it (no viewer interaction is involved)
-wait_for "$(win_is 'Self Drag' "w.x === $((GX + 60)) && w.y === $((GY + 40)) && w.shownGeometry.x === $((GX + 60)) && w.shownGeometry.y === $((GY + 40))")" "the square to follow the pointer to $((GX + 60)),$((GY + 40)) (it's at $(geometry_of 'Self Drag'))" 10
+wait_for "$(win_is 'Self Drag' "w.x === $((GX + 60)) && w.y === $((GY + 36)) && w.shownGeometry.x === $((GX + 60)) && w.shownGeometry.y === $((GY + 36))")" "the square to follow the pointer to $((GX + 60)),$((GY + 36)) (it's at $(geometry_of 'Self Drag'))" 10
 pw mouseup >/dev/null
 [ "$(pw_eval "() => window.__viewerTest.interaction()")" = null ] || fail "the viewer started an interaction of its own"
-echo "    moved itself $(moves drag) times, from $GX,$GY to $((GX + 60)),$((GY + 40))"
+AT="$(pw_eval "() => { window.__dragTrace.on = false; window.__viewerTest.delayScenes(0); return [...window.__dragTrace.at].join(' ') }" | tr -d '"')"
+for position in $AT; do
+  ok=0
+  for step in $(seq 0 12); do
+    [ "$position" = "$((GX + step * 5)),$((GY + step * 3))" ] && ok=1
+  done
+  [ "$ok" = 1 ] || fail "the square was at $position, where the pointer never put it (it went: $AT)"
+done
+echo "    moved itself $(moves drag) times, from $GX,$GY to $((GX + 60)),$((GY + 36)), only where the pointer put it: $AT"
 echo "    ok"
 
 step "a window that moves itself while it's being resized from our frame: the pointer decides, and the release"

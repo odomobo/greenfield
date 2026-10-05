@@ -166,6 +166,8 @@ WLR_CORE_INTERNAL bool x11_toplevel_state(struct gsurf *gsurf, struct toplevel_s
  * `popup_iterator`; false if it isn't an X11 window */
 WLR_CORE_INTERNAL bool x11_window_surfaces(struct gsurf *gsurf, wlr_surface_iterator_func_t iterator,
                                            wlr_surface_iterator_func_t popup_iterator, void *data);
+/* where X11 has the surface's window (root coordinates, which are output coordinates); false if it isn't X11's */
+WLR_CORE_INTERNAL bool x11_root_position(struct gsurf *gsurf, int32_t *x, int32_t *y);
 WLR_CORE_INTERNAL void x11_set_position(struct gsurf *gsurf, int32_t x, int32_t y);
 
 /* Input beyond pointer and keyboard (wlr_core_input.c) */

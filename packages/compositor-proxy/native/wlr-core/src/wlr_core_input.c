@@ -195,25 +195,42 @@ pointerConstraintRelease(napi_env env, napi_callback_info info) {
     return undefined_value(env);
 }
 
-// touch(kind (0 down, 1 motion, 2 up, 3 cancel), sid, id, sx, sy, timeMs)
+/* Surface coordinates for a point (x, y in output coordinates) on an X11 surface, by where X11 has its window (see
+ * pointerMotion in wlr_core.c); a Wayland surface's are the viewer's (sx, sy). */
+static void
+surface_point(struct gsurf *gsurf, double x, double y, double *sx, double *sy) {
+    int32_t rx, ry;
+    if (gsurf && x11_root_position(gsurf, &rx, &ry)) {
+        *sx = x - rx;
+        *sy = y - ry;
+    }
+}
+
+// touch(kind (0 down, 1 motion, 2 up, 3 cancel), sid, id, sx, sy, x, y, timeMs): surface and output coordinates
 static napi_value
 touch(napi_env env, napi_callback_info info) {
-    double v[6];
+    double v[8];
     struct core *core = wlr_core_get(env);
-    if (core == NULL || !number_args(env, info, 6, v)) {
+    if (core == NULL || !number_args(env, info, 8, v)) {
         return undefined_value(env);
     }
     int kind = (int) v[0];
-    uint32_t time = (uint32_t) v[5];
+    uint32_t time = (uint32_t) v[7];
     int32_t id = (int32_t) v[2];
+    double sx = v[3], sy = v[4];
     if (kind == 0) {
         struct gsurf *gsurf = gsurf_from_sid(core, (uint32_t) v[1]);
         if (gsurf) {
-            wlr_seat_touch_notify_down(core->seat, gsurf->surface, time, id, v[3], v[4]);
+            surface_point(gsurf, v[5], v[6], &sx, &sy);
+            wlr_seat_touch_notify_down(core->seat, gsurf->surface, time, id, sx, sy);
         }
     } else if (kind == 1) {
-        if (wlr_seat_touch_get_point(core->seat, id)) {
-            wlr_seat_touch_notify_motion(core->seat, time, id, v[3], v[4]);
+        struct wlr_touch_point *point = wlr_seat_touch_get_point(core->seat, id);
+        if (point) {
+            if (point->surface) {
+                surface_point(gsurf_from_surface(core, point->surface), v[5], v[6], &sx, &sy);
+            }
+            wlr_seat_touch_notify_motion(core->seat, time, id, sx, sy);
         }
     } else if (kind == 2) {
         if (wlr_seat_touch_get_point(core->seat, id)) {

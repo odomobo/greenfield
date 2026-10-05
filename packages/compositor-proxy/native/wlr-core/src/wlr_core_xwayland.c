@@ -718,6 +718,16 @@ x11_window_surfaces(struct gsurf *gsurf, wlr_surface_iterator_func_t iterator, w
     return true;
 }
 
+bool
+x11_root_position(struct gsurf *gsurf, int32_t *x, int32_t *y) {
+    if (gsurf->xwin == NULL) {
+        return false;
+    }
+    *x = gsurf->xwin->xsurface->x;
+    *y = gsurf->xwin->xsurface->y;
+    return true;
+}
+
 void
 x11_set_position(struct gsurf *gsurf, int32_t x, int32_t y) {
     struct xwin *xwin = gsurf->xwin;

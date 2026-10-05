@@ -52,7 +52,11 @@ declare namespace wlrCore {
   export function setOutputScale(scale: number): void
 
   /** sid 0: the pointer is over nothing of ours */
-  export function pointerMotion(sid: number, sx: number, sy: number, timeMs: number): void
+  /**
+   * sx, sy: where the viewer has the point on the surface; x, y: on the output. For an X11 surface the core uses x, y
+   * and where X11 has the window (the viewer can be a round trip behind a window that moves itself).
+   */
+  export function pointerMotion(sid: number, sx: number, sy: number, x: number, y: number, timeMs: number): void
 
   /** button: Linux input code (BTN_LEFT, ...) */
   export function pointerButton(button: number, pressed: boolean, timeMs: number): void
@@ -76,7 +80,17 @@ declare namespace wlrCore {
   export function pointerConstraintRelease(): void
 
   /** A touch point: phase 0 down, 1 motion, 2 up, 3 cancel; sx, sy in the surface the point went down on. */
-  export function touch(phase: number, sid: number, id: number, sx: number, sy: number, timeMs: number): void
+  /** sx, sy and x, y as for pointerMotion */
+  export function touch(
+    phase: number,
+    sid: number,
+    id: number,
+    sx: number,
+    sy: number,
+    x: number,
+    y: number,
+    timeMs: number,
+  ): void
 
   /** evdev key code. A press of a key that's down, or a release of a key that's up, is dropped. */
   export function key(code: number, pressed: boolean, timeMs: number): void

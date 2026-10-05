@@ -1065,7 +1065,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     if (sid === 0) {
       this.send?.({ type: 'cursor', kind: 'default' })
     }
-    this.wlr.pointerMotion(sid, Number(message.sx) || 0, Number(message.sy) || 0, time(message))
+    const [sx, sy, x, y] = [message.sx, message.sy, message.x, message.y].map((value) => Number(value) || 0)
+    this.wlr.pointerMotion(sid, sx, sy, x, y, time(message))
   }
 
   private pointerAxis(message: ControlMessage) {
@@ -1083,7 +1084,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       return
     }
     const sid = typeof message.surface === 'string' ? (this.sids.get(message.surface) ?? 0) : 0
-    this.wlr.touch(phase, sid, Number(message.id) || 0, Number(message.sx) || 0, Number(message.sy) || 0, time(message))
+    const [sx, sy, x, y] = [message.sx, message.sy, message.x, message.y].map((value) => Number(value) || 0)
+    this.wlr.touch(phase, sid, Number(message.id) || 0, sx, sy, x, y, time(message))
   }
 }
 
