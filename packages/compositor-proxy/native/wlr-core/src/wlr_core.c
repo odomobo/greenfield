@@ -430,14 +430,24 @@ handle_set_parent(struct wl_listener *listener, void *data) {
 }
 
 /*
- * xdg-decoration: we always draw the frame ourselves (the viewer does), so an app that asks gets server-side mode, and
- * "toplevel-decorated" tells JavaScript the window has our frame. Apps without a decoration object (GTK) keep theirs.
+ * xdg-decoration: the app's choice is respected. An app that asks for client-side mode (Chrome with its own title bar)
+ * draws its frame, like apps without a decoration object (GTK); one that asks for server-side mode or has no preference
+ * (foot, Qt) gets ours, drawn by the viewer. "toplevel-decorated" tells JavaScript whether the window has our frame.
  */
+static void
+apply_decoration_mode(struct gsurf *gsurf) {
+    bool ours = gsurf->decoration->requested_mode != WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
+    // the answer is a configure that follows set_mode
+    wlr_xdg_toplevel_decoration_v1_set_mode(gsurf->decoration, ours ? WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
+                                                                     : WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
+    napi_value args[] = {u32(gsurf->core, gsurf->sid), boolean(gsurf->core, ours)};
+    emit(gsurf->core, "toplevel-decorated", 2, args);
+}
+
 static void
 handle_decoration_request_mode(struct wl_listener *listener, void *data) {
     struct gsurf *gsurf = wl_container_of(listener, gsurf, decoration_request_mode);
-    // whatever the app asked for (client side, or unset): the answer is a configure that follows set_mode
-    wlr_xdg_toplevel_decoration_v1_set_mode(gsurf->decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    apply_decoration_mode(gsurf);
 }
 
 static void
@@ -464,9 +474,7 @@ handle_new_toplevel_decoration(struct wl_listener *listener, void *data) {
     wl_signal_add(&decoration->events.request_mode, &gsurf->decoration_request_mode);
     gsurf->decoration_destroy.notify = handle_decoration_destroy;
     wl_signal_add(&decoration->events.destroy, &gsurf->decoration_destroy);
-    wlr_xdg_toplevel_decoration_v1_set_mode(decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
-    napi_value args[] = {u32(core, gsurf->sid), boolean(core, true)};
-    emit(core, "toplevel-decorated", 2, args);
+    apply_decoration_mode(gsurf);
 }
 
 /*

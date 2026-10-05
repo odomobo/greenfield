@@ -91,8 +91,9 @@ A stray press of the browser's back button (e.g. a mouse side button) must not t
     concurrently, so the app has usually redrawn by the time it ends. A new frame arriving mid-animation is shown scaled
     to the animated shape.
 - **Decorations**: the viewer draws a frame (title bar, thin border, invisible resize margin) around windows the server
-  marks `decorated`: Wayland apps that ask for server side mode (`xdg-decoration`), X11 windows that don't say they
-  have no title bar (`_MOTIF_WM_HINTS`). Other apps (GTK) draw their own, popups are never framed (Core item 4).
+  marks `decorated`: Wayland apps with an `xdg-decoration` object that don't ask for client side mode, X11 windows
+  that don't say they have no title bar (`_MOTIF_WM_HINTS`). Other apps (GTK, Chrome) draw their own, popups are never
+  framed (Core item 4).
 - **Input regions**: clicks outside a surface's input region (`wl_surface.set_input_region`, e.g. most of a client-side
   shadow) go to whatever is underneath; the pointer and cursor follow the same hit test.
 - **Child windows** (dialogs, `xdg_toplevel.set_parent`) are separate windows in the scene with a parent. They are
@@ -895,7 +896,8 @@ single large item never stalls the link. Initial window before any estimate: 64 
    window's activated, maximized and minimized state.
    **Done** (branch `core4-decorations`, scene protocol 12).
    - Native core: `wlr_xdg_decoration_manager_v1`; a toplevel's decoration object (new, or any `request_mode`) is
-     answered with server side mode (wlroots sends the configure that must follow), and the object's destruction
+     answered with client side mode if the app asked for it (Chrome with its own title bar keeps it, like GTK, which
+     has no decoration object), server side mode otherwise (wlroots sends the configure that must follow), and the object's destruction
      reports the window undecorated again. X11: managed windows are decorated unless `_MOTIF_WM_HINTS` has no title
      (`wlr_xwayland_surface.decorations`, `set_decorations` re-reports); override-redirect windows are never toplevels.
      Both report `toplevel-decorated(sid, bool)`; the server turns it into the scene's `decorated` flag (absent: false).

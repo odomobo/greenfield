@@ -13,7 +13,8 @@
 #   4. stretches foot by its resize margin: the content stretches while dragging, the frame keeps its real size, and the
 #      app is told once on release;
 #   5. launches a GTK4 app (gtk4-demo, if installed): it keeps its own decorations, no frame;
-#   6. closes foot with the title bar's close button.
+#   6. launches a second foot that asks for client side decorations (like Chrome): it keeps its own, no frame;
+#   7. closes foot with the title bar's close button.
 # E2E_SHOTS=<directory> saves screenshots of the steps there (at device pixel ratios 1 and 2, look at them).
 #
 # Requires: foot, xclock, xprop, dbus-daemon, playwright-cli (for its Playwright library and browser), curl, node, the
@@ -33,6 +34,12 @@ cat >"$WORK/data/applications/test-xclock.desktop" <<EOF
 Type=Application
 Name=Test Clock
 Exec=xclock -geometry 220x220
+EOF
+cat >"$WORK/data/applications/test-foot-csd.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Selfdrawn Console
+Exec=foot --app-id=test-foot-csd -o csd.preferred=client
 EOF
 HAVE_GTK=0
 if command -v gtk4-demo >/dev/null; then
@@ -282,9 +289,19 @@ else
   echo "(gtk4-demo isn't installed: the GTK app check is skipped)"
 fi
 
+step "an app that asks for client side decorations (like Chrome) keeps its own: no frame"
+launch test-foot-csd.desktop "Selfdrawn Console"
+wait_for "$(win_is test-foot-csd 'w.placed && w.hasContent')" "the second foot's window" 40
+[ "$(win test-foot-csd w.decorated)" != true ] || fail "an app that asked for client side decorations is decorated"
+# its own title bar and borders are subsurfaces
+wait_for "$(win_is test-foot-csd 'w.surfaces.length > 1')" "the second foot to draw its own decorations" 10
+[ "$(pw_eval "() => [...document.querySelectorAll('.frame')].filter((f) => getComputedStyle(f).display !== 'none').length")" = 1 ] ||
+  fail "only the first foot's frame should be shown: $(pw_eval "() => [...document.querySelectorAll('.frame')].filter((f) => getComputedStyle(f).display !== 'none').map((f) => f.dataset.frameWindow)")"
+echo "    ok"
+
 step "the close button closes the window"
 click_element "$FOOT .frame-button.close"
 wait_for "() => !window.__viewerTest.windows().some((w) => w.appId === 'test-foot')" "foot's window to close" 10
 echo "    ok"
 
-echo "PASS: window decorations: foot and X11 apps get our frame (move, maximize, resize, menu, close), GTK keeps its own"
+echo "PASS: window decorations: foot and X11 apps get our frame (move, maximize, resize, menu, close), GTK and apps that ask keep their own"
