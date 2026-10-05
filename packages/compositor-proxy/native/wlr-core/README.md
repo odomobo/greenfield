@@ -193,7 +193,7 @@ XWayland (wave 2 B):
 
 Since Core 2a the encoder is only used with GPU acceleration (`--encoder nvh264|vaapih264`, or `auto` finding one) and
 only for streaming surfaces (see "Encoding policy" in ROADMAP.md). With `--encoder none` (what `auto` resolves to
-without a GPU) no encoder is ever created and everything is sent as PNG patches; there is no x264 fallback. The x264 CPU
+without a GPU) no encoder is ever created and everything is sent as lossless (QOI) patches; there is no x264 fallback. The x264 CPU
 path below is still in the file, unused and untested since, until GPU acceleration is revisited (wave 4 G). The notes
 that follow describe it as it was built.
 

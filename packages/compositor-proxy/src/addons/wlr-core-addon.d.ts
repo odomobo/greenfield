@@ -144,8 +144,18 @@ declare namespace wlrCore {
 
   export function sendFrameDone(sid: number, timeMs: number): void
 
-  /** RGBA copy of a rectangle of the surface's current buffer, undefined if it can't be read. */
-  export function readPixels(sid: number, x: number, y: number, width: number, height: number): Buffer | undefined
+  /**
+   * RGBA copy of a rectangle of the surface's current buffer, undefined if it can't be read. `opaque` is true if all
+   * its alpha is 255: the buffer's format has no alpha, or the rectangle lies in the surface's opaque region, or the
+   * copy found no alpha below 255.
+   */
+  export function readPixels(
+    sid: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): { pixels: Uint8Array; opaque: boolean } | undefined
 
   /**
    * Makes this text the seat's clipboard selection (a server-side data source, text mime types only), replacing the

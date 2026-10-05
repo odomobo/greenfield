@@ -39,6 +39,19 @@ target_include_directories(proxy-poll-addon PRIVATE
 )
 set_target_properties(proxy-poll-addon PROPERTIES PREFIX "" SUFFIX ".node")
 
+# The lossless patch encoder (QOI + LZ4, vendored in native/patch/vendor with their licences), loaded by the patch
+# encoding worker threads.
+add_library(nebula-patch-addon SHARED
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/patch/src/patch_encode.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/patch/vendor/lz4.c
+)
+target_include_directories(nebula-patch-addon PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/patch/vendor
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/node-api
+)
+target_compile_options(nebula-patch-addon PRIVATE -O3)
+set_target_properties(nebula-patch-addon PROPERTIES PREFIX "" SUFFIX ".node")
+
 
 # The session's Wayland side (ROADMAP.md, Core item 1): wlroots is a submodule (`git submodule update --init`) pinned to
 # 0.17.4 and built with meson as a static library against the system's libraries (libwayland, pixman, xkbcommon,
@@ -112,4 +125,4 @@ target_link_libraries(wlr-core-addon PRIVATE
         rt
         m
 )
-install(TARGETS wlr-core-addon proxy-poll-addon DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/dist/addons)
+install(TARGETS wlr-core-addon proxy-poll-addon nebula-patch-addon DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/dist/addons)

@@ -934,7 +934,7 @@ function holdingSink() {
 
 function readablePixels() {
   ;(core.native as any).readPixels = (_sid: number, _x: number, _y: number, width: number, height: number) =>
-    new Uint8Array(width * height * 4)
+    ({ pixels: new Uint8Array(width * height * 4), opaque: false })
 }
 
 test('without a hardware encoder no video encoder is ever created, whatever the surfaces do', async () => {

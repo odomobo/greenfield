@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import type { Patch } from '@gfld/scene-protocol'
+import { type Patch, PatchFormat } from '@gfld/scene-protocol'
+import type { EncodedPatch } from '../patch-encoder.js'
 import { EncoderPool } from '../EncoderPool.js'
 import { CLASS_PERIOD_MS, SurfaceClass } from '../policy.js'
 import { area, Rect } from '../region.js'
@@ -94,6 +95,7 @@ class FakeSink implements EncodingSink {
 class FakeSurface implements SurfaceHost<FakeEncoder> {
   buffer?: BufferInfo
   readable = true
+  opaque = false
   reads: Rect[] = []
   encodes: { encoder: FakeEncoder; resolve: (frame: Uint8Array) => void }[] = []
   /** resolve video encodings right away */
@@ -113,7 +115,7 @@ class FakeSurface implements SurfaceHost<FakeEncoder> {
       return undefined
     }
     this.reads.push(rect)
-    return new Uint8Array(rect.width * rect.height * 4)
+    return { pixels: new Uint8Array(rect.width * rect.height * 4), opaque: this.opaque }
   }
 
   encodeVideo(encoder: FakeEncoder, buffer: BufferInfo) {
@@ -134,6 +136,11 @@ class FakeSurface implements SurfaceHost<FakeEncoder> {
   }
 }
 
+/** what the encoders return in these tests: the bytes are not looked at */
+function fakeEncoded(data: Uint8Array): EncodedPatch {
+  return { format: PatchFormat.QOI, channels: 4, data }
+}
+
 class FakeStreamingPool implements StreamingEncodePool {
   canAccept = true
   onCapacity?: () => void
@@ -141,7 +148,7 @@ class FakeStreamingPool implements StreamingEncodePool {
 
   async encode(rgba: Uint8Array) {
     this.calls++
-    return new Uint8Array([rgba.length & 0xff, 1])
+    return fakeEncoded(new Uint8Array([rgba.length & 0xff, 1]))
   }
 
   setCapacity(canAccept: boolean) {
@@ -163,18 +170,20 @@ function setup(poolSize = 2) {
   const normalCalls: { width: number; height: number; resolve: () => void }[] = []
   let holdNormal = false
   let normalStarted = 0
+  const opaqueSeen: boolean[] = []
   const context = new EncodingContext<FakeEncoder>(
     sink,
     pool,
     {
-      normal: (rgba, width, height) => {
+      normal: (rgba, width, height, opaque) => {
         normalStarted++
+        opaqueSeen.push(opaque)
         if (holdNormal) {
-          return new Promise<Uint8Array>((resolve) =>
-            normalCalls.push({ width, height, resolve: () => resolve(new Uint8Array([rgba.length & 0xff])) }),
+          return new Promise<EncodedPatch>((resolve) =>
+            normalCalls.push({ width, height, resolve: () => resolve(fakeEncoded(new Uint8Array([rgba.length & 0xff]))) }),
           )
         }
-        return Promise.resolve(new Uint8Array([rgba.length & 0xff]))
+        return Promise.resolve(fakeEncoded(new Uint8Array([rgba.length & 0xff])))
       },
       streaming,
     },
@@ -188,6 +197,7 @@ function setup(poolSize = 2) {
     streaming,
     errors,
     normalCalls,
+    opaqueSeen,
     get created() {
       return created
     },
@@ -223,6 +233,23 @@ async function relentless(env: Env, encoder: SurfaceEncoder<FakeEncoder>, host: 
   }
   await settle()
 }
+
+test("the opaque flag the host reports for a patch's pixels goes to the encoder", async () => {
+  const env = setup()
+  const { encoder, host } = env.surface('a')
+  host.opaque = true
+  await encoder.commit(full(host))
+  await settle()
+  assert.ok(env.opaqueSeen.length > 0)
+  assert.ok(env.opaqueSeen.every((opaque) => opaque))
+  env.opaqueSeen.length = 0
+  host.opaque = false
+  host.touch()
+  await encoder.commit(full(host))
+  await settle()
+  assert.ok(env.opaqueSeen.length > 0)
+  assert.ok(env.opaqueSeen.every((opaque) => !opaque))
+})
 
 test('a new surface is normal and sends patches, not video', async () => {
   const env = setup()
@@ -634,11 +661,11 @@ test('nothing is encoded without a viewer', async () => {
 
 test("a surface's patches are sent in capture order, even when their encodings finish out of order", async () => {
   const sink = new FakeSink()
-  const encodings: ((png: Uint8Array) => void)[] = []
+  const encodings: ((encoded: EncodedPatch) => void)[] = []
   const streaming = new FakeStreamingPool()
   const pump = new PatchPump(
     sink,
-    () => new Promise<Uint8Array>((resolve) => encodings.push(resolve)),
+    () => new Promise<EncodedPatch>((resolve) => encodings.push(resolve)),
     streaming,
     { error: () => undefined },
   )
@@ -661,6 +688,7 @@ test("a surface's patches are sent in capture order, even when their encodings f
       return {
         rect,
         pixels: new Uint8Array(4),
+        opaque: false,
         surfaceSize: { width: 100, height: 100 },
         serial,
         epoch: 0,
@@ -675,10 +703,10 @@ test("a surface's patches are sent in capture order, even when their encodings f
   pump.schedule(source)
   assert.equal(encodings.length, 2)
   // the newer, smaller patch finishes encoding first
-  encodings[1](new Uint8Array([2]))
+  encodings[1](fakeEncoded(new Uint8Array([2])))
   await settle()
   assert.equal(sink.patches.length, 0)
-  encodings[0](new Uint8Array([1]))
+  encodings[0](fakeEncoded(new Uint8Array([1])))
   await settle()
   assert.deepEqual(
     sink.patches.map(({ patch }) => patch.contentSerial),

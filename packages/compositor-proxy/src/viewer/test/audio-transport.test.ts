@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
-import { decodeEnvelope } from '@gfld/scene-protocol'
+import { decodeEnvelope, PatchFormat } from '@gfld/scene-protocol'
 import { Congestion, WebSocketViewerTransport } from '../ViewerTransport.js'
 
 /** Just enough of a ws WebSocket: every send is kept, and completes when the test says so. */
@@ -48,7 +48,7 @@ test('audio packets are sent at once, whatever the congestion controller says ab
     priority: 'patch',
     surfaceClass: 'normal',
     surface: 's',
-    patch: { contentSerial: 1, surfaceSize: { width: 1, height: 1 }, rect: { x: 0, y: 0, width: 1, height: 1 }, png: new Uint8Array(1) },
+    patch: { contentSerial: 1, surfaceSize: { width: 1, height: 1 }, rect: { x: 0, y: 0, width: 1, height: 1 }, format: PatchFormat.QOI, channels: 4, data: new Uint8Array(1) },
   })
   assert.equal(ws.sent.length, 0, 'the patch waits')
   transport.send({ priority: 'audio', packet: packet(7) })

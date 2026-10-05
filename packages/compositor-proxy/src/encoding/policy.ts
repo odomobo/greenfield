@@ -2,7 +2,7 @@
  * The per-surface encoding policy (see "Encoding policy" in ROADMAP.md). Pure, no Node or native dependencies.
  *
  * A surface has a priority class: normal, or streaming when it is relentless (it keeps sending new data before its old
- * data has gone out). Whether a surface is sent as video or as PNG patches is decided separately, by the surface
+ * data has gone out). Whether a surface is sent as video or as patches is decided separately, by the surface
  * encoder (video only for streaming surfaces, with a hardware encoder, when the surface isn't small).
  */
 import { boundingBox, clip, disjoint, Rect, splitRect, subtract } from './region.js'
@@ -18,7 +18,7 @@ export const CLASS_PERIOD_MS = 750
 export const PROMOTE_FRACTION = 0.6
 /** Streaming -> normal at the end of a period in which the backlogged share was below this. */
 export const DEMOTE_FRACTION = 0.15
-/** Max pixels per PNG patch, larger areas are split. */
+/** Max pixels per patch, larger areas are split. */
 export const MAX_PATCH_PIXELS = 64 * 1024
 /** A commit's damage in more pieces than this is sent as its bounding box instead (fewer, larger patches). */
 export const MAX_PATCH_RECTS = 32

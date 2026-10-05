@@ -1,8 +1,9 @@
-import { deflate, deflateSync } from 'node:zlib'
+import { deflate } from 'node:zlib'
 
 /**
- * Minimal RGBA PNG encoder for patches. Row filtering runs here (cheap, a patch is at most 64k pixels), compression
- * runs on libuv's thread pool.
+ * Minimal RGBA PNG encoder, for images that aren't surfaces (an X11 app's window icon, sent as a data URL). Surfaces'
+ * patches don't use it, they use the QOI cascade (patch-encoder.ts). Row filtering runs here, compression runs on
+ * libuv's thread pool.
  */
 
 // fast enough for interactive updates, still compresses UI content well
@@ -133,13 +134,4 @@ export function encodePng(rgba: Uint8Array, width: number, height: number): Prom
       resolve(assemble(width, height, compressed))
     })
   })
-}
-
-/**
- * The same PNG, all on the calling thread (for the streaming encode workers, whose own thread then does the work and
- * carries their nice level).
- */
-export function encodePngSync(rgba: Uint8Array, width: number, height: number): Buffer {
-  checkSize(rgba, width, height)
-  return assemble(width, height, deflateSync(filterRows(rgba, width, height), { level: DEFLATE_LEVEL }))
 }

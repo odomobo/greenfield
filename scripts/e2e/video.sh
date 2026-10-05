@@ -77,20 +77,17 @@ near "bottom right half transparent, blue" "$P4" "0,0,255,128"
 echo "    ok"
 
 step "patches over video replace the pixels, transparent ones too; a patch of another size stretches what was there"
-# a PNG (made by the page) of a rectangle filled with one color, as base64
-PNG_JS='async (r, g, b, a, width, height) => {
-    const canvas = new OffscreenCanvas(width, height)
-    const context = canvas.getContext("2d")
-    context.fillStyle = `rgba(${r}, ${g}, ${b}, ${a})`
-    context.fillRect(0, 0, width, height)
-    const bytes = new Uint8Array(await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer())
+# raw RGBA pixels (made by the page) of a rectangle filled with one color, as base64
+RAW_JS='async (r, g, b, a, width, height) => {
+    const bytes = new Uint8Array(width * height * 4)
+    for (let i = 0; i < bytes.length; i += 4) bytes.set([r, g, b, a], i)
     return btoa(String.fromCharCode(...bytes))
   }'
 alpha_pixel() { pw_eval "() => window.__viewerTest.surfacePixels('test/alpha', $1, $2, 1, 1).join(',')" | tr -d '"'; }
 pw_eval "async () => {
-  const transparent = await ($PNG_JS)(0, 0, 0, 0, 10, 10)
+  const transparent = await ($RAW_JS)(0, 0, 0, 0, 10, 10)
   await window.__viewerTest.injectPatch('test/alpha', { width: 40, height: 30 }, { x: 25, y: 0, width: 10, height: 10 }, transparent)
-  const green = await ($PNG_JS)(0, 255, 0, 255, 10, 10)
+  const green = await ($RAW_JS)(0, 255, 0, 255, 10, 10)
   await window.__viewerTest.injectPatch('test/alpha', { width: 40, height: 30 }, { x: 0, y: 0, width: 10, height: 10 }, green)
   return true
 }" >/dev/null
@@ -99,7 +96,7 @@ near "an opaque patch over transparent video" "$(alpha_pixel 5 5)" "0,255,0,255"
 near "the video elsewhere stays" "$(alpha_pixel 38 28)" "0,0,255,128"
 # the surface becomes twice as big: the old content is stretched, the patch lands in it
 pw_eval "async () => {
-  const yellow = await ($PNG_JS)(255, 255, 0, 255, 4, 4)
+  const yellow = await ($RAW_JS)(255, 255, 0, 255, 4, 4)
   await window.__viewerTest.injectPatch('test/alpha', { width: 80, height: 60 }, { x: 0, y: 0, width: 4, height: 4 }, yellow)
   return true
 }" >/dev/null

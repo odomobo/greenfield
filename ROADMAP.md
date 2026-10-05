@@ -173,7 +173,7 @@ A surface has a **priority class** and an **encoding**, decided separately:
 
 - **Class**: *normal* (medium priority) or *streaming* (low priority). Control messages (scene, input, cursor, shell,
   clipboard, audio later) are above both and always go first.
-- **Encoding**: *PNG patches*, or *video* (H.264 of the whole surface). Video is only possible with GPU acceleration
+- **Encoding**: *lossless patches* (raw / QOI / QOI + LZ4, below), or *video* (H.264 of the whole surface). Video is only possible with GPU acceleration
   (below) and only used for streaming surfaces.
 
 A surface's class and encoding are per surface (a window's subsurfaces and popups each have their own). The viewer
@@ -181,7 +181,7 @@ doesn't need to know a surface's class; nothing about it is in the scene protoco
 
 ### GPU acceleration and encoders
 
-- **Without GPU acceleration on the server (the norm: mostly VPSes), everything is sent as PNG patches**, streaming
+- **Without GPU acceleration on the server (the norm: mostly VPSes), everything is sent as lossless patches**, streaming
   surfaces included, best effort. No H.264 at all, not even x264.
 - With GPU acceleration, streaming surfaces (that aren't small, below) are sent as video by a hardware encoder
   (`nvh264`, `vaapih264`). There is no x264 fallback.
@@ -251,11 +251,13 @@ Changing class:
 - Without video, a class change changes only the priority. Nothing is dropped or re-sent.
 - If the encoder pool is empty, a promoted surface stays on patches (still streaming class).
 
-### PNG patches and damage
+### Lossless patches and damage
 
-- Only the damaged areas are sent, as lossless PNG patches of at most `MAX_PATCH_PIXELS` = 64k pixels; larger areas
+- Only the damaged areas are sent, as lossless patches of at most `MAX_PATCH_PIXELS` = 64k pixels; larger areas
   are split (`planPatches`). A commit's damage in more than `MAX_PATCH_RECTS` = 32 pieces is sent as its bounding box.
-  PNG: row filtering in JavaScript, deflate level 4 on libuv's thread pool (`png.ts`).
+  Each patch is encoded with the QOI cascade (raw / QOI / QOI + LZ4, next section; native `nebula-patch-addon`, on
+  worker threads, `patch-encoder.ts`), and decoded in the viewer by a wasm decoder in a Web Worker. (It was PNG until
+  item 5b phase 1.)
 - The viewer applies patches as soon as they arrive. A streaming surface's frame can therefore tear across patches;
   accepted, as holding patches back until a whole frame is there would add latency.
 - **Newest content wins** (already how it works): a surface's queue holds rectangles, not pixels, oldest first. New
@@ -268,9 +270,9 @@ Changing class:
   photo- or game-like content about 40–150 KB, noise ~256 KB. Most patches are far smaller (a keystroke, a cursor
   blink: under 2 KB).
 
-### Planned: QOI patches, and lossy encoding only when bandwidth is short
+### QOI patches, and lossy encoding only when bandwidth is short
 
-(Decided 2026-10-05; the work is item 5b and later items. Why: PNG encoding hogs the CPU even on a Ryzen 7600, and a
+(Decided 2026-10-05; the lossless cascade is built (item 5b phase 1), the lossy half is item 5b phase 2. Why: PNG encoding hogs the CPU even on a Ryzen 7600, and a
 small VPS has far less. The QOI spike measured our PNG at 75–145 ms of CPU per 1080p frame, QOI + LZ4 at 3.5–4.8 ms on
 UI content and about 26 ms on noise.)
 
@@ -331,16 +333,16 @@ Each surface is a source with at most **2 slots** (`SURFACE_SLOTS` = 2). An item
 
 ### Encode scheduling: streaming patches at low CPU priority
 
-Relentless PNG encoding must not fight real work on the machine (the user's apps, other sessions). So streaming
+Relentless patch encoding must not fight real work on the machine (the user's apps, other sessions). So streaming
 surfaces' patches are encoded on threads with a low OS priority, and the kernel's scheduler gives them only the CPU
 that nothing else wants.
 
-- **Normal surfaces**: as today. Row filtering on the main thread, deflate on libuv's thread pool (4 threads by
-  default), normal priority. At most `MAX_NORMAL_ENCODES` = 4 patches encoding at once (today's `maxInFlight` is 3).
+- **Normal surfaces**: a pool of `NORMAL_ENCODE_WORKERS` = 4 worker threads at normal priority (nice 0; the same
+  `PatchWorkerPool` class and `patch-worker.ts`). At most `MAX_NORMAL_ENCODES` = 4 patches encoding at once.
 - **Streaming surfaces**: a separate pool of `STREAMING_ENCODE_WORKERS` = 2 Node `worker_threads`, each started with
-  its own OS thread at nice `STREAMING_ENCODE_NICE` = 19. A worker does the whole PNG encode (row filtering and
-  `zlib.deflateSync`, which runs on the worker's own thread, so the nice level applies to it), one patch at a time.
-  The captured pixels are passed as a transferred `ArrayBuffer` (no copy) and the PNG comes back the same way.
+  its own OS thread at nice `STREAMING_ENCODE_NICE` = 19. A worker does the whole encode (the native QOI
+  cascade, synchronously, on the worker's own thread, so the nice level applies to it), one patch at a time.
+  The captured pixels are passed as a transferred `ArrayBuffer` (no copy) and the encoded patch comes back the same way.
   The libuv thread pool can't be used for this: its threads are shared with everything else in the process (file
   I/O, DNS, normal patches), and an unprivileged process can raise a thread's nice level but never lower it back.
 - Setting the nice level: a small native function in the existing `poll` addon (next to `setTcpNotSentLowat`),
@@ -689,7 +691,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
   `scripts/e2e/desktop.sh` checks foot's protocol log for all four cases.
 - Core 2 (2026-10-04, merged into master): normal and streaming priority classes by the relentless measure,
   per-surface slots, streaming patches encoded on nice-19 worker threads, byte-weighted scheduler between the classes,
-  PNG patches only without GPU acceleration (`--encoder auto|none|nvh264|vaapih264`, no x264), and our own
+  lossless patches only without GPU acceleration (`--encoder auto|none|nvh264|vaapih264`, no x264), and our own
   BBRv3-style congestion control with viewer acks and the backlog hold (scene protocol 11). See Core items 2a and 2b.
 
 ### Core
@@ -915,7 +917,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
      app renders at twice the surface's CSS size) and a CSS size of the surface, `image-rendering: pixelated` when each
      image pixel covers whole device pixels (the old NEAREST rule), and window positions are snapped to device pixels
      when unstretched, so HiDPI stays as sharp as before.
-   - Patches: `clearRect` + `drawImage` of the decoded PNG (a patch replaces pixels, also transparent ones). Opaque
+   - Patches: `clearRect` + `drawImage` of the decoded bitmap (a patch replaces pixels, also transparent ones). Opaque
      video: `drawImage(VideoFrame)` of the bottom right corner of the padded frame, no copy through JavaScript memory
      (`decoder.ts` hands on the `VideoFrame`s, which are closed right after drawing; hardware decoding is no longer
      excluded). Video with alpha: one shared offscreen WebGL context (`alpha-video.ts`) draws the color and alpha
@@ -1125,7 +1127,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
 ### Next: QOI patches
 
 5b. **QOI instead of PNG for patches** (user's request, 2026-10-05; the design is in [Encoding
-    policy](#planned-qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)). Today every patch is a PNG from our
+    policy](#qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)). Today every patch is a PNG from our
     own encoder (`compositor-proxy/src/encoding/png.ts`), which hogs the CPU. QOI (https://github.com/phoboslab/qoi,
     MIT, one header) and LZ4 (BSD) are owned in the codebase (vendored with their licences, not dependencies).
     1. **Done: the spike** (Sonnet, branch `worktree-agent-a1e5c33d5ee632214`, `spike/qoi/results.md`; not merged, its
@@ -1136,7 +1138,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
        0.77x, 2.28x; QOI + deflate 1 the smallest but its browser decode (`DecompressionStream`, ~0.4 ms per call) is
        slower than PNG's. Browser decode per 64k-pixel tile: PNG 0.66 ms, QOI + LZ4 in wasm 0.27 ms, QOI in plain JS
        0.37 ms. All patches round-trip exactly. The wasm decoder (QOI into a caller buffer + LZ4) is 2.1 KB.
-    2. **Phase 1: replace PNG with the QOI cascade** (raw / QOI / QOI + LZ4, one-byte format tag; see Encoding policy) for
+    2. **Done.** **Phase 1: replace PNG with the QOI cascade** (raw / QOI / QOI + LZ4, one-byte format tag; see Encoding policy) for
        every patch of every surface, no PNG fallback for patches and no special cases.
        - Encoder: native C (QOI + LZ4) in compositor-proxy's CMake project, called synchronously from worker threads
          (the streaming class's already run at low priority; the normal class keeps its own). Opaque detection as in
@@ -1149,7 +1151,29 @@ single large item never stalls the link. Initial window before any estimate: 64 
        - PNG stays only for images that aren't surfaces (an X11 app's `_NET_WM_ICON` window icon, read from an X
          property and sent as a data URL); `png.ts` and `png-worker.ts` otherwise go. Protocol version bump.
        - Afterwards, check the encoding policy's tuning (pool sizes, the relentless thresholds), measured with PNG's
-         costs.
+         costs. (Still to do.)
+       - Status (built 2026-10-05, scene protocol 16): `native/patch` (`nebula-patch-addon`, QOI + LZ4 vendored with
+         their licences in `native/patch/vendor`) encodes synchronously; `PatchWorkerPool` (was `StreamingPngPool`,
+         `patch-worker.ts` was `png-worker.ts`) runs it on 2 worker threads at nice 19 for the streaming class and on 4
+         at nice 0 for the normal class (replacing libuv's pool; the scheduler, slots and ordering are unchanged).
+         `readPixels` (wlr-core) returns `{ pixels, opaque }` in a transferable `ArrayBuffer`: opaque if the format has
+         no alpha, or the rectangle is inside `wlr_surface.opaque_region` (only for scale-only surfaces: no transform,
+         no viewport), else if the alpha scan folded into the copy finds every alpha byte 255. The patch envelope
+         carries `u8 format` (`PatchFormat`: RAW 0, QOI 1, QOI + LZ4 2; 3 and 4 are left for JPEG and JPEG with alpha)
+         and `u8 channels` after the rectangle. The viewer's `patch/patch-worker.ts` (Web Worker) decodes with the
+         2.1 KB wasm module (`wasm/*.c`, built by `packages/viewer/scripts/build-wasm.mjs` as part of `yarn build`,
+         with `clang` and `wasm-ld` from `lld`; the bytes go into the generated, uncommitted `src/patch/wasm-bytes.ts`)
+         into `ImageData` -> `createImageBitmap(.., { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })`, as
+         the PNG path did, and posts the bitmap back. The gateway's CSP gained `'wasm-unsafe-eval'`. `png.ts` keeps
+         only `encodePng` (window icons). Measured with the new opt-in `scripts/e2e/cpu.sh` (session process CPU over
+         10 s, no GPU, 1080p busy client / foot printing text): the busy client 17.3 s of CPU (1905 patches, 9.1 ms per
+         patch) -> 8.9 s (5600 patches, 1.6 ms per patch, three times the throughput); foot 8.0 s (4.8 ms per patch)
+         -> 1.5 s (0.8 ms per patch). Tests: compositor-proxy 169 (was 160: cascade branches with exact round trips
+         for 3 and 4 channels, the pools, the opaque flag), viewer 113 (was 96: the wasm decoder against the real
+         encoder for all three formats, the protocol), gateway 28; `test-gateway.sh` about 23 s (checks that foot's
+         patches arrive opaque and decoded in the worker). Not covered by a test: the opaque-region path of
+         `readPixels` (needs a client that sets an opaque region; the format and scan paths are exercised by foot and
+         the busy client).
     3. **Phase 2: the four cases for the streaming class** (Encoding policy): the bandwidth-limited signal from the
        controller; not limited: QOI patches (no GPU) or higher-quality video (GPU); limited: JPEG / JPEG with alpha
        patches (no GPU) or lower-quality video (GPU); fixed-quality video with variable bitrate; per-area lossy
@@ -1215,7 +1239,8 @@ single large item never stalls the link. Initial window before any estimate: 64 
     5): `pipewire`, `pipewire-pulse` and `wireplumber` (Ubuntu 24.04: PipeWire 1.0.5, WirePlumber 0.4.17; WirePlumber
     0.5 has another configuration format), `gstreamer1.0-pulseaudio` (`pulsesrc`), `gstreamer1.0-plugins-base`
     (`opusenc`, `audioconvert`) and `gstreamer1.0-plugins-good` (`rtpopuspay`, `rtpstreampay`), `util-linux`
-    (`setpriv`). The audio configuration is generated by the build (`dist/audio-config`), nothing else to install. Must
+    (`setpriv`). New build requirements from the QOI patches (item 5b): `clang` and `lld` (`wasm-ld`, for the viewer's
+    wasm patch decoder; the build fails with "install lld (apt install lld)" if it is missing). The audio configuration is generated by the build (`dist/audio-config`), nothing else to install. Must
     not enable or touch the user's own PipeWire units. Could later also enable kernel BBR (see
     [Transport and congestion control](#transport-and-congestion-control)); not for now, to keep installation simple.
 

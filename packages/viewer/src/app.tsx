@@ -3,6 +3,7 @@ import { api, currentToken, login, setSignedOutHandler, SignedOut, signOut } fro
 import { Connection } from './connection'
 import { Core } from './core'
 import { Desktop } from './desktop'
+import { PatchFormat } from './protocol'
 import { SessionInfo } from './session-name'
 import { AudioPlayer } from './audio/player'
 import { ShellController } from './shell/shell'
@@ -304,6 +305,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
         animations: () => desktop.debugAnimations(),
         videoFrames: () => desktop.debugVideoFrames(),
         patches: () => desktop.debugPatches(),
+        patchKinds: () => desktop.debugPatchKinds(),
         delayScenes: (ms: number) => {
           desktop.debugSceneDelay = ms
         },
@@ -318,17 +320,25 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
           new Promise<void>((resolve) =>
             desktop.handleFrame(surface, Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)), resolve),
           ),
-        // the same for a lossless patch: the PNG of the rectangle (base64) and the size of the whole surface
+        // the same for a lossless patch: the raw RGBA pixels of the rectangle (base64, a RAW patch: it goes through the
+        // patch decoder worker like any other) and the size of the whole surface
         injectPatch: (
           surface: string,
           surfaceSize: { width: number; height: number },
           rect: { x: number; y: number; width: number; height: number },
-          png: string,
+          rgba: string,
         ) =>
           new Promise<void>((resolve) =>
             desktop.handlePatch(
               surface,
-              { contentSerial: 0, surfaceSize, rect, png: Uint8Array.from(atob(png), (c) => c.charCodeAt(0)) },
+              {
+                contentSerial: 0,
+                surfaceSize,
+                rect,
+                format: PatchFormat.RAW,
+                channels: 4,
+                data: Uint8Array.from(atob(rgba), (c) => c.charCodeAt(0)),
+              },
               resolve,
             ),
           ),

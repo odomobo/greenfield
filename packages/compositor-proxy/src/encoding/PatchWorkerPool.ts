@@ -1,25 +1,30 @@
 /**
- * PNG encoding of streaming surfaces' patches on a few worker threads at the lowest OS priority (see "Encode scheduling"
- * in ROADMAP.md): relentless encoding only gets the CPU nothing else wants. The workers do the whole encode, row
- * filtering and `deflateSync`, on their own threads, so their nice level applies to all of it.
+ * Patch encoding (the QOI cascade of the native nebula-patch-addon, see patch-encoder.ts) on a few worker threads, each
+ * with its own OS thread and nice level (see "Encode scheduling" in ROADMAP.md). Streaming surfaces' patches go to a pool
+ * at the lowest priority: relentless encoding only gets the CPU nothing else wants. Normal surfaces' patches go to a
+ * pool at normal priority (nice 0). The encode runs on the worker's own thread, so the nice level applies to all of it.
  */
 import { Worker } from 'node:worker_threads'
 import path from 'node:path'
+import type { EncodedPatch } from './patch-encoder.js'
 
 /** How many streaming patches are encoded at once (one worker thread each). */
 export const STREAMING_ENCODE_WORKERS = 2
-/** Nice level of the worker threads (19 is the lowest priority). */
+/** Nice level of the streaming worker threads (19 is the lowest priority). */
 export const STREAMING_ENCODE_NICE = 19
+/** The normal class's worker threads (as many as patches it encodes at once), at normal priority. */
+export const NORMAL_ENCODE_WORKERS = 4
+export const NORMAL_ENCODE_NICE = 0
 
-export type WorkerRequest = { id: number; pixels: Uint8Array; width: number; height: number }
+export type WorkerRequest = { id: number; pixels: Uint8Array; width: number; height: number; opaque: boolean }
 export type WorkerReply =
   | { type: 'ready'; tid: number }
-  | { type: 'png'; id: number; png: Uint8Array }
+  | { type: 'patch'; id: number; patch: EncodedPatch }
   | { type: 'error'; id: number; message: string }
 
 type Job = {
   request: WorkerRequest
-  resolve: (png: Uint8Array) => void
+  resolve: (patch: EncodedPatch) => void
   reject: (error: Error) => void
 }
 
@@ -29,7 +34,7 @@ type Slot = {
   ready: Promise<number>
 }
 
-const defaultWorkerFile = path.join(__dirname, 'png-worker.js')
+const defaultWorkerFile = path.join(__dirname, 'patch-worker.js')
 
 /** The pixels as something that can be transferred without touching memory that belongs to someone else. */
 function transferable(pixels: Uint8Array): { pixels: Uint8Array; transfer: ArrayBuffer[] } {
@@ -45,7 +50,7 @@ function transferable(pixels: Uint8Array): { pixels: Uint8Array; transfer: Array
   return { pixels: copy, transfer: [copy.buffer] }
 }
 
-export class StreamingPngPool {
+export class PatchWorkerPool {
   private readonly slots: Slot[] = []
   private readonly queue: Job[] = []
   private nextId = 1
@@ -84,13 +89,16 @@ export class StreamingPngPool {
     return Promise.all(this.slots.map((slot) => slot.ready))
   }
 
-  /** Encode RGBA pixels as a PNG, the same bytes as `encodePng`. The pixels' buffer is transferred when possible. */
-  encode(rgba: Uint8Array, width: number, height: number): Promise<Uint8Array> {
+  /**
+   * Encode RGBA pixels with the cascade (see `encodePatch`). `opaque`: the alpha is all 255 (or irrelevant), the patch
+   * is encoded as RGB. The pixels' buffer is transferred when possible.
+   */
+  encode(rgba: Uint8Array, width: number, height: number, opaque: boolean): Promise<EncodedPatch> {
     if (this.destroyed) {
       return Promise.reject(new Error('The streaming encoder was destroyed.'))
     }
     return new Promise((resolve, reject) => {
-      this.queue.push({ request: { id: this.nextId++, pixels: rgba, width, height }, resolve, reject })
+      this.queue.push({ request: { id: this.nextId++, pixels: rgba, width, height, opaque }, resolve, reject })
       this.dispatch()
     })
   }
@@ -134,8 +142,8 @@ export class StreamingPngPool {
         return
       }
       slot.job = undefined
-      if (reply.type === 'png') {
-        job.resolve(reply.png)
+      if (reply.type === 'patch') {
+        job.resolve(reply.patch)
       } else {
         job.reject(new Error(reply.message))
       }
