@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end test of the gateway: runs the independent scripts in scripts/e2e/ in parallel, each with its own gateway
-# on its own ports, state and browser, and fails if any of them does. A run takes well under a minute.
+# on its own ports, state and browser, and fails if any of them does. It reports how long each script took (slowest
+# first) and the whole run. The whole run must stay under a minute (see CLAUDE.md): over that, it says so, and the suite
+# needs an optimization pass (start with the slowest scripts).
 #
 #   scripts/e2e/auth.sh      login and isolation: no leaks, failed-login timing and throttling, access control,
 #                            per-page sign-ins, plaintext mode (curl and WebSocket probes, no browser);
@@ -20,8 +22,10 @@
 #                            pointer puts it and ends where it was dragged to.
 #   scripts/e2e/busy.sh      a relentless client (a small test client built with gcc, committing a full frame on every
 #                            frame callback) is shown as patches and paced, and foot stays responsive meanwhile.
+#   scripts/e2e/audio.sh     the session's audio: packets, decoding, the mute toggle, isolation of its PipeWire.
 #   scripts/e2e/lossy.sh     the busy client on a simulated 8 Mbit/s link: it goes lossy (JPEG patches), and once it stops
-#                            drawing its lossy areas are sent again losslessly (the viewer shows its last frame exactly).
+#                            drawing its lossy areas are sent again losslessly (the viewer shows its last frame exactly);
+#                            bursts (a large page painting and scrolling) and audio between chunks.
 #
 # Each can also be run on its own (they take GATEWAY_PORT). They start the gateway with --dev-auth --dev-time-scale,
 # which shortens its sign-in delays; see the header of scripts/e2e/auth.sh. Requires foot, dbus-daemon, notify-send,
@@ -37,6 +41,9 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
 BASE_PORT="${GATEWAY_PORT:-8098}"
 START="$EPOCHREALTIME"
+# the suite's limit, in seconds (see CLAUDE.md)
+LIMIT_SECONDS=60
+TIMES="$(mktemp)"
 
 pids=()
 names=()
@@ -47,14 +54,19 @@ for part in auth desktop x11 clipboard dnd hidpi input busy video decorations x1
   # prefix every line with the script's name; the exit status is the script's, not sed's
   (
     set -o pipefail
+    started="$EPOCHREALTIME"
     GATEWAY_PORT="$port" timeout 120 bash "$DIR/$part.sh" 2>&1 | sed -u "s/^/[$part] /"
+    result=$?
+    # centiseconds, for the timing summary
+    echo "$(((${EPOCHREALTIME/./} - ${started/./}) / 10000)) $part" >>"$TIMES"
+    exit "$result"
   ) &
   pids+=("$!")
   names+=("$part")
 done
 
 # stop whatever is left if we're interrupted (each script cleans up after itself on SIGTERM)
-trap 'kill "${pids[@]}" 2>/dev/null; exit 130' INT TERM
+trap 'kill "${pids[@]}" 2>/dev/null; rm -f "$TIMES"; exit 130' INT TERM
 
 status=0
 for i in "${!pids[@]}"; do
@@ -64,8 +76,16 @@ for i in "${!pids[@]}"; do
   fi
 done
 
+echo "time per script (slowest first):"
+sort -rn "$TIMES" | while read -r centiseconds part; do
+  printf '  %-12s %3d.%02d s\n' "$part" $((centiseconds / 100)) $((centiseconds % 100))
+done
+rm -f "$TIMES"
 seconds=$(((${EPOCHREALTIME/./} - ${START/./}) / 10000))
 printf 'all end-to-end scripts took %d.%02d s\n' $((seconds / 100)) $((seconds % 100))
+if [ "$seconds" -gt $((LIMIT_SECONDS * 100)) ]; then
+  echo "SLOW: the suite took over $LIMIT_SECONDS s: it needs an optimization pass (start with the slowest scripts above)" >&2
+fi
 if [ "$status" = 0 ]; then
   echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, lossy encoding on a slow link, the video path and audio"
 fi

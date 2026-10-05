@@ -14,12 +14,14 @@
   - split a long script into independent, focused scripts that can run on their own or in parallel;
   - move rarely needed slow scenarios into an opt-in suite that isn't part of the regular run.
 - If refactoring a slow test is outside the current task, say so in your report rather than silently waiting on it.
-- The end-to-end test, `scripts/test-gateway.sh`, runs `scripts/e2e/auth.sh`, `scripts/e2e/desktop.sh` and
-  `scripts/e2e/x11.sh` in parallel (about 20-25 s). Its gateways run with `--dev-auth --dev-time-scale 3`, which
-  shortens the sign-in delays (test only); the browser is driven by `scripts/e2e/browser-driver.js` rather than
-  `playwright-cli` (which waits a fixed second after every command). New e2e checks go into one of those scripts (or
-  a new script added to the runner), and wait on conditions with `wait_for` / `wait_until` from `scripts/e2e/lib.sh`,
-  never fixed sleeps.
+- The end-to-end suite, `scripts/test-gateway.sh`, runs all the scripts in `scripts/e2e/` in parallel (each with its
+  own gateway, ports and browser; about 30 s) and prints how long each took, slowest first. **The whole parallel run
+  must stay under one minute.** If it goes over (the runner prints "SLOW: ..."), the suite needs an optimization and
+  refactoring pass, starting with the slowest scripts, before more checks are added.
+- Its gateways run with `--dev-auth --dev-time-scale 3`, which shortens the sign-in delays (test only); the browser is
+  driven by `scripts/e2e/browser-driver.js` rather than `playwright-cli` (which waits a fixed second after every
+  command). New e2e checks go into one of those scripts (or a new script added to the runner), and wait on conditions
+  with `wait_for` / `wait_until` from `scripts/e2e/lib.sh`, never fixed sleeps.
 
 ## Never kill processes by name
 
