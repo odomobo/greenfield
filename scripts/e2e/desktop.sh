@@ -455,7 +455,7 @@ shown_geometry() {
   echo "$(pw_eval "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return [g.x, g.y, g.width, g.height].join(' ') }" | tr -d '"')"
 }
 
-CANVAS_Y="$(pw_eval "() => Math.round(document.querySelector('canvas').getBoundingClientRect().y)")"
+CANVAS_Y="$(pw_eval "() => Math.round(document.getElementById('output').getBoundingClientRect().y)")"
 
 # xdg_toplevel.configure events foot has received so far
 configure_count() {

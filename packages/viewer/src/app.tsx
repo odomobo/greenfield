@@ -3,7 +3,6 @@ import { api, currentToken, login, setSignedOutHandler, SignedOut, signOut } fro
 import { Connection } from './connection'
 import { Core } from './core'
 import { Desktop } from './desktop'
-import { Renderer } from './gl/renderer'
 import { SessionInfo } from './session-name'
 import { ShellController } from './shell/shell'
 import { AppsMenuActions } from './shell/apps-menu'
@@ -40,12 +39,11 @@ function armHistoryGuard() {
  * The whole app, served by the gateway at /: the sign-in form, the session list and the desktop. Signing in lasts
  * as long as this page (see auth.ts), so switching between them never leaves the page.
  *
- * React renders the views and the shell; the connection, the renderer and the window manager (desktop.ts) are
- * imperative and mounted once behind the canvas ref.
+ * React renders the views and the shell; the connection and the window manager (desktop.ts, which owns the window
+ * elements and their canvases) are imperative and mounted once behind the output ref.
  */
 export function App({ hostname, testMode }: { hostname: string; testMode: boolean }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const desktopViewRef = useRef<HTMLDivElement>(null)
+  const outputRef = useRef<HTMLDivElement>(null)
   const usernameRef = useRef<HTMLInputElement>(null)
   const passwordRef = useRef<HTMLInputElement>(null)
   const coreRef = useRef<Core | null>(null)
@@ -149,19 +147,17 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
     openSession(session)
   }, [showSessions, openSession])
 
-  // --- the imperative core, mounted once behind the canvas ---
+  // --- the imperative core, mounted once behind the output element ---
 
   useEffect(() => {
-    const canvas = canvasRef.current
-    const desktopView = desktopViewRef.current
-    if (canvas === null || desktopView === null) {
+    const output = outputRef.current
+    if (output === null) {
       throw new Error('BUG. The desktop views are not mounted.')
     }
     const connection = new Connection()
-    const renderer = new Renderer(canvas, { preserveDrawingBuffer: testMode })
-    const desktop = new Desktop(canvas, renderer, connection)
+    const desktop = new Desktop(output, connection)
     const shell = new ShellController((message) => connection.send(message))
-    const mounted: Core = { connection, renderer, desktop, shell }
+    const mounted: Core = { connection, desktop, shell }
     coreRef.current = mounted
     setCore(mounted)
 
@@ -217,15 +213,6 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
 
     setSignedOutHandler(() => showLogin())
 
-    /** The renderer draws the desktop background: use the theme's color, also when the system switches light/dark. */
-    const applyDesktopColor = () => {
-      renderer.setClearColor(getComputedStyle(desktopView).backgroundColor)
-      desktop.scheduleRender()
-    }
-    applyDesktopColor()
-    const darkTheme = matchMedia('(prefers-color-scheme: dark)')
-    darkTheme.addEventListener('change', applyDesktopColor)
-
     const onUserInput = () => armHistoryGuard()
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       if (currentToken() !== undefined) {
@@ -273,13 +260,33 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
           desktop.debugSceneDelay = ms
         },
         shellWindows: () => desktop.shellWindows(),
-        contentSize: (surface: string) => renderer.contentSize(surface),
-        readLuma: (x: number, y: number, width: number, height: number) => renderer.readLuma(x, y, width, height),
+        contentSize: (surface: string) => desktop.debugContentSize(surface),
+        readLuma: (x: number, y: number, width: number, height: number) => desktop.debugReadLuma(x, y, width, height),
+        surfacePixels: (surface: string, x: number, y: number, width: number, height: number) =>
+          desktop.debugSurfacePixels(surface, x, y, width, height),
+        // feeds a video frame (a FRAME envelope's payload, base64) to a surface as if the server had sent it
+        injectFrame: (surface: string, base64: string) =>
+          new Promise<void>((resolve) =>
+            desktop.handleFrame(surface, Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)), resolve),
+          ),
+        // the same for a lossless patch: the PNG of the rectangle (base64) and the size of the whole surface
+        injectPatch: (
+          surface: string,
+          surfaceSize: { width: number; height: number },
+          rect: { x: number; y: number; width: number; height: number },
+          png: string,
+        ) =>
+          new Promise<void>((resolve) =>
+            desktop.handlePatch(
+              surface,
+              { contentSerial: 0, surfaceSize, rect, png: Uint8Array.from(atob(png), (c) => c.charCodeAt(0)) },
+              resolve,
+            ),
+          ),
       }
     }
 
     return () => {
-      darkTheme.removeEventListener('change', applyDesktopColor)
       window.removeEventListener('pointerdown', onUserInput, { capture: true })
       window.removeEventListener('keydown', onUserInput, { capture: true })
       window.removeEventListener('beforeunload', onBeforeUnload)
@@ -330,8 +337,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
       />
       <DesktopView
         core={core}
-        canvasRef={canvasRef}
-        viewRef={desktopViewRef}
+        outputRef={outputRef}
         appsMenuActions={appsMenuActions}
         onReconnect={() => coreRef.current?.connection.connect()}
         onBackToSessions={() => {

@@ -25,8 +25,8 @@ This document records the design decisions made so far and the order of the rema
   Node on top of the libwayland fork, plus the GStreamer encoder. Apps connect to it like any Wayland compositor.
   (The protocol implementation and libwayland fork are being replaced by wlroots, see Core item 1.)
 - **Viewer** (`packages/viewer`): the browser side. Receives a window-scene protocol (windows, positions, sizes,
-  frames) over one WebSocket, decodes frames (WebCodecs), composites with WebGL, does all window management and draws
-  the shell. (Compositing moves to one DOM element per window, see Core item 3.)
+  frames) over one WebSocket, decodes frames (WebCodecs), shows each window as its own DOM element with a canvas per
+  surface (the browser composites), does all window management and draws the shell.
 - **Gateway** (`packages/gateway`): privilege-separated.
   - Root monitor + a small C PAM helper for authentication and starting sessions (with `pam_systemd`/logind).
   - Unprivileged web process (system user `greenfield`) serving the page and relaying connections to session processes
@@ -842,16 +842,48 @@ single large item never stalls the link. Initial window before any estimate: 64 
     - Frame callbacks: drop the decode-time delay (slots only).
     - The simulated-link test harness and the scenarios listed in the spec; `scripts/test-gateway.sh` passes.
     - Report: how the scenarios came out (numbers), anything in the draft that didn't map cleanly onto messages.
-3. **Viewer: one DOM element per window instead of one WebGL canvas.** Each window becomes a positioned element with
-   its own canvas, stacked in DOM order, so the browser does stacking, clipping, hit-testing, occlusion and window
-   moves/animations (CSS transforms), and window decorations and shadows can be HTML/CSS that stacks with its window.
-   - Patches: `drawImage` of the decoded PNG into the window's 2D canvas. Opaque video: `drawImage(VideoFrame)`, which
-     stays on the GPU (no copy through JavaScript memory).
-   - Video with alpha: one shared offscreen WebGL context combines the color and alpha streams and hands each frame to
-     the window's canvas (`transferToImageBitmap`), which avoids the per-page WebGL context limit.
-   - Live resize stretching becomes a CSS scale of the window's canvas.
-   - The end-to-end test's pixel checks need a new way to read window content.
-   - Do this before browser-drawn decorations and shadows, which depend on it.
+3. **Done** (branch `core3-dom-viewer`). **Viewer: one DOM element per window instead of one WebGL canvas.** Each window
+   is a positioned element (`window-view.ts`) with a canvas per surface (`surface-view.ts`; foot has nine, its client
+   side decorations are subsurfaces), stacked in DOM order, so the browser does stacking, clipping, hit testing and
+   compositing, and window decorations and shadows can be HTML/CSS inside the window's element, next to its canvases.
+   - The desktop (`#output`, a focusable div, no longer a canvas) holds a layer of window elements and a layer for the
+     client cursor and drag icon (above, `pointer-events: none`). Content is drawn into a surface's canvas as it
+     arrives; nothing is re-rendered per frame. The canvas has the app's buffer size in pixels (at a pixel ratio of 2 an
+     app renders at twice the surface's CSS size) and a CSS size of the surface, `image-rendering: pixelated` when each
+     image pixel covers whole device pixels (the old NEAREST rule), and window positions are snapped to device pixels
+     when unstretched, so HiDPI stays as sharp as before.
+   - Patches: `clearRect` + `drawImage` of the decoded PNG (a patch replaces pixels, also transparent ones). Opaque
+     video: `drawImage(VideoFrame)` of the bottom right corner of the padded frame, no copy through JavaScript memory
+     (`decoder.ts` hands on the `VideoFrame`s, which are closed right after drawing; hardware decoding is no longer
+     excluded). Video with alpha: one shared offscreen WebGL context (`alpha-video.ts`) draws the color and alpha
+     frames (both converted to RGB by the browser) into one premultiplied image, handed over with
+     `transferToImageBitmap` and drawn into the window's 2D canvas (so the canvas can switch between video and patches).
+     The page has exactly one WebGL context, however many windows. Without WebGL the color stream is shown without alpha.
+   - Moves, resizes and the state animations are transforms on the window's element (`translate` + `scale`, origin at
+     the window's surface origin, so every surface of a window stretches together; opacity on the same element), applied
+     in one `requestAnimationFrame` callback (`Desktop.layout`) when something changed. The animation timing stays in
+     `desktop.ts`; the interaction and animation logic is unchanged. Live resize stretching is that scale.
+   - Input: the container takes all pointer, wheel, key and drop events (they bubble up from the window elements) and
+     has the pointer capture, the lock and the keyboard focus, so drags, locks and touch behave as before. The browser
+     hit tests: `pick` takes `document.elementsFromPoint`, top first, and skips surfaces whose input region doesn't
+     cover the point (input falls through to what's below). Minimized windows are `display: none`, minimizing and
+     restoring ones `pointer-events: none`. Coordinates are still computed from the pointer's client position and the
+     model's rect of the surface (so surface-local coordinates are right at any pixel ratio and while stretched).
+     File drags moving between window elements don't count as leaving.
+   - Taskbar preview cards are drawn straight from the surface canvases into the card's canvas (`Desktop.drawPreview`,
+     no readback), also for minimized windows.
+   - `scripts/e2e`: the pixel hooks moved to the canvases. `readLuma` composites the visible windows' canvases in output
+     coordinates as they are laid out (same sampling as before), `contentSize` is the canvas's size, `surfacePixels`
+     reads one surface's canvas, `injectFrame` and `injectPatch` feed the viewer as if the server had sent them. One
+     selector changed (`desktop.sh` took the output's offset from `document.querySelector('canvas')`, now
+     `#output`). New `scripts/e2e/video.sh` (in `test-gateway.sh`): x264enc-encoded frames (as the server's CPU path
+     does) go through the real decoder, checking cropping, colors (red/blue), transparency, half transparency, patches
+     over video and size changes, in about a second. The video decoding path now has coverage on a machine without a
+     GPU encoder.
+   - Not done / untested: the GPU encode path and hardware decoding (no GPU here); many windows at once (each window is
+     a few canvases; nothing was measured); the pixel ratio change on a real second monitor (as before); touch and
+     pointer lock were reasoned about, not driven (no hook in the browser driver; their code only changed in how the
+     pointer position is derived).
 4. **Browser-drawn window decorations (our own title bars)**, right after Core item 3 (moved up from lower priority:
    classic X11 apps such as xclock and xterm draw no title bar, as X11 window managers draw them, so today they can't
    be moved except with the window menu's Move; Qt/KDE apps prefer them too). With one DOM element per window, a frame is HTML/CSS
