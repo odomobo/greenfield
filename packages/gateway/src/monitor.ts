@@ -378,6 +378,7 @@ export class Monitor {
       timeScale: this.config.timeScale,
       linkKbps: this.config.linkKbps,
       patchOrder: this.config.patchOrder,
+      patchShape: this.config.patchShape,
     }
     child.send(start)
     log.info(`Started session ${id} for ${user.username}.`)

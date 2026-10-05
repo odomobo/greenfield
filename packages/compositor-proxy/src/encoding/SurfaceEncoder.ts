@@ -20,13 +20,14 @@ import type { EncodedPatch } from './patch-encoder.js'
 import {
   BURST_MS,
   MAX_PATCH_PIXELS,
+  MAX_PATCH_RECTS,
   PeriodFractions,
   planPatches,
   RelentlessMeter,
   SendTier,
   SurfaceClass,
 } from './policy.js'
-import { area, boundingBox, clip, disjoint, intersect, Rect, subtract } from './region.js'
+import { area, boundingBox, clip, disjoint, intersect, PatchShape, Rect, subtract } from './region.js'
 
 /** Items (patches or video frames) of one surface that may exist between capture and the socket. */
 export const SURFACE_SLOTS = 2
@@ -53,6 +54,7 @@ export type BufferInfo = {
  * when captured, so only the order the viewer sees a repaint arrive in changes.
  */
 export type PatchOrder = 'oldest' | 'random'
+export type { PatchShape }
 
 /** Video has a fixed quality target (and a variable bitrate): higher, or lower while bandwidth is short. */
 export type VideoQuality = 'high' | 'low'
@@ -571,7 +573,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     if (buffer === undefined) {
       return
     }
-    this.settleQueue = planPatches(this.lossyArea, [], boundsOf(buffer))
+    this.settleQueue = this.plan(this.lossyArea, [], boundsOf(buffer))
     if (this.settleQueue.length) {
       this.context.logger.info?.(
         `Surface ${this.key}: sending its ${area(this.lossyArea)} lossy pixels again, losslessly (settling).`,
@@ -758,13 +760,17 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       // the damage replaces the settling patches it covers
       this.settleQueue = subtract(this.settleQueue, clip(damage, bounds))
     }
-    const patches = planPatches(damage, this.queued, bounds)
+    const patches = this.plan(damage, this.queued, bounds)
     if (patches.length) {
       this.queued.push(...patches)
       // (before the pump captures any of it: a burst's first patches already go out lossy)
       this.context.checkBurst()
       this.context.pump.schedule(this)
     }
+  }
+
+  private plan(damage: Rect[], queued: Rect[], bounds: Rect): Rect[] {
+    return planPatches(damage, queued, bounds, MAX_PATCH_PIXELS, MAX_PATCH_RECTS, this.context.patchShape)
   }
 
   private releaseLease() {
@@ -956,6 +962,8 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
   private checkingBurst = false
   /** development only: the order surfaces capture their queued patches in */
   patchOrder: PatchOrder = 'oldest'
+  /** development only: how large damage is split into patches */
+  patchShape: PatchShape = 'bands'
 
   constructor(
     readonly sink: EncodingSink,

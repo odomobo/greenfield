@@ -11,6 +11,7 @@ import {
   EncodingContext,
   EncodingSink,
   PatchOrder,
+  PatchShape,
   SurfaceEncoder,
   SurfaceHost,
   VideoQuality,
@@ -198,7 +199,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private constraint?: { sid: number; confined: boolean }
 
   constructor(
-    config: { h264Encoder?: H264Encoder; videoStreams: number; patchOrder?: PatchOrder },
+    config: { h264Encoder?: H264Encoder; videoStreams: number; patchOrder?: PatchOrder; patchShape?: PatchShape },
     private readonly wlr: WlrNative,
     watchFd: FdWatcher,
     /** where files dropped from the user's computer are saved */
@@ -234,6 +235,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     const normalPool = new PatchWorkerPool(logger, NORMAL_ENCODE_WORKERS, NORMAL_ENCODE_NICE)
     this.encoding = new EncodingContext(forwardingSink, pool, { normal: (rgba, width, height, opaque) => normalPool.encode(rgba, width, height, opaque), streaming: streamingPool }, logger)
     this.encoding.patchOrder = config.patchOrder ?? 'oldest'
+    this.encoding.patchShape = config.patchShape ?? 'bands'
     this.encoding.startTicking()
 
     this.clipboard = new Clipboard((text) => this.wlr.setClipboardText(text))
@@ -1236,6 +1238,8 @@ export function startWlrootsCompositor(config: {
   link?: SimulatedLink
   /** development only: the order a surface's queued patches are captured in (see PatchOrder) */
   patchOrder?: PatchOrder
+  /** development only: how large damage is split into patches (see PatchShape) */
+  patchShape?: PatchShape
 }): {
   viewerHost: ViewerHost
   compositor: WlrCompositor
@@ -1247,7 +1251,7 @@ export function startWlrootsCompositor(config: {
   const { startPoll } = require('../addons/proxy-poll-addon') as typeof import('../addons/proxy-poll-addon')
   /* eslint-enable @typescript-eslint/no-var-requires */
   const compositor = new WlrCompositor(
-    { h264Encoder: config.h264Encoder, videoStreams: config.videoStreams ?? 4, patchOrder: config.patchOrder },
+    { h264Encoder: config.h264Encoder, videoStreams: config.videoStreams ?? 4, patchOrder: config.patchOrder, patchShape: config.patchShape },
     native,
     (fd, readable) => {
       startPoll(fd, readable)

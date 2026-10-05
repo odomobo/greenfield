@@ -83,4 +83,6 @@ export type SessionStart = {
   linkKbps: number
   /** test only (see --dev-patch-order): 'oldest' in production */
   patchOrder: 'oldest' | 'random'
+  /** test only (see --dev-patch-shape): 'bands' in production */
+  patchShape: 'bands' | 'tiles'
 }

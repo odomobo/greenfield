@@ -100,10 +100,70 @@ export function clip(region: Rect[], bounds: Rect): Rect[] {
 }
 
 /**
+ * How large rectangles are split into patches: full-width bands, or (an experiment, the gateway's --dev-patch-shape)
+ * squarish tiles.
+ */
+export type PatchShape = 'bands' | 'tiles'
+
+/** Split a rectangle into pieces of at most `maxPixels` each, as bands (splitBands) or tiles (splitTiles). */
+export function splitRect(rect: Rect, maxPixels: number, shape: PatchShape = 'bands'): Rect[] {
+  return shape === 'tiles' ? splitTiles(rect, maxPixels) : splitBands(rect, maxPixels)
+}
+
+/**
+ * Split a rectangle into near-equal, squarish tiles of at most `maxPixels` each (about 256 x 256 for 64K pixels). Tile
+ * edges fall on multiples of 16 in buffer coordinates where the tiles are big enough, so JPEG's 8x8 and 16x16 blocks
+ * line up across tiles. A thin rectangle gets tiles as thick as it is and as long as fits.
+ */
+export function splitTiles(rect: Rect, maxPixels: number): Rect[] {
+  if (isEmpty(rect)) {
+    return []
+  }
+  if (rect.width * rect.height <= maxPixels) {
+    return [rect]
+  }
+  const square = Math.floor(Math.sqrt(maxPixels))
+  // rounding each edge to the grid makes a tile up to `align` larger in each direction: leave room for that
+  const align = square >= 64 ? 16 : 1
+  const slack = align > 1 ? align : 0
+  const side = Math.max(1, square - slack)
+  // the shorter dimension in pieces of at most `side`, the longer in pieces as long as then fit
+  const tall = rect.height > rect.width
+  const [long, short] = tall ? [rect.height, rect.width] : [rect.width, rect.height]
+  const across = Math.ceil(short / side)
+  const maxAlong = Math.max(1, Math.floor(maxPixels / (Math.ceil(short / across) + slack)) - slack)
+  const along = Math.ceil(long / maxAlong)
+  const [columns, rows] = tall ? [across, along] : [along, across]
+  const xs = edges(rect.x, rect.width, columns, align)
+  const ys = edges(rect.y, rect.height, rows, align)
+  const result: Rect[] = []
+  for (let row = 0; row + 1 < ys.length; row++) {
+    for (let column = 0; column + 1 < xs.length; column++) {
+      result.push({ x: xs[column], y: ys[row], width: xs[column + 1] - xs[column], height: ys[row + 1] - ys[row] })
+    }
+  }
+  return result
+}
+
+/** `count` near-equal pieces of [start, start + length): their edges, inner ones rounded to multiples of `align`. */
+function edges(start: number, length: number, count: number, align: number): number[] {
+  const end = start + length
+  const result = [start]
+  for (let i = 1; i < count; i++) {
+    const edge = Math.round((start + (i * length) / count) / align) * align
+    if (edge > result[result.length - 1] && edge < end) {
+      result.push(edge)
+    }
+  }
+  result.push(end)
+  return result
+}
+
+/**
  * Split a rectangle into pieces of at most `maxPixels` each: full width bands (rows compress well), and for
  * absurdly wide rectangles also columns.
  */
-export function splitRect(rect: Rect, maxPixels: number): Rect[] {
+export function splitBands(rect: Rect, maxPixels: number): Rect[] {
   if (isEmpty(rect)) {
     return []
   }

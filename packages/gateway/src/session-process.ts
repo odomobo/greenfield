@@ -42,7 +42,7 @@ process.once('message', (message: SessionStart) => {
   })
 })
 
-async function start({ socketPath, encoder, timeScale, linkKbps, patchOrder }: SessionStart) {
+async function start({ socketPath, encoder, timeScale, linkKbps, patchOrder, patchShape }: SessionStart) {
   const { audioDir } = setupSessionEnvironment()
 
   const { viewerHost, apps } = startWlrootsCompositor({
@@ -50,7 +50,11 @@ async function start({ socketPath, encoder, timeScale, linkKbps, patchOrder }: S
     // kbit/s to bytes per ms
     link: linkKbps > 0 ? { bytesPerMs: linkKbps / 8 } : undefined,
     patchOrder,
+    patchShape,
   })
+  if (patchShape === 'tiles') {
+    logger.info('Splitting large damage into squarish tiles (--dev-patch-shape).')
+  }
   if (patchOrder === 'random') {
     logger.info('Sending queued patches in random order (--dev-patch-order).')
   }

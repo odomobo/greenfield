@@ -5,7 +5,7 @@
  * data has gone out). Whether a surface is sent as video or as patches is decided separately, by the surface
  * encoder (video only for streaming surfaces, with a hardware encoder, when the surface isn't small).
  */
-import { boundingBox, clip, disjoint, Rect, splitRect, subtract } from './region.js'
+import { boundingBox, clip, disjoint, PatchShape, Rect, splitRect, subtract } from './region.js'
 
 export type SurfaceClass = 'normal' | 'streaming'
 /**
@@ -170,11 +170,12 @@ export function planPatches(
   bounds: Rect,
   maxPixels = MAX_PATCH_PIXELS,
   maxRects = MAX_PATCH_RECTS,
+  shape: PatchShape = 'bands',
 ): Rect[] {
   let region = subtract(disjoint(clip(damage, bounds)), queued)
   if (region.length > maxRects) {
     const box = boundingBox(region)
     region = box ? subtract([box], queued) : []
   }
-  return region.flatMap((rect) => splitRect(rect, maxPixels))
+  return region.flatMap((rect) => splitRect(rect, maxPixels, shape))
 }

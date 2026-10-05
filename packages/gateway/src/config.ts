@@ -34,6 +34,8 @@ export type GatewayConfig = {
   linkKbps: number
   /** dev auth only: the order surfaces send their queued patches in (an experiment) */
   patchOrder: 'oldest' | 'random'
+  /** dev auth only: how windows' large damage is split into patches (an experiment) */
+  patchShape: 'bands' | 'tiles'
 }
 
 const usage = `Usage: gateway [options]
@@ -58,6 +60,8 @@ const usage = `Usage: gateway [options]
                              (a FIFO that drains at that rate), to try the encoding on a slow link (tests)
   --dev-patch-order <order>  with --dev-auth only: oldest (default) or random, the order a window's queued patches
                              are sent in (an experiment: what a slow repaint looks like in random order)
+  --dev-patch-shape <shape>  with --dev-auth only: bands (default, full-width strips) or tiles (squarish, about
+                             256 x 256), how a window's large damage is split into patches (an experiment)
 `
 
 function fail(message: string): never {
@@ -111,6 +115,7 @@ export function parseConfig(argv: string[]): GatewayConfig {
         'dev-time-scale': { type: 'string', default: '1' },
         'dev-link-kbps': { type: 'string', default: '0' },
         'dev-patch-order': { type: 'string', default: 'oldest' },
+        'dev-patch-shape': { type: 'string', default: 'bands' },
       },
     }).values
   } catch (e: any) {
@@ -159,6 +164,13 @@ export function parseConfig(argv: string[]): GatewayConfig {
   if (patchOrder !== 'oldest' && !values['dev-auth']) {
     fail('--dev-patch-order is only allowed together with --dev-auth')
   }
+  const patchShape = values['dev-patch-shape']
+  if (patchShape !== 'bands' && patchShape !== 'tiles') {
+    fail('invalid --dev-patch-shape (bands or tiles)')
+  }
+  if (patchShape !== 'bands' && !values['dev-auth']) {
+    fail('--dev-patch-shape is only allowed together with --dev-auth')
+  }
   const authMode: AuthMode = values['dev-auth'] ? 'dev' : 'pam'
   let devUser: string | undefined
   let devPassword: string | undefined
@@ -204,6 +216,7 @@ export function parseConfig(argv: string[]): GatewayConfig {
     timeScale,
     linkKbps,
     patchOrder,
+    patchShape,
     devUser,
     devPassword,
     webUser: values['web-user']!,

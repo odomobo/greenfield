@@ -367,7 +367,9 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
     is no partial repaint to get ahead of, so its callbacks wait until it's ready.
   - Experiment (dev only): `--dev-patch-order random` (with `--dev-auth`) makes surfaces capture their queued patches
     (damage and settling) in random order instead of oldest first, to see what a slow repaint looks like that way.
-    Still correct: queued rectangles are disjoint and read the latest pixels when captured.
+    Still correct: queued rectangles are disjoint and read the latest pixels when captured. `--dev-patch-shape tiles`
+    splits large damage into squarish tiles (`splitTiles`: near-equal, about 256 x 256 for 64K pixels, edges on
+    multiples of 16 for JPEG's blocks; thin rectangles get tiles as thick as they are) instead of full-width bands.
   - **Demotion** only once the surface has no damage left and nothing lossy (a video surface: no damage; stopping the
     video sends a crisp image), and its last period was backlogged under 15% (`RelentlessMeter`'s `canDemote`), at a
     period end or any time after.
