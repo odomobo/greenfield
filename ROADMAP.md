@@ -1081,7 +1081,9 @@ single large item never stalls the link. Initial window before any estimate: 64 
         environment) gives `':minimize,maximize,close'`; gtk4-demo shows minimize, maximize and close (an e2e check
         if cheap: gtk4-demo is optional in `decorations.sh`); by hand Chrome. The user's own value outside our
         sessions is still `'appmenu:close'`.
-   4. **Later, with dark mode (not now):** the nebula Settings backend for `xdg-desktop-portal` from 4b (for Flatpak
+   4. **Partly done (2026-10-05):** dark mode and the accent for GSettings and KDE apps (dconf defaults, a
+      `kdeglobals` layer, `QT_QPA_PLATFORMTHEME=kde`; see DESIGN.md "Apps follow the theme"). Defaults only: the
+      user's own settings always win. **Waits for the install script:** the nebula Settings backend for `xdg-desktop-portal` from 4b (for Flatpak
       apps, GTK 4.21 and newer, Qt), serving the same values. `xdg-desktop-portal` 1.18 finds backends' `.portal`
       files only in `/usr/share/xdg-desktop-portal/portals` or `XDG_DESKTOP_PORTAL_DIR`: an install-script step.
    - For the agent: name anything new "nebula" (never "greenfield"); tests under a minute, on spare ports

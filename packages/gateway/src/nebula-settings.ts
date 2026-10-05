@@ -1,11 +1,15 @@
 /**
- * nebula's desktop settings: the one place that says what the desktop supplies to its apps (GSettings keys, by schema).
- * Everything that serves them is generated from here: today the dconf defaults database of our sessions (below), later
- * the nebula Settings backend of xdg-desktop-portal (ROADMAP 4c step 4), so both give the same values.
- *
- * Apps that read GSettings (GTK before 4.21 outside Flatpak, Chrome through GTK) get them through a dconf profile
- * whose first layer is the user's own database (what the user set explicitly wins, writes go there as usual) above a
- * defaults database of ours. Nothing machine-wide is touched and other desktops of the user don't see any of it.
+ * nebula's desktop settings: the one place that says what the desktop supplies to its apps. Everything that serves
+ * them is generated from here, so they all give the same values:
+ * - GSettings keys (by schema), for apps that read GSettings (GTK before 4.21 outside Flatpak, Chrome through GTK):
+ *   a dconf profile whose first layer is the user's own database (what the user set explicitly wins, writes go there
+ *   as usual) above a defaults database of ours.
+ * - `kdeglobals` (the dark color scheme with our accent), for KDE apps: a config directory of ours below the user's
+ *   own `~/.config` in the apps' `XDG_CONFIG_DIRS` (KConfig cascades, the user's own keys win).
+ * - Later the nebula Settings backend of xdg-desktop-portal (ROADMAP 4c step 4: color scheme and accent for Flatpak,
+ *   libadwaita, newer GTK and Qt).
+ * They are defaults only: never written over the user's own settings, nothing machine-wide is touched, and other
+ * desktops of the user don't see any of it.
  */
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -14,10 +18,105 @@ import path from 'node:path'
 export type DesktopSettings = Record<string, Record<string, string>>
 
 export const nebulaDesktopSettings: DesktopSettings = {
+  'org.gnome.desktop.interface': {
+    // nebula is dark (GTK4 apps and Chrome follow the color scheme; GTK3's theme doesn't, it needs the dark theme)
+    'color-scheme': 'prefer-dark',
+    'gtk-theme': 'Adwaita-dark',
+  },
   'org.gnome.desktop.wm.preferences': {
     // Windows style, like our window frames: GTK and Chrome draw these in their own title bars
     'button-layout': ':minimize,maximize,close',
   },
+}
+
+/** nebula's accent color for apps (selections, focus), r, g, b: a deeper nebula blue than the shell's own highlight. */
+export const NEBULA_ACCENT: [number, number, number] = [66, 123, 222]
+
+/** A KConfig file: group -> key -> value (a group like `Colors:Header][Inactive` is a subgroup, written as is) */
+export type KConfigFile = Record<string, Record<string, string>>
+
+/**
+ * The `kdeglobals` defaults: Breeze Dark (as in /usr/share/color-schemes/BreezeDark.colors) with its blue replaced by
+ * `accent`, the way Plasma applies an accent color (selection, focus and hover decorations, active text). KDE apps
+ * read the colors from these groups; `ColorScheme` only names the scheme.
+ */
+export function nebulaKdeGlobals(accent: [number, number, number] = NEBULA_ACCENT): KConfigFile {
+  const rgb = (c: number[]) => c.map((v) => Math.round(v)).join(',')
+  const accentDark = rgb(accent.map((v) => v * 0.5))
+  const text = {
+    DecorationFocus: rgb(accent),
+    DecorationHover: rgb(accent),
+    ForegroundActive: rgb(accent),
+    ForegroundInactive: '161,169,177',
+    ForegroundLink: '29,153,243',
+    ForegroundNegative: '218,68,83',
+    ForegroundNeutral: '246,116,0',
+    ForegroundNormal: '252,252,252',
+    ForegroundPositive: '39,174,96',
+    ForegroundVisited: '155,89,182',
+  }
+  const colors = (normal: string, alternate: string) => ({ BackgroundAlternate: alternate, BackgroundNormal: normal, ...text })
+  return {
+    'ColorEffects:Disabled': {
+      Color: '56,56,56',
+      ColorAmount: '0',
+      ColorEffect: '0',
+      ContrastAmount: '0.65',
+      ContrastEffect: '1',
+      IntensityAmount: '0.1',
+      IntensityEffect: '2',
+    },
+    'ColorEffects:Inactive': {
+      ChangeSelectionColor: 'true',
+      Color: '112,111,110',
+      ColorAmount: '0.025',
+      ColorEffect: '2',
+      ContrastAmount: '0.1',
+      ContrastEffect: '2',
+      Enable: 'false',
+      IntensityAmount: '0',
+      IntensityEffect: '0',
+    },
+    'Colors:Button': colors('49,54,59', accentDark),
+    'Colors:Complementary': colors('42,46,50', accentDark),
+    'Colors:Header': colors('49,54,59', '42,46,50'),
+    'Colors:Header][Inactive': colors('42,46,50', '49,54,59'),
+    'Colors:Selection': {
+      ...colors(rgb(accent), accentDark),
+      ForegroundActive: '252,252,252',
+      ForegroundLink: '253,188,75',
+      ForegroundNegative: '176,55,69',
+      ForegroundNeutral: '198,92,0',
+      ForegroundPositive: '23,104,57',
+    },
+    'Colors:Tooltip': colors('49,54,59', '42,46,50'),
+    'Colors:View': colors('27,30,32', '35,38,41'),
+    'Colors:Window': colors('42,46,50', '49,54,59'),
+    General: { ColorScheme: 'BreezeDark', AccentColor: rgb(accent) },
+  }
+}
+
+/** A KConfig file's text */
+export function toKConfig(file: KConfigFile): string {
+  return Object.entries(file)
+    .map(([group, keys]) => `[${group}]\n` + Object.entries(keys).map(([key, value]) => `${key}=${value}\n`).join(''))
+    .join('\n')
+}
+
+/**
+ * The config directory of nebula's apps (`kdeglobals`): generated by the build (`dist/xdg-apps`) and by the install
+ * script. Only the apps of our sessions get it in `XDG_CONFIG_DIRS`, not services the user's D-Bus starts (shared with
+ * their other desktops).
+ */
+export const appsConfigDir = path.resolve(__dirname, 'xdg-apps')
+
+/** Writes `kdeglobals` into `dir` (to a temporary name, then renamed) and returns its path. */
+export function writeAppsConfig(dir: string, kdeglobals: KConfigFile = nebulaKdeGlobals()): string {
+  mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, 'kdeglobals')
+  writeFileSync(file + `.${process.pid}.tmp`, toKConfig(kdeglobals))
+  renameSync(file + `.${process.pid}.tmp`, file)
+  return file
 }
 
 /** `org.gnome.desktop.wm.preferences` -> `/org/gnome/desktop/wm/preferences/` (the dconf path of a schema, as GNOME's) */

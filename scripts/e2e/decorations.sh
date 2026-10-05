@@ -45,6 +45,12 @@ Exec=foot --app-id=test-foot-csd -o csd.preferred=client
 EOF
 cat >"$WORK/settings-probe.sh" <<EOF
 gsettings get org.gnome.desktop.wm.preferences button-layout >"$WORK/gsettings.out" 2>&1
+gsettings get org.gnome.desktop.interface color-scheme >"$WORK/color-scheme.out" 2>&1
+echo "\$QT_QPA_PLATFORMTHEME" >"$WORK/qt-theme.out"
+if command -v kreadconfig5 >/dev/null; then
+  kreadconfig5 --file kdeglobals --group Colors:Selection --key BackgroundNormal >"$WORK/kde-selection.out" 2>&1
+  kreadconfig5 --file kdeglobals --group Colors:Window --key BackgroundNormal >"$WORK/kde-window.out" 2>&1
+fi
 echo "\$DCONF_PROFILE" >"$WORK/dconf-profile.out"
 EOF
 cat >"$WORK/data/applications/test-gsettings.desktop" <<EOF
@@ -310,11 +316,21 @@ echo "    ok"
 # ---------------------------------------------------------------------------------------------------------------------
 
 if command -v gsettings >/dev/null; then
-  step "the session's apps get nebula's desktop defaults: GSettings button-layout is ':minimize,maximize,close'"
+  step "the session's apps get nebula's desktop defaults: GSettings button-layout ':minimize,maximize,close', dark (GSettings, KDE)"
   launch test-gsettings.desktop "Settings Probe"
   wait_until "the app's GSettings answer" 20 test -s "$WORK/gsettings.out" -a -s "$WORK/dconf-profile.out"
   [ "$(cat "$WORK/gsettings.out")" = "':minimize,maximize,close'" ] || fail "button-layout in the session: $(cat "$WORK/gsettings.out")"
   grep -q '^/' "$WORK/dconf-profile.out" || fail "DCONF_PROFILE isn't an absolute path: $(cat "$WORK/dconf-profile.out")"
+  [ "$(cat "$WORK/color-scheme.out")" = "'prefer-dark'" ] || fail "color-scheme in the session: $(cat "$WORK/color-scheme.out")"
+  [ "$(cat "$WORK/qt-theme.out")" = kde ] || fail "QT_QPA_PLATFORMTHEME in the session: $(cat "$WORK/qt-theme.out")"
+  # KDE apps read nebula's kdeglobals (dark, nebula's accent); the test's own ~/.config has none
+  if [ -e "$WORK/kde-selection.out" ]; then
+    ACCENT="$(node -e "console.log(require('$REPO/packages/gateway/dist/nebula-settings.js').NEBULA_ACCENT.join(','))")"
+    [ "$(cat "$WORK/kde-selection.out")" = "$ACCENT" ] || fail "KDE selection color in the session: $(cat "$WORK/kde-selection.out") (not $ACCENT)"
+    [ "$(cat "$WORK/kde-window.out")" = 42,46,50 ] || fail "KDE window color in the session: $(cat "$WORK/kde-window.out")"
+  else
+    echo "    (kreadconfig5 isn't installed: the KDE colors aren't checked)"
+  fi
   echo "    ok"
 else
   echo "(gsettings isn't installed: the GSettings check is skipped)"

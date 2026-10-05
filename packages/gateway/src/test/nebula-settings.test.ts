@@ -12,6 +12,11 @@ import {
   profileText,
   toKeyfile,
   writeDconfProfile,
+  NEBULA_ACCENT,
+  appsConfigDir,
+  nebulaKdeGlobals,
+  toKConfig,
+  writeAppsConfig,
 } from '../nebula-settings'
 
 /** A minimal GVDB reader, the way dconf's lookups work: hash, bucket, compare the key rebuilt from the parent chain. */
@@ -50,12 +55,51 @@ test('the button layout is Windows style', () => {
   assert.equal(nebulaDesktopSettings['org.gnome.desktop.wm.preferences']['button-layout'], ':minimize,maximize,close')
 })
 
+test('nebula is dark: GTK4 and Chrome by the color scheme, GTK3 by the dark theme (defaults only)', () => {
+  assert.equal(nebulaDesktopSettings['org.gnome.desktop.interface']['color-scheme'], 'prefer-dark')
+  assert.equal(nebulaDesktopSettings['org.gnome.desktop.interface']['gtk-theme'], 'Adwaita-dark')
+})
+
+test("kdeglobals: a dark scheme with nebula's accent where the scheme had its own", () => {
+  const kde = nebulaKdeGlobals([10, 20, 30])
+  assert.equal(kde['Colors:Selection'].BackgroundNormal, '10,20,30')
+  assert.equal(kde['Colors:Selection'].BackgroundAlternate, '5,10,15')
+  assert.equal(kde['Colors:Window'].DecorationFocus, '10,20,30')
+  assert.equal(kde['Colors:View'].ForegroundActive, '10,20,30')
+  assert.equal(kde['Colors:Selection'].ForegroundActive, '252,252,252')
+  assert.equal(kde.General.AccentColor, '10,20,30')
+  // dark: light text on dark backgrounds
+  assert.equal(kde['Colors:Window'].BackgroundNormal, '42,46,50')
+  assert.equal(kde['Colors:View'].ForegroundNormal, '252,252,252')
+  // nothing of Breeze's own blue is left
+  assert.doesNotMatch(toKConfig(nebulaKdeGlobals()), /61,174,233/)
+  assert.equal(nebulaKdeGlobals().General.AccentColor, NEBULA_ACCENT.join(','))
+})
+
+test('a KConfig file is groups of key=value lines, subgroups written as they are', () => {
+  assert.equal(toKConfig({ 'A': { k: 'v', l: '1,2' }, 'B][C': { m: 'x' } }), '[A]\nk=v\nl=1,2\n\n[B][C]\nm=x\n')
+})
+
+test('the build generated kdeglobals in the config directory sessions give their apps', () => {
+  assert.equal(readFileSync(path.join(appsConfigDir, 'kdeglobals'), 'utf8'), toKConfig(nebulaKdeGlobals()))
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'nebula-apps-config-'))
+  try {
+    assert.equal(readFileSync(writeAppsConfig(dir), 'utf8'), toKConfig(nebulaKdeGlobals()))
+  } finally {
+    rmSync(dir, { recursive: true })
+  }
+})
+
 test('schema ids become dconf paths', () => {
   assert.equal(schemaPath('org.gnome.desktop.wm.preferences'), '/org/gnome/desktop/wm/preferences/')
 })
 
 test('the keyfile is what dconf compile reads', () => {
-  assert.equal(toKeyfile(), "[org/gnome/desktop/wm/preferences]\nbutton-layout=':minimize,maximize,close'\n")
+  assert.equal(
+    toKeyfile({ 'org.gnome.desktop.wm.preferences': { 'button-layout': ':minimize,maximize,close' } }),
+    "[org/gnome/desktop/wm/preferences]\nbutton-layout=':minimize,maximize,close'\n",
+  )
+  assert.match(toKeyfile(), /\[org\/gnome\/desktop\/interface\]\ncolor-scheme='prefer-dark'\n/)
   assert.match(toKeyfile({ 'a.b': { k: "it's" } }), /k='it\\'s'/)
 })
 

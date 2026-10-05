@@ -21,6 +21,22 @@ and the order of work; this file covers how things look and move. Values live in
 - **Logo**: the nebula "N" (from `~/nebula-icon`) is the favicon (16 and 32 px PNGs) and replaces the person icon on
   the sign-in card. PNGs, not the SVG: the SVG embeds the picture and weighs 1 MB.
 
+## Apps follow the theme (defaults only)
+
+nebula tells apps it's dark and gives them an accent color, the standard ways, **as defaults only**: whatever the
+user set themselves always wins, and nothing is written over their settings (even where KDE itself would). Other
+desktops of the same user never see any of it. All of it comes from `packages/gateway/src/nebula-settings.ts`.
+
+- **GSettings** (GTK, Chrome): `color-scheme 'prefer-dark'` (GTK4, Chrome) and `gtk-theme 'Adwaita-dark'` (GTK3,
+  whose theme ignores the color scheme), in the dconf defaults below the user's own database. A user whose
+  `gtk-theme` is set (KDE's GTK sync sets it to Breeze) keeps their theme: GTK3 apps stay light for them.
+- **KDE apps**: a `kdeglobals` with a dark color scheme and nebula's accent (`NEBULA_ACCENT`, a deeper nebula blue
+  than the shell's own highlight), in a config directory below the user's `~/.config` for our sessions' apps only
+  (not for services the shared D-Bus starts). The user's own `kdeglobals` keys win. Sessions set
+  `QT_QPA_PLATFORMTHEME=kde` (unless the user chose one), since Qt loads KDE's integration by itself only on KDE.
+- **Later**: the nebula Settings backend for `xdg-desktop-portal` (`org.freedesktop.appearance` color scheme and
+  accent), for libadwaita, Flatpak and newer GTK/Qt apps. Needs an install-script step, so it waits for that.
+
 ## Window frames (title bars drawn by the viewer)
 
 - **Height**: 48 px, the same as the taskbar (`FRAME_TITLE_HEIGHT` in the scene protocol, shared with the server, so
