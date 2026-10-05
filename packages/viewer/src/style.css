@@ -829,10 +829,12 @@
   align-self: stretch;
 }
 
+/* square buttons, as wide as the title bar is high, with square highlights */
 #output .frame-button {
   display: inline-grid;
   place-items: center;
-  width: 46px;
+  width: var(--frame-title-height);
+  border-radius: 0;
   height: 100%;
   margin: 0;
   padding: 0;

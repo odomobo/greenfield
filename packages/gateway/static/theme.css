@@ -48,7 +48,7 @@
   --spacing: 16px;
 
   /* desktop shell */
-  --taskbar-height: 40px;
+  --taskbar-height: 48px;
   --color-taskbar: var(--surface-passive);
   --color-taskbar-border: var(--surface-edge);
   --color-subtle-hover: rgba(255, 255, 255, 0.08);
@@ -66,8 +66,8 @@
   --color-frame-inactive: var(--surface-passive);
   --color-frame-text: #ffffff;
   --color-frame-text-inactive: #a9b0bf;
-  --color-frame-border: #a6a6a6;
-  --color-frame-border-active: #a6a6a6;
+  --color-frame-border: var(--surface-edge);
+  --color-frame-border-active: var(--surface-edge);
   --radius-frame: 8px;
   --color-frame-close: #c42b1c;
   --color-frame-on-close: #ffffff;
@@ -124,16 +124,12 @@ body {
   max-width: calc(var(--card-width) * 1.5);
 }
 
-.avatar {
-  width: 64px;
-  height: 64px;
-  margin: 0 auto var(--spacing);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--color-surface-hover);
-  color: var(--color-text-secondary);
+.logo {
+  display: block;
+  width: 96px;
+  height: 96px;
+  margin: calc(var(--spacing) * -0.5) auto calc(var(--spacing) * 0.5);
+  user-select: none;
 }
 
 h1 {

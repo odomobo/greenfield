@@ -70,10 +70,13 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 16
+export const PROTOCOL_VERSION = 17
 
-/** The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). */
-export const FRAME_TITLE_HEIGHT = 32
+/**
+ * The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). The
+ * same as the viewer's taskbar (--taskbar-height in the theme).
+ */
+export const FRAME_TITLE_HEIGHT = 48
 /** The visible border's width on the left, right and bottom of a decorated window, in CSS pixels. */
 export const FRAME_BORDER = 1
 

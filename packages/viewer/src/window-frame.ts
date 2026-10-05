@@ -9,7 +9,7 @@ function caption(paths: string): string {
 }
 
 const CAPTION_ICONS = {
-  minimize: caption('<path d="M0 5.5h10"/>'),
+  minimize: caption('<path d="M0 9.5h10"/>'),
   maximize: caption('<rect x="0.5" y="0.5" width="9" height="9"/>'),
   restore: caption('<rect x="0.5" y="2.5" width="7" height="7"/><path d="M2.5 2.5v-2h7v7h-2"/>'),
   close: caption('<path d="M0.5 0.5l9 9M9.5 0.5l-9 9"/>'),

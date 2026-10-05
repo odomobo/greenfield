@@ -128,7 +128,7 @@ grep -aq 'zxdg_toplevel_decoration_v1@[0-9]*\.configure(2)' "$WORK/gateway.log" 
 FOOT="$(frame_of test-foot)"
 wait_for "() => !!document.querySelector('$FOOT .frame-title')" "foot's title bar"
 FRAME_T="$(pw_eval "() => Math.round(document.querySelector('$FOOT .frame-title').getBoundingClientRect().height)")"
-[ "$FRAME_T" -ge 28 ] && [ "$FRAME_T" -le 34 ] || fail "the title bar is $FRAME_T px high"
+[ "$FRAME_T" -ge 44 ] && [ "$FRAME_T" -le 50 ] || fail "the title bar is $FRAME_T px high"
 # the frame is outside the content: the title bar is right above the geometry and as wide as it (plus the borders)
 wait_for "() => { const w = window.__viewerTest.windows().find((w) => w.appId === 'test-foot'); const g = w.shownGeometry; const d = document.getElementById('output').getBoundingClientRect(); const t = document.querySelector('$FOOT .frame-title').getBoundingClientRect(); return Math.abs(t.bottom - d.top - g.y) <= 1 && Math.abs(t.width - g.width - 2) <= 1 && Math.abs(t.left - d.left - g.x + 1) <= 1 }" "the title bar to sit on the window" 5
 [ "$(pw_eval "() => document.querySelector('$FOOT .frame-text').textContent === window.__viewerTest.windows().find((w) => w.appId === 'test-foot').title")" = true ] || fail "the title bar doesn't show the window's title"
