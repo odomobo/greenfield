@@ -97,7 +97,7 @@ describe('JitterBuffer', () => {
     const source = new Source()
     buffer.push(...source.packet(PACKET * 5))
     player.block()
-    // 3 ms fade: the first frames are quiet, the signal is up to full level a few hundred frames in
+    // 10 ms fade: the first frames are quiet, the signal is up to full level a few hundred frames in
     const firstStart = player.output.findIndex((sample) => sample !== 0)
     assert.ok(firstStart >= 0)
     assert.ok(Math.abs(player.output[firstStart]) < 0.05)
@@ -224,6 +224,58 @@ describe('JitterBuffer', () => {
     const last = player.output.length - 1
     const playing = source.next - buffer.stats.level
     assert.ok(Math.abs(player.output[last] - sine(playing - 1)) < 0.02, 'continues at the right place of the source')
+  })
+
+  it('stop fades out without a click, drops the rest, and the next stream fades in without a click', () => {
+    const buffer = new JitterBuffer()
+    const player = new Player(buffer)
+    const source = new Source()
+    player.run(source, SAMPLE_RATE / 4, 1)
+    assert.equal(buffer.stats.state, 'playing')
+    const stoppedAt = player.output.length
+    buffer.stop()
+    // the server stops sending: play on without pushing until the fade is done
+    for (let i = 0; i < 20; i++) {
+      player.block()
+    }
+    assert.equal(buffer.stats.state, 'buffering')
+    assert.equal(buffer.level, 0, 'what was buffered before the stop is dropped')
+    assert.equal(buffer.stats.underruns, 0, 'a stop is no underrun')
+    const stopped = player.output.slice(stoppedAt)
+    // sound for the fade (10 ms), then silence
+    assert.ok(Math.max(...stopped.slice(0, 120).map(Math.abs)) > 0.3, 'the fade starts at full level')
+    assert.ok(
+      stopped.slice(600).every((sample) => sample === 0),
+      'silent after the fade',
+    )
+    // a new stream, from another place of the source (a new capture)
+    source.next += 12345
+    player.run(source, SAMPLE_RATE / 4, 1)
+    assert.equal(buffer.stats.state, 'playing')
+    assert.ok(maxStep(player.output) < CLICK_LIMIT, `step ${maxStep(player.output)}`)
+  })
+
+  it('a stop while already silent drops what is buffered at once', () => {
+    const buffer = new JitterBuffer()
+    const source = new Source()
+    buffer.push(...source.packet(PACKET))
+    assert.equal(buffer.stats.state, 'buffering')
+    buffer.stop()
+    assert.equal(buffer.level, 0)
+  })
+
+  it('what is pushed during the fade out of a stop is kept for the next stream', () => {
+    const buffer = new JitterBuffer()
+    const player = new Player(buffer)
+    const source = new Source()
+    player.run(source, SAMPLE_RATE / 4, 1)
+    buffer.stop()
+    buffer.push(...source.packet(PACKET))
+    for (let i = 0; i < 20; i++) {
+      player.block()
+    }
+    assert.equal(buffer.stats.state, 'buffering')
+    assert.equal(buffer.level, PACKET)
   })
 
   it('reset empties the buffer and goes back to buffering', () => {

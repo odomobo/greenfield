@@ -2,7 +2,8 @@
  * The AudioWorklet of the session's audio: runs on the audio thread, fed decoded audio by the main thread (see
  * player.ts) and plays it through the jitter buffer (jitter-buffer.ts), which holds all the logic.
  *
- * Messages in: `{ type: 'audio', left, right }` (Float32Arrays, transferred), `{ type: 'reset' }`.
+ * Messages in: `{ type: 'audio', left, right }` (Float32Arrays, transferred), `{ type: 'stop' }` (fade out and drop
+ * what is buffered: muting, a new stream).
  * Messages out: `{ type: 'stats', ...JitterBufferStats }`, about every 100 ms.
  */
 import { JitterBuffer } from './jitter-buffer'
@@ -28,8 +29,8 @@ class NebulaAudioProcessor extends AudioWorkletProcessor {
       const message = event.data
       if (message.type === 'audio') {
         this.buffer.push(message.left, message.right)
-      } else if (message.type === 'reset') {
-        this.buffer.reset()
+      } else if (message.type === 'stop') {
+        this.buffer.stop()
       }
     }
   }

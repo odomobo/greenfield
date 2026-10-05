@@ -16,6 +16,12 @@ import type { JitterBufferStats } from './jitter-buffer'
 import workletUrl from './worklet.ts?worker&url'
 
 const MUTED_KEY = 'nebula-audio-muted'
+/**
+ * The frames a fresh Opus decoder puts out first that aren't audio yet: the encoder's lookahead (Opus's usual pre-skip,
+ * 6.5 ms at 48 kHz). Every stream starts with a new decoder (the server's encoder starts anew too), and these frames
+ * would start it with a crackle.
+ */
+const OPUS_PRE_SKIP_FRAMES = 312
 /** the duration of one Opus packet, in microseconds (the protocol's 20 ms) */
 const PACKET_MICROSECONDS = 20_000
 
@@ -79,6 +85,8 @@ export class AudioPlayer {
   private lastPacketAt?: number
   private lost = 0
   private decodedFrames = 0
+  /** frames of the current decoder's output still to drop (its warm-up) */
+  private skipFrames = 0
   private peak = 0
   private decoderErrors = 0
 
@@ -260,6 +268,7 @@ export class AudioPlayer {
     })
     decoder.configure({ codec: 'opus', sampleRate: AUDIO_SAMPLE_RATE, numberOfChannels: AUDIO_CHANNELS })
     this.decoder = decoder
+    this.skipFrames = OPUS_PRE_SKIP_FRAMES
     return decoder
   }
 
@@ -281,7 +290,14 @@ export class AudioPlayer {
     if (this.silenced || this.decoder === undefined) {
       return
     }
-    this.node?.port.postMessage({ type: 'audio', left, right }, [left.buffer, right.buffer])
+    const skip = Math.min(this.skipFrames, frames)
+    this.skipFrames -= skip
+    if (skip === frames) {
+      return
+    }
+    const outLeft = skip > 0 ? left.slice(skip) : left
+    const outRight = skip > 0 ? right.slice(skip) : right
+    this.node?.port.postMessage({ type: 'audio', left: outLeft, right: outRight }, [outLeft.buffer, outRight.buffer])
   }
 
   private decoderFailed(error: unknown) {
@@ -304,12 +320,12 @@ export class AudioPlayer {
     }
   }
 
-  /** Forget the stream: decoder state, packet numbering and whatever is queued for playback. */
+  /** Forget the stream: decoder state, packet numbering, and what is queued for playback (faded out, no click). */
   private resetStream() {
     this.closeDecoder()
     this.decodedPackets = 0
     this.lastSeq = undefined
     this.peak = 0
-    this.node?.port.postMessage({ type: 'reset' })
+    this.node?.port.postMessage({ type: 'stop' })
   }
 }

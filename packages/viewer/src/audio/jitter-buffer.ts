@@ -7,8 +7,10 @@
  * - The server's capture clock and the browser's audio clock differ a little. The buffer's level (smoothed) is held at
  *   the target by playing at a slightly different rate, plain linear interpolation, at most +-0.1% (about 1.7 cents
  *   of pitch, inaudible). No prediction, no time stretching.
- * - Underrun: when the buffer is about to run dry, the audio fades out over a few milliseconds (3 ms, real samples,
+ * - Underrun: when the buffer is about to run dry, the audio fades out over a few milliseconds (10 ms, real samples,
  *   so no click), then it is silent until the buffer holds the target again (rebuffering), then fades in.
+ * - Stop (muting, a new stream): the same fade out, then what was buffered before the stop is dropped and the next
+ *   stream starts like the first, with a fade in. Never a jump to silence: that is a click.
  * - Backlog: over the maximum (300 ms, e.g. after the tab was in the background, or a network stall that released a
  *   burst) the excess is dropped, with a short crossfade (5 ms) from where we were to where we continue.
  * - No packet loss concealment: a lost packet is simply not there.
@@ -38,7 +40,7 @@ export const defaultJitterBufferOptions: JitterBufferOptions = {
   sampleRate: 48000,
   targetMs: 70,
   maxMs: 300,
-  fadeMs: 3,
+  fadeMs: 10,
   crossfadeMs: 5,
   maxRateAdjust: 0.001,
   rateRangeMs: 30,
@@ -87,6 +89,8 @@ export class JitterBuffer {
   /** a drop in progress: the frames still to crossfade, and how far ahead we jump when done */
   private crossfadeLeft = 0
   private crossfadeSkip = 0
+  /** frames pushed before `stop()`: dropped once its fade out is done */
+  private discardUntil = 0
   private underruns = 0
   private drops = 0
   private droppedFrames = 0
@@ -135,6 +139,29 @@ export class JitterBuffer {
     this.smoothedLevel = 0
     this.rate = 1
     this.crossfadeLeft = 0
+    this.discardUntil = 0
+  }
+
+  /**
+   * End the current stream without a click (muting, a new stream): fade out what is playing, then drop what was pushed
+   * before this call. What is pushed after it is the next stream: buffered to the target and faded in.
+   */
+  stop(): void {
+    this.discardUntil = this.writePos
+    if (this.state === 'buffering') {
+      // nothing audible: drop it now
+      this.discardStopped()
+    } else {
+      // playing, fading in or already fading out: the fade out starts from the current gain
+      this.state = 'fading-out'
+    }
+  }
+
+  private discardStopped() {
+    if (this.discardUntil > this.readPos) {
+      this.readPos = this.discardUntil
+      this.crossfadeLeft = 0
+    }
   }
 
   /** Append decoded audio, one array per channel (the same length). */
@@ -206,6 +233,7 @@ export class JitterBuffer {
         // hard underrun (the fade didn't get its frames): silence until the target is reached again
         this.state = 'buffering'
         this.gain = 0
+        this.discardStopped()
         outLeft[i] = 0
         outRight[i] = 0
         continue
@@ -229,8 +257,13 @@ export class JitterBuffer {
       if (this.state === 'fading-out') {
         this.gain -= 1 / this.fadeFrames
         if (this.gain <= 0) {
+          // faded out: silent from here, without moving on (after a stop the read position is the next stream's)
           this.gain = 0
           this.state = 'buffering'
+          this.discardStopped()
+          outLeft[i] = 0
+          outRight[i] = 0
+          continue
         }
       } else if (this.state === 'fading-in') {
         this.gain += 1 / this.fadeFrames
