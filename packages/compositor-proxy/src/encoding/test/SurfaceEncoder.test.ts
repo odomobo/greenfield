@@ -909,6 +909,27 @@ test('random patch order: every queued rectangle is still sent once, just not ol
   )
 })
 
+test("random patch order: each commit's patches are a batch, batches go oldest first", async () => {
+  const env = setup(0)
+  env.context.patchOrder = 'random'
+  env.holdNormal(true)
+  const { encoder, host } = env.surface('a', 1000, 1000)
+  // two commits while the slots are taken: the top half, then the bottom half
+  await encoder.commit([r(0, 0, 1000, 500)])
+  host.touch()
+  await encoder.commit([r(0, 500, 1000, 500)])
+  const top = (rect: Rect) => rect.y < 500
+  for (let i = 0; i < 200 && env.normalCalls.length > 0; i++) {
+    env.normalCalls.shift()!.resolve()
+    await settle()
+  }
+  const rects = env.sink.patches.map(({ patch }) => patch.rect)
+  assert.equal(area(rects), 1000 * 1000)
+  const firstBottom = rects.findIndex((rect) => !top(rect))
+  assert.ok(firstBottom > 0)
+  assert.ok(rects.slice(firstBottom).every((rect) => !top(rect)), 'all of the first batch before any of the second')
+})
+
 test("a surface's lossless bytes per pixel: measured on all its lossless patches", async () => {
   const env = setup(0)
   const { encoder, host } = env.surface('a', 100, 100)

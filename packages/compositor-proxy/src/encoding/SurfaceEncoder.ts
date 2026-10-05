@@ -50,8 +50,10 @@ export type BufferInfo = {
 
 /**
  * The order a surface's queued patches (damage, and settling) are captured in: oldest first, or (an experiment, the
- * gateway's --dev-patch-order) at random. Either is correct: queued rectangles are disjoint and read the latest pixels
- * when captured, so only the order the viewer sees a repaint arrive in changes.
+ * gateway's --dev-patch-order) at random within batches: each commit's new patches are a batch (and settling's plan
+ * one), batches go oldest first, the patches of a batch in random order. So a large repaint fills in as a random mosaic,
+ * and no patch waits for more than the patches queued before or with it. Either is correct: queued rectangles are
+ * disjoint and read the latest pixels when captured, so only the order the viewer sees a repaint arrive in changes.
  */
 export type PatchOrder = 'oldest' | 'random'
 export type { PatchShape }
@@ -178,6 +180,9 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
    * one marked (and never the other way round).
    */
   private lossyArea: Rect[] = []
+  /** the batch each queued rectangle was queued in (see PatchOrder), and the next batch's number */
+  private readonly batchOf = new WeakMap<Rect, number>()
+  private nextBatch = 0
   /** the lossy areas to send again losslessly, as patches: captured when the surface has no damage to send */
   private settleQueue: Rect[] = []
   /** slots holding settling patches */
@@ -461,10 +466,18 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     return undefined
   }
 
-  /** Take the next rectangle of a queue (non-empty), in the context's patch order. */
+  /**
+   * Take the next rectangle of a queue (non-empty), in the context's patch order. Random: one of the oldest batch's.
+   * Taking rectangles keeps the others in order, so its batch is the queue's first run of the same batch number.
+   */
   private takeNext(queue: Rect[]): Rect {
     if (this.context.patchOrder === 'random') {
-      return queue.splice(Math.floor(Math.random() * queue.length), 1)[0]
+      const oldest = this.batchOf.get(queue[0])
+      let count = 1
+      while (count < queue.length && this.batchOf.get(queue[count]) === oldest) {
+        count++
+      }
+      return queue.splice(Math.floor(Math.random() * count), 1)[0]
     }
     return queue.shift()!
   }
@@ -762,6 +775,10 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     }
     const patches = this.plan(damage, this.queued, bounds)
     if (patches.length) {
+      const batch = this.nextBatch++
+      for (const patch of patches) {
+        this.batchOf.set(patch, batch)
+      }
       this.queued.push(...patches)
       // (before the pump captures any of it: a burst's first patches already go out lossy)
       this.context.checkBurst()

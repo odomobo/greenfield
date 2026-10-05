@@ -366,8 +366,9 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
     page takes the link seconds to send. Not for a surface streamed as video: a video frame is the whole surface, there
     is no partial repaint to get ahead of, so its callbacks wait until it's ready.
   - Experiment (dev only): `--dev-patch-order random` (with `--dev-auth`) makes surfaces capture their queued patches
-    (damage and settling) in random order instead of oldest first, to see what a slow repaint looks like that way.
-    Still correct: queued rectangles are disjoint and read the latest pixels when captured. `--dev-patch-shape tiles`
+    (damage and settling) in random order within batches instead of oldest first: each commit's new patches are a
+    batch (settling's plan one), batches go oldest first. A large repaint fills in as a random mosaic, and no patch is
+    starved: it waits at most for the patches queued before or with it. Still correct: queued rectangles are disjoint and read the latest pixels when captured. `--dev-patch-shape tiles`
     splits large damage into squarish tiles (`splitTiles`: near-equal, about 256 x 256 for 64K pixels, edges on
     multiples of 16 for JPEG's blocks; thin rectangles get tiles as thick as they are) instead of full-width bands.
   - **Demotion** only once the surface has no damage left and nothing lossy (a video surface: no damage; stopping the
