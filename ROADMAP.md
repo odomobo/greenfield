@@ -996,7 +996,16 @@ single large item never stalls the link. Initial window before any estimate: 64 
       what reads it: `portals.conf` lookup (`nebula-portals.conf` later), `OnlyShowIn`/`NotShowIn` in desktop entries
       (the Apps menu), autostart. Desktop entries limited to `GNOME` or `KDE` shouldn't start showing or vanish by
       accident: say what changed.
-   3. **The desktop's defaults for apps that read GSettings** (GTK before 4.21 outside Flatpak, and Chrome through
+   3. **Done** (`nebula-settings.ts` is the one place for the desktop's settings; `session-environment.ts` writes a
+      dconf profile `user-db:user` + `file-db:<abs path>` and a defaults database to `$XDG_RUNTIME_DIR/nebula-dconf/`
+      and sets `DCONF_PROFILE`. dconf 0.40 (Ubuntu 24.04) supports `file-db:` and an absolute `DCONF_PROFILE`, so no
+      root and no install step; `dconf-cli` isn't installed by default, so the database (GVDB) is written by our own
+      code, checked against `dconf compile`'s output and read by libdconf/`gsettings`. `DCONF_PROFILE` is not in
+      `dbus-update-activation-environment` (the bus is the user's, shared with their other desktops). For the install
+      script: `toKeyfile()` gives the keyfile if a system-wide database is ever wanted. Checked in `decorations.sh`
+      (gsettings in a session; screenshot of gtk4-demo: minimize, maximize, close) and unit tests
+      (`nebula-settings.test.ts`); outside our sessions the user's value is still `'appmenu:close'`; compositor-proxy
+      156, viewer 79, gateway 16 unit tests, `test-gateway.sh` 23 s; Chrome by hand). Was: **The desktop's defaults for apps that read GSettings** (GTK before 4.21 outside Flatpak, and Chrome through
       GTK: they don't use the Settings portal, see 4b). Supply `org.gnome.desktop.wm.preferences` `button-layout =
       ':minimize,maximize,close'` (Windows style, like our frames) to the apps of our sessions only, the standard way:
       a dconf profile (`DCONF_PROFILE` in the session's environment) whose first layer is the user's own database

@@ -13,13 +13,14 @@
 #   4. stretches foot by its resize margin: the content stretches while dragging, the frame keeps its real size, and the
 #      app is told once on release;
 #   5. launches a GTK4 app (gtk4-demo, if installed): it keeps its own decorations, no frame;
+#   (GSettings: an app of the session reads button-layout ':minimize,maximize,close' from nebula's dconf defaults)
 #   (popups: shown above the frame and above other windows, checked with stand-in canvases)
 #   6. launches a second foot that asks for client side decorations (like Chrome): it keeps its own, no frame;
 #   7. closes foot with the title bar's close button.
 # E2E_SHOTS=<directory> saves screenshots of the steps there (at device pixel ratios 1 and 2, look at them).
 #
 # Requires: foot, xclock, xprop, dbus-daemon, playwright-cli (for its Playwright library and browser), curl, node, the
-# built packages (yarn build); gtk4-demo is optional. Usage: scripts/e2e/decorations.sh   (GATEWAY_PORT)
+# built packages (yarn build); gtk4-demo and gsettings are optional. Usage: scripts/e2e/decorations.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools foot xclock xprop Xwayland dbus-daemon playwright-cli curl node
 
@@ -41,6 +42,16 @@ cat >"$WORK/data/applications/test-foot-csd.desktop" <<EOF
 Type=Application
 Name=Selfdrawn Console
 Exec=foot --app-id=test-foot-csd -o csd.preferred=client
+EOF
+cat >"$WORK/settings-probe.sh" <<EOF
+gsettings get org.gnome.desktop.wm.preferences button-layout >"$WORK/gsettings.out" 2>&1
+echo "\$DCONF_PROFILE" >"$WORK/dconf-profile.out"
+EOF
+cat >"$WORK/data/applications/test-gsettings.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Settings Probe
+Exec=sh $WORK/settings-probe.sh
 EOF
 HAVE_GTK=0
 if command -v gtk4-demo >/dev/null; then
@@ -298,6 +309,17 @@ echo "    ok"
 
 # ---------------------------------------------------------------------------------------------------------------------
 
+if command -v gsettings >/dev/null; then
+  step "the session's apps get nebula's desktop defaults: GSettings button-layout is ':minimize,maximize,close'"
+  launch test-gsettings.desktop "Settings Probe"
+  wait_until "the app's GSettings answer" 20 test -s "$WORK/gsettings.out" -a -s "$WORK/dconf-profile.out"
+  [ "$(cat "$WORK/gsettings.out")" = "':minimize,maximize,close'" ] || fail "button-layout in the session: $(cat "$WORK/gsettings.out")"
+  grep -q '^/' "$WORK/dconf-profile.out" || fail "DCONF_PROFILE isn't an absolute path: $(cat "$WORK/dconf-profile.out")"
+  echo "    ok"
+else
+  echo "(gsettings isn't installed: the GSettings check is skipped)"
+fi
+
 if [ "$HAVE_GTK" = 1 ]; then
   step "a GTK4 app (no xdg-decoration) keeps its own decorations: no frame"
   launch test-gtk.desktop "Decorations GTK Probe"
@@ -305,6 +327,8 @@ if [ "$HAVE_GTK" = 1 ]; then
   [ "$(pw_eval "() => window.__viewerTest.windows().filter((w) => w.appId.startsWith('org.gtk')).some((w) => w.decorated)")" = false ] || fail "a GTK window is decorated"
   [ "$(pw_eval "() => [...document.querySelectorAll('.frame')].filter((f) => getComputedStyle(f).display !== 'none').length")" = 1 ] ||
     fail "only foot's frame should be shown (xclock's is gone, the GTK app has none): $(pw_eval "() => [...document.querySelectorAll('.frame')].filter((f) => getComputedStyle(f).display !== 'none').map((f) => f.dataset.frameWindow)")"
+  wait_for "$(settled)" "the GTK window to settle" 5
+  shot gtk-demo-buttons
   echo "    ok"
   step "right clicking the GTK app's header bar (show_window_menu) opens our window menu"
   wait_for "$(settled)" "the window to settle" 5

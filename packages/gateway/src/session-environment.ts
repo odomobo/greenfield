@@ -6,6 +6,7 @@ import { createLogger } from '@gfld/compositor-proxy'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
+import { writeDconfProfile } from './nebula-settings'
 
 const logger = createLogger('session')
 
@@ -46,6 +47,15 @@ export function setupSessionEnvironment() {
   // our portals config (prefers the gtk backend) without touching the user's own configuration
   const configDir = path.resolve(__dirname, '../xdg')
   env.XDG_CONFIG_DIRS = [configDir, env.XDG_CONFIG_DIRS ?? '/etc/xdg'].join(':')
+
+  // GSettings defaults of the desktop for our apps (GTK, Chrome): a dconf profile, user's database first, ours below.
+  // Not added to dbus-update-activation-environment below: with logind the bus is the user's, shared with their other
+  // desktops, which must not see nebula's defaults.
+  try {
+    env.DCONF_PROFILE = writeDconfProfile(path.join(env.XDG_RUNTIME_DIR, 'nebula-dconf'))
+  } catch (e: any) {
+    logger.error(`Couldn't write the dconf profile (${e.message}); apps get the machine's GSettings defaults.`)
+  }
 
   if (env.DBUS_SESSION_BUS_ADDRESS === undefined) {
     const userBus = path.join(env.XDG_RUNTIME_DIR, 'bus')
