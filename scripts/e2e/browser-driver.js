@@ -110,6 +110,12 @@ const commands = {
   async screenshot(file) {
     await current.screenshot({ path: file })
   },
+  /** a PNG of the page in device pixels, at the ratio `scale` set (the plain screenshot is in CSS pixels): screenshot-device <file> */
+  async 'screenshot-device'(file) {
+    if (!scaleSessions.has(current)) scaleSessions.set(current, await context.newCDPSession(current))
+    const { data } = await scaleSessions.get(current).send('Page.captureScreenshot', { format: 'png' })
+    fs.writeFileSync(file, Buffer.from(data, 'base64'))
+  },
   async resize(args) {
     const [width, height] = args.split(' ').map(Number)
     await current.setViewportSize({ width, height })

@@ -13,6 +13,8 @@
 #   scripts/e2e/input.sh     wheel and touchpad scrolling, X11 apps started from a terminal ending at logout, window icons.
 #   scripts/e2e/video.sh     the viewer's video path: H.264 frames (x264enc, no session needed) are fed to the viewer: opaque and
 #                            with alpha, cropping, colors, transparency, patches over video.
+#   scripts/e2e/decorations.sh  window decorations: foot and X11 apps get our title bar (xdg-decoration, _MOTIF_WM_HINTS), moved,
+#                            maximized, resized and closed by it, a GTK app keeps its own, the frame is crisp at pixel ratios 1 and 2.
 #   scripts/e2e/busy.sh      a relentless client (a small test client built with gcc, committing a full frame on every
 #                            frame callback) is shown as patches and paced, and foot stays responsive meanwhile.
 #
@@ -24,7 +26,7 @@
 #
 #   scripts/test-gateway.sh
 # The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it and the next one, desktop
-# and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen).
+# and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen, decorations eighteen).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
@@ -34,7 +36,7 @@ START="$EPOCHREALTIME"
 pids=()
 names=()
 i=0
-for part in auth desktop x11 clipboard dnd hidpi input busy video; do
+for part in auth desktop x11 clipboard dnd hidpi input busy video decorations; do
   port=$((BASE_PORT + i * 2))
   i=$((i + 1))
   # prefix every line with the script's name; the exit status is the script's, not sed's

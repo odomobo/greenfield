@@ -90,8 +90,9 @@ A stray press of the browser's back button (e.g. a mouse side button) must not t
   - For maximize and restore-from-maximized, the new size request is sent immediately and the animation runs
     concurrently, so the app has usually redrawn by the time it ends. A new frame arriving mid-animation is shown scaled
     to the animated shape.
-- Apps draw their own decorations (client-side decorations). Browser-drawn decorations via `xdg-decoration` come later
-  (Core item 4).
+- **Decorations**: the viewer draws a frame (title bar, thin border, invisible resize margin) around windows the server
+  marks `decorated`: Wayland apps that ask for server side mode (`xdg-decoration`), X11 windows that don't say they
+  have no title bar (`_MOTIF_WM_HINTS`). Other apps (GTK) draw their own, popups are never framed (Core item 4).
 - **Input regions**: clicks outside a surface's input region (`wl_surface.set_input_region`, e.g. most of a client-side
   shadow) go to whatever is underneath; the pointer and cursor follow the same hit test.
 - **Child windows** (dialogs, `xdg_toplevel.set_parent`) are separate windows in the scene with a parent. They are
@@ -892,6 +893,42 @@ single large item never stalls the link. Initial window before any estimate: 64 
    server-side decorations, and drawn for X11 windows the app doesn't decorate itself (`_MOTIF_WM_HINTS`); GTK apps
    keep drawing their own. The window geometry the server reports grows by the frame, and the frame follows the
    window's activated, maximized and minimized state.
+   **Done** (branch `core4-decorations`, scene protocol 12).
+   - Native core: `wlr_xdg_decoration_manager_v1`; a toplevel's decoration object (new, or any `request_mode`) is
+     answered with server side mode (wlroots sends the configure that must follow), and the object's destruction
+     reports the window undecorated again. X11: managed windows are decorated unless `_MOTIF_WM_HINTS` has no title
+     (`wlr_xwayland_surface.decorations`, `set_decorations` re-reports); override-redirect windows are never toplevels.
+     Both report `toplevel-decorated(sid, bool)`; the server turns it into the scene's `decorated` flag (absent: false).
+   - Geometry (decided: **the scene keeps the app's geometry, both sides add the frame**). `x`, `y`, `geometry`,
+     surfaces, input and `window.move`/`window.resize` keep meaning the app's window geometry, so nothing about surfaces,
+     popups, X11 positions or `window.resize` changed; the outer rectangle is the geometry plus `frameInsets(window)`
+     from `@gfld/scene-protocol` (`FRAME_TITLE_HEIGHT` 32, `FRAME_BORDER` 1; maximized: title bar only; fullscreen: none),
+     the one definition both use. Server: maximize configures the output minus the title bar and puts the window at
+     y = title bar height (never under the taskbar); a window turning decorated while maximized is reconfigured; dialogs
+     are centered on their parent counting both frames. Viewer: `keepOnScreen` (80 px of the outer rectangle, top edge
+     >= output top), the maximize animation's target, first placement (the cascade is where the frame starts), the menu
+     Size's nearest edge. Size limits and resize rects stay in geometry pixels (the frame has a constant size, so a drag
+     of an edge changes the geometry by the same amount; `resize.ts` didn't change). `window-sync.ts` needed nothing: it
+     reconciles window positions, which are still surface origins.
+   - Viewer: `window-frame.ts` (the DOM: icon, title, minimize/maximize/close, border, 8 resize grabs of 8 px outside the
+     border, imperative like the rest), `frame-geometry.ts` (pure, unit tested), the frame is a child of the window's
+     element placed by `WindowView.layout` and drawn at its real size while the content is stretched by a resize or the
+     maximize animation (minimize/restore shrink it with the window image). Title bar: drag moves (one `window.move` on
+     the drop, Escape cancels), double click maximizes/restores (not while fullscreen or for fixed-size apps), right
+     click opens the shared window menu, buttons call the same actions (dialogs have only close, fixed-size apps have
+     maximize disabled), press anywhere on the frame activates. Resize margin: the existing stretch-and-release resize,
+     none when maximized. Frame input never reaches the app (`pick` stops at frame parts). App icon: the desktop entry's,
+     else the window's own, else a generic glyph. Colors are custom properties in `theme.css` (light and dark).
+   - Previews: the cards keep showing the content only (they have their own header with title and close); the frame
+     isn't drawn into them. Square corners and no shadow (shadows are item 11; the frame's element is where they'd go).
+   - Not done: dragging a maximized window's title bar doesn't restore-and-drag (it does nothing); touch uses the same
+     gestures but wasn't driven; no rounded corners; GTK apps keep their own decorations as designed (gtk4-demo checked).
+   - Tests: unit (`WlrCompositor` with a fake core: decorated flag, maximize minus the title bar, reconfigure, dialog
+     centering; viewer `frame-geometry`), `scripts/e2e/decorations.sh` (in `test-gateway.sh`, ~12 s). Changed
+     `desktop.sh` checks: maximize expects the content below the title bar (title bar on screen under the taskbar);
+     the title-bar move and top/left resize presses use our title bar and margin instead of foot's own subsurfaces;
+     the "window back into view" check measures the outer rectangle (title bar above the geometry, border).
+     `browser-driver.js` got `screenshot-device`.
 
 ### First extra feature
 
