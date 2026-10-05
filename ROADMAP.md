@@ -113,7 +113,7 @@ A stray press of the browser's back button (e.g. a mouse side button) must not t
 
 ## Desktop shell
 
-Drawn by the browser in HTML/CSS.
+Drawn by the browser in HTML/CSS. The visual design (theme, window frames, animations) is in [DESIGN.md](DESIGN.md).
 
 - **Design language**: loosely Windows 11. Simple, flat, modern. A style to borrow, not a feature checklist. Open fonts
   and icons only.
