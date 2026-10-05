@@ -306,6 +306,17 @@ if [ "$HAVE_GTK" = 1 ]; then
   [ "$(pw_eval "() => [...document.querySelectorAll('.frame')].filter((f) => getComputedStyle(f).display !== 'none').length")" = 1 ] ||
     fail "only foot's frame should be shown (xclock's is gone, the GTK app has none): $(pw_eval "() => [...document.querySelectorAll('.frame')].filter((f) => getComputedStyle(f).display !== 'none').map((f) => f.dataset.frameWindow)")"
   echo "    ok"
+  step "right clicking the GTK app's header bar (show_window_menu) opens our window menu"
+  wait_for "$(settled)" "the window to settle" 5
+  read -r HX HY HW HH < <(pw_eval "() => { const w = window.__viewerTest.windows().find((w) => w.appId.startsWith('org.gtk') && !w.parent); const g = w.shownGeometry; return [g.x, g.y, g.width, g.height].join(' ') }" | tr -d '"'; echo)
+  # the header bar is the top of the window geometry; its middle is the title
+  pw mousemove $((DESK_X + HX + HW / 2)) $((DESK_Y + HY + 20)) >/dev/null
+  pw mousedown right >/dev/null
+  pw mouseup right >/dev/null
+  wait_for "() => !!document.querySelector('.context-menu')" "our window menu for the GTK app's header bar" 5
+  pw press Escape >/dev/null
+  wait_for "() => !document.querySelector('.context-menu')" "the menu to close" 5
+  echo "    ok"
 else
   echo "(gtk4-demo isn't installed: the GTK app check is skipped)"
 fi

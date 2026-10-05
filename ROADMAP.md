@@ -981,7 +981,9 @@ single large item never stalls the link. Initial window before any estimate: 64 
      KDE backends: they're ours. Without the portal, apps fall back to GSettings (today's behaviour).
    - Verify: the full e2e suite, and by hand gtk4-demo, Chrome and foot (initial sizes, buttons, right-click menu).
 4c. **Next steps after 4b** (to be done by an agent, in this order; the user agreed to them on 2026-10-04):
-   1. **Merge branch `core4b-desktop-integration`** (xdg-shell 6: bounds, capabilities, our window menu for apps'
+   1. **Done** (merged as a02d4d6: compositor-proxy 156 and viewer 79 unit tests, `test-gateway.sh` 23 s;
+      `decorations.sh` also checks our window menu from gtk4-demo's header bar when gtk4-demo is installed). Was:
+      **Merge branch `core4b-desktop-integration`** (xdg-shell 6: bounds, capabilities, our window menu for apps'
       own title bars; scene protocol 14) into master. It was verified on its branch (compositor-proxy 155 and viewer
       79 unit tests, `test-gateway.sh` 22.8 s); master got the 30 Hz frame clock meanwhile (`FramePacing.ts` only).
       Its ROADMAP edit adds a status paragraph to 4b. After merging: `yarn build`, both unit suites (compare counts:
