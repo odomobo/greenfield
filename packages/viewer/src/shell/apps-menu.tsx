@@ -110,7 +110,7 @@ export function AppsMenu({ actions }: { actions: AppsMenuActions }) {
       {/* who, which session, session menu */}
       <div className="apps-header">
         <div className="apps-user" title={state.username}>
-          <span className="apps-avatar" dangerouslySetInnerHTML={{ __html: glyphs.user(16) }} />
+          <span className="apps-avatar" dangerouslySetInnerHTML={{ __html: glyphs.user(18) }} />
           <span className="apps-username">{state.username}</span>
         </div>
         <div className="apps-session">

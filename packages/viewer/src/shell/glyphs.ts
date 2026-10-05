@@ -6,10 +6,15 @@ function glyph(paths: string, size = 16): string {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`
 }
 
-/** A solid speaker (the mute toggle's icons) with `strokes` beside it, drawn as bold lines. */
-function solid(strokes: string, size: number): string {
-  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M2.5 9.6c0-.6.5-1.1 1.1-1.1h3.3l4.6-3.9c.6-.5 1.5-.1 1.5.7v13.4c0 .8-.9 1.2-1.5.7l-4.6-3.9H3.6c-.6 0-1.1-.5-1.1-1.1z"/><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">${strokes}</g></svg>`
+/**
+ * A solid glyph (the taskbar's and the Apps menu header's icons): `fills` are filled shapes, `strokes` bold lines.
+ */
+function solid(fills: string, strokes: string, size: number): string {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor">${fills}</g><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${strokes}</g></svg>`
 }
+
+const SPEAKER =
+  '<path d="M2.5 9.6c0-.6.5-1.1 1.1-1.1h3.3l4.6-3.9c.6-.5 1.5-.1 1.5.7v13.4c0 .8-.9 1.2-1.5.7l-4.6-3.9H3.6c-.6 0-1.1-.5-1.1-1.1z"/>'
 
 export const glyphs = {
   apps: (size = 18) =>
@@ -21,9 +26,15 @@ export const glyphs = {
       size,
     ),
   search: () => glyph('<circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/>'),
-  power: () => glyph('<path d="M12 3.5v8"/><path d="M7.2 6.4a7.5 7.5 0 1 0 9.6 0"/>'),
-  bell: () =>
-    glyph('<path d="M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 2h-14z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>'),
+  /** (solid) */
+  power: (size = 20) => solid('', '<path d="M12 3v8.5"/><path d="M7 6.2a8 8 0 1 0 10 0"/>', size),
+  /** (solid) */
+  bell: (size = 20) =>
+    solid(
+      '<path d="M12 2.6a6 6 0 0 0-6 6v4.5l-1.5 2.6c-.4.7.1 1.6.9 1.6h13.2c.8 0 1.3-.9.9-1.6L18 13.1V8.6a6 6 0 0 0-6-6z"/><path d="M9.4 18.6h5.2a2.6 2.6 0 0 1-5.2 0z"/>',
+      '',
+      size,
+    ),
   pin: () => glyph('<path d="M14.5 3.5 20.5 9.5 17 11l-3.5 3.5.5 4-1.5 1.5-4-4L4 20.5M8.5 16 4.5 12 6 10.5l4 .5L13.5 7.5z"/>'),
   /** a pinned app's pin (filled) */
   pinned: () =>
@@ -37,11 +48,16 @@ export const glyphs = {
   signal: () => glyph('<path d="M4 18.5h1M9 18.5v-4M14 18.5v-8M19 18.5v-12"/>'),
   signalOff: () => glyph('<path d="M4 18.5h1M9 18.5v-4M14 18.5v-2M19 18.5v-2"/><path d="m14 5 5 5m0-5-5 5"/>'),
   /** speaker with sound waves (solid) */
-  speaker: (size = 22) => solid('<path d="M16 9a4.2 4.2 0 0 1 0 6M18.8 6.3a8 8 0 0 1 0 11.4"/>', size),
+  speaker: (size = 22) => solid(SPEAKER, '<path d="M16 9a4.2 4.2 0 0 1 0 6M18.8 6.3a8 8 0 0 1 0 11.4"/>', size),
   /** speaker, muted: crossed out (solid) */
-  speakerMuted: (size = 22) => solid('<path d="m16 9 6 6m0-6-6 6"/>', size),
+  speakerMuted: (size = 22) => solid(SPEAKER, '<path d="m16 9 6 6m0-6-6 6"/>', size),
+  /** (solid) */
   user: (size = 16) =>
-    glyph('<circle cx="12" cy="8.5" r="4"/><path d="M4.5 20c.8-3.6 3.8-5.5 7.5-5.5s6.7 1.9 7.5 5.5"/>', size),
+    solid(
+      '<circle cx="12" cy="7.8" r="4.3"/><path d="M3.8 20c.6-4 3.9-6.5 8.2-6.5s7.6 2.5 8.2 6.5c.1.6-.3 1-.9 1H4.7c-.6 0-1-.4-.9-1z"/>',
+      '',
+      size,
+    ),
   /** the fallback for apps without an icon */
   app: (size = 24) =>
     glyph('<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M3.5 8.5h17"/><path d="M6.5 6.5h.01M9 6.5h.01"/>', size),

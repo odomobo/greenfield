@@ -106,7 +106,6 @@
   padding: 0;
 }
 
-#audio-button.muted,
 #audio-button.unavailable {
   color: var(--color-text-secondary);
 }
@@ -300,11 +299,11 @@
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  color: var(--color-text-secondary);
-  background: var(--color-subtle-hover);
+  color: var(--color-text);
+  background: var(--color-subtle-pressed);
 }
 
 .apps-username {
