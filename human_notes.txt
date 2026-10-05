@@ -2,26 +2,26 @@
   sudo apt install libpam0g-dev
 
   # 2. Build everything (this also builds packages/gateway/dist/pam-helper)
-  cd ~/greenfield && yarn workspaces foreach -A --parallel --topological-dev run build
+  cd ~/nebula && yarn workspaces foreach -A --parallel --topological-dev run build
 
   # 3. Copy the build somewhere every user can read (your home folder is private: 0750)
-  sudo rsync -a --delete ~/greenfield/ /opt/greenfield/
+  sudo rsync -a --delete ~/nebula/ /opt/nebula/
 
   # 4. A node binary every user can run (yours comes from nvm, inside your private home)
   sudo cp "$(command -v node)" /usr/local/bin/node
 
-  # 5. Register "greenfield" as a PAM login service (same as sshd has /etc/pam.d/sshd)
-  sudo cp /opt/greenfield/packages/gateway/pam/greenfield /etc/pam.d/greenfield
+  # 5. Register "nebula" as a PAM login service (same as sshd has /etc/pam.d/sshd)
+  sudo cp /opt/nebula/packages/gateway/pam/nebula /etc/pam.d/nebula
 
   # 6. Unprivileged account the web-facing process runs as (same idea as sshd's "sshd" user)
-  sudo useradd --system --no-create-home --shell /usr/sbin/nologin greenfield
+  sudo useradd --system --no-create-home --shell /usr/sbin/nologin nebula
 
   # 7. A second account to check that users are isolated (optional but worth it)
   sudo useradd -m -s /bin/bash testuser && sudo passwd testuser
 
   # 8. Start the gateway as root (the root part only does login and session startup)
-  sudo /usr/local/bin/node /opt/greenfield/packages/gateway/dist/main.js \
-    --bind-port 8443 --applications=$HOME/greenfield-apps.json
+  sudo /usr/local/bin/node /opt/nebula/packages/gateway/dist/main.js \
+    --bind-port 8443 --applications=$HOME/nebula-apps.json
     
     
     
@@ -48,7 +48,7 @@ Notes:::
 
 Need to do: cite nasa for nebula logo:  https://www.flickr.com/photos/nasawebbtelescope/54213487373/in/album-72177720313923911 
 
-Bug: when minimizing, then maximizing from there, when restoring, the animation pretends it's going to minimize but simply goes back to the normal size.
+Need to do: cite nasa for the background image: https://www.flickr.com/photos/nasawebbtelescope/52259221868/in/album-72177720300469752/
 
 Bug: when window gets small, our title bar rendering gets messed up. icon stays on top (good), other buttons cover app name (fine), but then when it gets really small, x scrolls off the edge. We'd rather have minimize and maximize start sliding off (but not covering icon)
 
@@ -70,7 +70,9 @@ Improvement: power menu would look better if right-aligned, I think.
 
 Improvement: power menu should allow: lock screen, log out, power down, restart. Not sure how to implement power down and restart, but they're useful.
 
-Improvement?: app groups??? Is this already implemented?
+Improvement?: app groups??? Is this already implemented? Need to look at menu? I think this needs more thought...
+
+Improvement: we need a system tray. It's on the roadmap.
 
 Improvement: There should't be multiple sessions per user. Instead, there should be a single session per user. If a user logs in multiple times, the later log ins can't click on any windows. If they want to interact, they have to select from some dialog that allows for it, but then it removes interaction ability from the other session.
 
