@@ -1328,6 +1328,35 @@ single large item never stalls the link. Initial window before any estimate: 64 
          simulated link, after the link was limited once, a static page (foot full of text, say) scrolled: JPEG patches
          within a few hundred ms, then settled losslessly at the lowest tier and demoted; the viewer ends up exact.
 
+### Next: chunked data items
+
+5d. **Chunk large data items** (user's design, agreed 2026-10-05). The problem: audio and control messages are written
+    to the socket at once, but they can't overtake a data item already handed over. A 64K-pixel lossless patch of
+    video-like content is 130-200 KB, 130-200 ms of an 8 Mbit/s link, and audio waiting behind it underruns the
+    viewer's jitter buffer (seen with a stream at the settling threshold: a settling patch between every frame, audio
+    stuttering every few seconds and now and then splicing). Smaller patches would only fix it for patches; chunking
+    fixes it for every data item (GPU key frames, icons, file transfer later) and situations we don't expect.
+    - **Chunk size**: clamp(10 ms of the congestion controller's bandwidth estimate, 10 KB, 300 KB). 10 KB on a slow
+      link (and before there is an estimate), larger on a fast one so the message (and ack) rate stays around 100 a
+      second; 300 KB caps an overestimate. Items up to the chunk size go out as today, unwrapped.
+    - **CHUNK envelope** (scene protocol 19): item id, first/last flags, payload. The viewer reassembles an item from
+      its chunks and handles it as the original envelope, so nothing above the transport changes. Chunks arrive in
+      order (one ordered connection); at most one partial item per tier at a time.
+    - **Order**: control messages and audio go between any two chunks. One item at a time per tier, not chunk-level
+      round-robin between items (that would make every item finish late): a tier's started item continues chunk after
+      chunk until it is done; the next is chosen as today (surfaces take turns per item). A higher tier's item jumps in
+      between chunks: a normal window's single draw arriving while a streaming or settling item is mid-transfer goes
+      right after the current chunk, then the interrupted item continues. The 9 : 3 : 1 deficit round-robin between
+      the tiers stays, counted per chunk, so steady normal work can't starve the others. (Interleaving video with other
+      frames: maybe later.)
+    - **Pacing and acks** per chunk: the congestion controller lets chunks out (so little sits in the link's queue),
+      the viewer acks each chunk like any data envelope; with the chunk size above that's about 100 acks a second.
+    - **Dropping**: an item with a chunk sent always finishes; only unstarted items are dropped (dropPatches) or
+      replaced (a key frame). A surface's slot frees when its item's last chunk is handed to the socket.
+    - Tests: unit (chunk sizes, reassembly, order: a higher tier between chunks, one item at a time per tier, control
+      and audio between chunks, started items never dropped, slots freed on the last chunk); e2e: on the 8 Mbit/s
+      simulated link, audio packets' delay stays small while a large lossless repaint goes through.
+
 ### Lower priority
 
 5c. **System tray (StatusNotifierItem host).** Apps like JuK, Discord, Steam, chat clients and network/Bluetooth applets
