@@ -707,6 +707,20 @@ wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; retu
 [ "$(resizes_sent)" = "$((SENT0 + 1))" ] || fail "Escape in Size sent a window.resize"
 echo "    ok"
 
+step "maximizing a minimized window, then restoring it down, animates back to its own size (not the taskbar button)"
+read -r RX RY RW RH < <(shown_geometry; echo)
+taskbar_menu minimize
+wait_for "() => window.__viewerTest.shellWindows()[0].shownMinimized && !Object.keys(window.__viewerTest.animations()).length" "the window to be minimized" 5
+taskbar_menu maximize
+wait_for "() => window.__viewerTest.windows()[0].maximized && !window.__viewerTest.shellWindows()[0].shownMinimized && !Object.keys(window.__viewerTest.animations()).length" "the window to be maximized" 10
+# the narrowest the window is shown while it's restored down
+pw_eval "() => { window.__narrowest = Infinity; const tick = () => { const w = window.__viewerTest.windows()[0]; window.__narrowest = Math.min(window.__narrowest, w.shownGeometry.width); if (w.maximized || Object.keys(window.__viewerTest.animations()).length) requestAnimationFrame(tick) }; tick(); return true }" >/dev/null
+taskbar_menu unmaximize
+wait_geometry "$RX $RY $RW $RH" "the window to be restored down"
+NARROWEST="$(pw_eval "() => window.__narrowest")"
+[ "$NARROWEST" -ge "$RW" ] || fail "restoring down animated through a width of $NARROWEST (the window is $RW wide): toward the taskbar button"
+echo "    ok"
+
 step "fullscreen: the window covers the output, never the taskbar, and goes back"
 read -r FX FY FW FH < <(shown_geometry; echo)
 # the key the test app binds to fullscreen

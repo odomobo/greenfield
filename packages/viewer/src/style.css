@@ -45,6 +45,27 @@
   border-radius: var(--radius-control);
 }
 
+/* an app's button has a set width, so it can grow in from none and shrink away to none (taskbar.tsx) */
+.taskbar-button.app {
+  width: calc(var(--taskbar-height) - 2px);
+}
+
+.taskbar-button.app.leaving {
+  pointer-events: none;
+  animation: taskbar-button-out 160ms var(--ease-in) forwards;
+}
+
+@keyframes taskbar-button-out {
+  to {
+    opacity: 0;
+    scale: 0.6;
+    width: 0;
+    min-width: 0;
+    padding-inline: 0;
+    margin-inline-end: -2px;
+  }
+}
+
 .taskbar-button:hover,
 .taskbar-button.open {
   background: var(--color-subtle-hover);
@@ -199,6 +220,34 @@
   min-width: 180px;
   padding: 4px;
   z-index: 20;
+  /* drops in from where it was opened, and fades out quicker */
+  transform-origin: top left;
+  animation: menu-in 120ms var(--ease-out);
+}
+
+.context-menu.align-right {
+  transform-origin: top right;
+}
+
+.context-menu.leaving {
+  pointer-events: none;
+  animation: menu-out 100ms var(--ease-in) forwards;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    scale: 0.96;
+    translate: 0 -4px;
+  }
+}
+
+@keyframes menu-out {
+  to {
+    opacity: 0;
+    scale: 0.96;
+    translate: 0 -4px;
+  }
 }
 
 .context-menu .heading {
@@ -743,6 +792,9 @@
 @media (prefers-reduced-motion: reduce) {
   #apps-menu,
   #notifications-panel,
+  .context-menu,
+  .context-menu.leaving,
+  .taskbar-button.app.leaving,
   .toast,
   .toast.leaving,
   .notification.leaving {

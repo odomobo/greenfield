@@ -363,7 +363,8 @@ pw mousemove $((DESK_X + CX + CW / 2)) $((DESK_Y + CY + 12)) >/dev/null
 pw mousedown right >/dev/null
 pw mouseup right >/dev/null
 wait_for "() => [...document.querySelectorAll('.context-menu button')].map((b) => b.dataset.action).join(',') === 'minimize,maximize,move,size,close'" "our window menu for foot's title bar" 5
-# where the app asked: at the pointer
+# where the app asked: at the pointer (once it has dropped in: its animation moves it)
+wait_for "() => document.querySelector('.context-menu').getAnimations().length === 0" "the menu to settle" 5
 [ "$(pw_eval "() => { const m = document.querySelector('.context-menu').getBoundingClientRect(); return Math.abs(m.left - $((DESK_X + CX + CW / 2))) <= 2 && Math.abs(m.top - $((DESK_Y + CY + 12))) <= 2 }")" = true ] ||
   fail "the menu isn't at the pointer: $(pw_eval "() => JSON.stringify(document.querySelector('.context-menu').getBoundingClientRect())")"
 pw press Escape >/dev/null

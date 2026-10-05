@@ -661,6 +661,8 @@ export class Desktop {
     // ask right away, the animation runs while the client redraws
     this.sendWindowChange({ type: 'window.maximize', window: id, maximized })
     this.startMaximizeAnimation(window, maximized)
+    // (from a menu: the keyboard goes back to the session, as when a window is activated)
+    this.container.focus()
   }
 
   /** Send a window change, numbered so its echo in the scene can be told apart from older state (see WindowSync). */
@@ -833,7 +835,9 @@ export class Desktop {
     let to: Rect | undefined
     if (maximized) {
       if (!window.maximized) {
-        this.restoreRects.set(window.id, from)
+        // where it rests, not where an animation shows it now: maximizing a minimized window restores it first, and
+        // that animation starts at the taskbar button
+        this.restoreRects.set(window.id, this.restingRect(window))
       }
       // (a decorated window's title bar stays on screen: its content is the output below it)
       const { top } = frameInsets({ decorated: window.decorated, maximized: true })
