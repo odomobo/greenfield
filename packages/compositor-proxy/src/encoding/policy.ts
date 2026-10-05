@@ -8,6 +8,11 @@
 import { boundingBox, clip, disjoint, Rect, splitRect, subtract } from './region.js'
 
 export type SurfaceClass = 'normal' | 'streaming'
+/**
+ * The transport's send tiers (deficit round-robin, see ViewerTransport.ts): the two classes, and below them settling,
+ * the lossless resend of a surface's lossy areas.
+ */
+export type SendTier = SurfaceClass | 'settle'
 
 /** Surfaces are judged on fixed, back-to-back periods of this length. */
 export const CLASS_PERIOD_MS = 750
@@ -18,6 +23,11 @@ export const CLASS_PERIOD_MS = 750
 export const PROMOTE_FRACTION = 0.6
 /** Streaming -> normal at the end of a period in which the backlogged share was below this. */
 export const DEMOTE_FRACTION = 0.15
+/**
+ * Burst promotion and lossy mode (see SurfaceEncoder.ts, bandwidth.ts): the predicted backlog, in time at the link's
+ * bandwidth, over which normal surfaces are promoted (the largest backlog first) and streaming surfaces go lossy.
+ */
+export const BURST_MS = 200
 /** Max pixels per patch, larger areas are split. */
 export const MAX_PATCH_PIXELS = 64 * 1024
 /** A commit's damage in more pieces than this is sent as its bounding box instead (fewer, larger patches). */
@@ -32,8 +42,10 @@ export type PeriodFractions = { busy: number; backlogged: number }
  * - Backlogged: a commit with new damage (`markBackloggedStart`) counts if the previous completed period's busy share
  *   was at least PROMOTE_FRACTION; the surface then stays backlogged until it is no longer busy. Backlogged implies busy.
  *
- * At the end of each period its two shares are kept and the counters start again. Only whole periods count: nothing
- * changes before two have completed.
+ * At the end of each period its two shares are kept and the counters start again. Only whole periods count: the time
+ * measure promotes only once two have completed. A surface can also be promoted at once (`promote`, a burst). It is
+ * demoted when the last completed period was quiet (backlogged under DEMOTE_FRACTION) and `canDemote` says it may be
+ * (no damage left, fully settled), at that period's end or any time later.
  */
 export class RelentlessMeter {
   private periodStart: number
@@ -48,6 +60,7 @@ export class RelentlessMeter {
   constructor(
     startTime = 0,
     private readonly periodMs = CLASS_PERIOD_MS,
+    private readonly canDemote: () => boolean = () => true,
   ) {
     this.periodStart = startTime
   }
@@ -102,7 +115,13 @@ export class RelentlessMeter {
   /** Close the periods that ended by `now` and decide the class. Returns the (possibly new) class. */
   evaluate(now: number): SurfaceClass {
     this.advance(now)
+    this.demoteIfQuiet()
     return this._class
+  }
+
+  /** Streaming from now on (a burst: a backlog the link needs too long for). */
+  promote(): void {
+    this._class = 'streaming'
   }
 
   private advance(now: number) {
@@ -124,10 +143,16 @@ export class RelentlessMeter {
       if (this.completed >= 2) {
         if (this._class === 'normal' && this.previous.backlogged >= PROMOTE_FRACTION) {
           this._class = 'streaming'
-        } else if (this._class === 'streaming' && this.previous.backlogged < DEMOTE_FRACTION) {
-          this._class = 'normal'
+        } else {
+          this.demoteIfQuiet()
         }
       }
+    }
+  }
+
+  private demoteIfQuiet() {
+    if (this._class === 'streaming' && (this.previous?.backlogged ?? 0) < DEMOTE_FRACTION && this.canDemote()) {
+      this._class = 'normal'
     }
   }
 }

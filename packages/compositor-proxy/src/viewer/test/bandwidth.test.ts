@@ -1,34 +1,28 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import {
-  BANDWIDTH_PERIOD_MS,
-  BandwidthMonitor,
-  LIMITED_PERIODS,
-  LOSSY_RATIO_GUESS,
-  MIN_LIMITED_MS,
-  SentItem,
-} from '../bandwidth.js'
+import { BURST_MS } from '../../encoding/policy.js'
+import { BANDWIDTH_PERIOD_MS, BandwidthMonitor, LIMITED_PERIODS, MIN_LIMITED_MS } from '../bandwidth.js'
 import { constantRate, mbit, saturating, simulate } from './sim-link.js'
 
 const PERIOD = BANDWIDTH_PERIOD_MS
 /** when a monitor held back from 0 on is limited */
 const LIMITED_AT = LIMITED_PERIODS * PERIOD
 
-/** A monitor on a link of `capacity` bytes per ms, with its state changes recorded. */
+/**
+ * A monitor on a link of `capacity` bytes per ms, with a predicted backlog the test sets, and its state changes
+ * recorded.
+ */
 function setup(capacity = 1000) {
-  const changes: { limited: boolean; held: number; demand: number }[] = []
-  const monitor = new BandwidthMonitor(0, () => capacity, (limited, period) => changes.push({ limited, ...period }))
-  return { monitor, changes }
+  const changes: { limited: boolean; held: number; backlogMs: number }[] = []
+  const state = { capacity, backlog: 0 }
+  const monitor = new BandwidthMonitor(
+    0,
+    () => state.capacity,
+    () => state.backlog,
+    (limited, reason) => changes.push({ limited, ...reason }),
+  )
+  return { monitor, changes, state }
 }
-
-const patch = (bytes: number, pixels: number, lossy: boolean, surface = 's'): SentItem => ({
-  kind: 'patch',
-  surface,
-  surfaceClass: 'streaming',
-  bytes,
-  pixels,
-  lossy,
-})
 
 /** Held back from `from` for `ms` (then not). */
 function hold(monitor: BandwidthMonitor, from: number, ms: number) {
@@ -82,47 +76,56 @@ test('recovers after a quiet period, but not before MIN_LIMITED_MS', () => {
   )
 })
 
-test("doesn't recover while lossy output, counted losslessly, would need most of the bandwidth", () => {
-  const { monitor } = setup(1000)
-  // the surface's lossless patches take 2 bytes per pixel
-  monitor.onSent(patch(20_000, 10_000, false), 0)
+test('the bandwidth is only known once the link was saturated, then remembered', () => {
+  const { monitor, state } = setup(1000)
+  assert.equal(monitor.linkBandwidth, undefined)
+  // a single held period (Startup, ProbeRTT) doesn't count
+  hold(monitor, 0, PERIOD)
+  monitor.limited(2 * PERIOD)
+  assert.equal(monitor.linkBandwidth, undefined)
+  monitor.setHeld(true, 2 * PERIOD)
+  monitor.setHeld(false, 2 * PERIOD + LIMITED_AT)
+  assert.equal(monitor.limited(2 * PERIOD + LIMITED_AT), true)
+  assert.equal(monitor.linkBandwidth, 1000)
+  // the link is idle: the controller's estimate decays, the measured bandwidth stays
+  state.capacity = 100
+  monitor.limited(20 * PERIOD)
+  assert.equal(monitor.linkBandwidth, 1000)
+  // but a higher estimate is a better lower bound
+  state.capacity = 1500
+  assert.equal(monitor.linkBandwidth, 1500)
+})
+
+test('a predicted backlog over BURST_MS makes the link limited at once, but only once its bandwidth is known', () => {
+  const { monitor, state, changes } = setup(1000)
+  state.backlog = 10 * BURST_MS * 1000
+  assert.equal(monitor.limited(PERIOD / 2), false, 'bandwidth unknown')
+  // saturated once, then recovered
+  monitor.setHeld(true, PERIOD)
+  monitor.setHeld(false, PERIOD + LIMITED_AT)
+  state.backlog = 0
+  assert.equal(monitor.limited(PERIOD + LIMITED_AT), true)
+  assert.equal(monitor.limited(PERIOD + LIMITED_AT + MIN_LIMITED_MS), false)
+  // a burst: just over BURST_MS of backlog at 1000 bytes per ms
+  state.backlog = (BURST_MS + 1) * 1000
+  assert.equal(monitor.limited(6.5 * PERIOD), true, 'at once, mid-period')
+  assert.equal(changes.at(-1)?.limited, true)
+  assert.ok(changes.at(-1)!.backlogMs > BURST_MS)
+})
+
+test('it ends only when both are quiet: held back under half the period, and the predicted backlog under BURST_MS', () => {
+  const { monitor, state } = setup(1000)
   monitor.setHeld(true, 0)
   monitor.setHeld(false, LIMITED_AT)
   assert.equal(monitor.limited(LIMITED_AT), true)
-  // lossy patches use 30% of the link and are never held back, but lossless they'd take 120% of it
-  for (let t = LIMITED_AT; t < 7 * PERIOD; t += 100) {
-    monitor.onSent(patch(30_000, 60_000, true), t)
-  }
-  assert.equal(monitor.limited(7 * PERIOD), true)
-  // the surface calms down: lossless it would now fit
-  for (let t = 7 * PERIOD; t < 9 * PERIOD; t += 100) {
-    monitor.onSent(patch(3000, 6000, true), t)
-  }
-  assert.equal(monitor.limited(9 * PERIOD), false)
-})
-
-test("a lossy patch of a surface without a lossless measure counts as LOSSY_RATIO_GUESS times its size", () => {
-  const { monitor } = setup(1000)
-  monitor.setHeld(true, 0)
-  monitor.setHeld(false, LIMITED_AT)
-  // 25% of the link as JPEG: about 75% lossless, over the 70% it takes to recover
-  assert.ok(0.25 * LOSSY_RATIO_GUESS > 0.7)
-  for (let t = LIMITED_AT; t < 5 * PERIOD; t += 100) {
-    monitor.onSent(patch(25_000, 1, true, 'new'), t)
-  }
-  assert.equal(monitor.limited(5 * PERIOD), true)
-})
-
-test('lower-quality video frames count as twice their size', () => {
-  const { monitor } = setup(1000)
-  monitor.setHeld(true, 0)
-  monitor.setHeld(false, LIMITED_AT)
-  const frame: SentItem = { kind: 'frame', surface: 's', surfaceClass: 'streaming', bytes: 40_000 }
-  // 40% of the link at the lower quality, 80% at the higher one
-  for (let t = LIMITED_AT; t < 5 * PERIOD; t += 100) {
-    monitor.onSent(frame, t)
-  }
-  assert.equal(monitor.limited(5 * PERIOD), true)
+  // nothing is held back, but a backlog is predicted (say a stream gone lossy that would need more than the link)
+  state.backlog = 2 * BURST_MS * 1000
+  assert.equal(monitor.limited(LIMITED_AT + 3 * MIN_LIMITED_MS), true)
+  state.backlog = (BURST_MS / 2) * 1000
+  const end = LIMITED_AT + 3 * MIN_LIMITED_MS + PERIOD
+  // the backlog is checked at the end of a period
+  assert.equal(monitor.limited(end - 1), true)
+  assert.equal(monitor.limited(end), false)
 })
 
 test('a long quiet stretch is skipped over, not walked through', () => {
@@ -146,17 +149,17 @@ function monitored() {
   const changes: { time: number; limited: boolean }[] = []
   let now = 0
   const get = (controller: { bandwidthEstimate: number }) =>
-    (monitor ??= new BandwidthMonitor(0, () => controller.bandwidthEstimate, (limited) => changes.push({ time: now, limited })))
+    (monitor ??= new BandwidthMonitor(
+      0,
+      () => controller.bandwidthEstimate,
+      () => 0,
+      (limited) => changes.push({ time: now, limited }),
+    ))
   return {
     changes,
     onPump: (time: number, held: boolean, controller: { bandwidthEstimate: number }) => {
       now = time
       get(controller).setHeld(held, time)
-    },
-    onTransmit: (time: number, size: number) => {
-      now = time
-      // lossless patches of 1 byte per pixel
-      monitor?.onSent(patch(size, size, false), time)
     },
   }
 }

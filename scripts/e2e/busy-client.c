@@ -6,9 +6,14 @@
  * twice a second.
  *
  * With a pause file (fourth argument): while that file exists it draws nothing new (it still asks for frame callbacks,
- * committing without damage), and it writes its last frame, as RGBA bytes, to "<pause file>.rgba" once.
+ * committing without damage), and it writes its last frame, as RGBA bytes, to "<pause file>.rgba" once. Its first
+ * frame is drawn even if the file exists when it starts.
  *
- * Usage: busy-client <frames file> [width height [pause file]]
+ * With "page" (fifth argument) it shows a page of text-like glyphs instead, scrolled down a few lines per frame: like
+ * scrolling a long static document (the encoding end-to-end test of bursts, scripts/e2e/lossy.sh). The app id is then
+ * test-page.
+ *
+ * Usage: busy-client <frames file> [width height [pause file [page]]]
  */
 #define _GNU_SOURCE
 #include <stdbool.h>
@@ -33,6 +38,9 @@ static const char *frames_file;
 static const char *pause_file;
 static bool dumped;
 static bool configured;
+static bool page;
+/* pixels the page scrolls per frame */
+#define PAGE_SCROLL 12
 static unsigned long frames;
 static unsigned long noise = 12345;
 
@@ -95,9 +103,49 @@ dump_last_frame(void) {
     rename(temporary, path);
 }
 
+/*
+ * A page of text, like a web page: dark glyphs (8x16 cells, pseudo-random 6x10 patterns, some spaces and short lines),
+ * their edges softened, on a light background with a faint texture, scrolled by `scroll`. Everything is a function of
+ * the page position, so a scrolled frame repeats the same page. The texture makes it cost lossless encoders about as
+ * much as real anti-aliased text does, and JPEG much less.
+ */
+static void
+draw_page(uint32_t *pixels, unsigned long scroll) {
+    for (int y = 0; y < height; y++) {
+        unsigned long py = y + scroll;
+        unsigned long row = py / 16;
+        int gy = (int) (py % 16) - 3;
+        for (int x = 0; x < width; x++) {
+            unsigned long column = x / 8;
+            int gx = x % 8 - 1;
+            uint32_t t = (uint32_t) (py * 2654435761u) ^ (uint32_t) (x * 2246822519u);
+            t ^= t >> 15;
+            t *= 0x2c1b3c6d;
+            t ^= t >> 12;
+            int level = 236 + (int) (t & 7);
+            if (gx >= 0 && gx < 6 && gy >= 0 && gy < 10) {
+                uint32_t h = (uint32_t) (row * 2654435761u) ^ (uint32_t) (column * 40503u);
+                h ^= h >> 13;
+                h *= 0x5bd1e995;
+                h ^= h >> 15;
+                bool blank = h % 6 == 0 || column > 20 + (row * 7) % 60;
+                uint32_t g = (h >> 8) & 63;
+                uint32_t bits = (g * 2654435761u) ^ ((uint32_t) (gy * 6 + gx) * 0x9e3779b9u);
+                bits ^= bits >> 16;
+                if (!blank && (bits & 1) == 0) {
+                    // ink, lighter at the glyph's edges
+                    bool edge = gx == 0 || gx == 5 || gy == 0 || gy == 9;
+                    level = (edge ? 110 : 40) + (int) ((bits >> 4) & 15);
+                }
+            }
+            pixels[y * width + x] = 0xff000000 | (uint32_t) (level << 16) | (uint32_t) (level << 8) | (uint32_t) (level + 4 > 255 ? 255 : level + 4);
+        }
+    }
+}
+
 static void
 paint(void) {
-    if (pause_file && access(pause_file, F_OK) == 0) {
+    if (pause_file && access(pause_file, F_OK) == 0 && last != NULL) {
         if (!dumped) {
             dumped = true;
             dump_last_frame();
@@ -111,7 +159,10 @@ paint(void) {
     dumped = false;
     struct buffer *b = !buffers[0].busy ? &buffers[0] : &buffers[1];
     unsigned long t = frames;
-    for (int y = 0; y < height; y++) {
+    if (page) {
+        draw_page(b->pixels, t * PAGE_SCROLL);
+    }
+    for (int y = 0; y < height && !page; y++) {
         for (int x = 0; x < width; x++) {
             noise = noise * 1103515245 + 12345;
             uint32_t v = (uint32_t) (x * 3 + y * 2 + t * 7) + ((noise >> 16) & 7);
@@ -196,6 +247,9 @@ main(int argc, char **argv) {
     if (argc >= 5) {
         pause_file = argv[4];
     }
+    if (argc >= 6) {
+        page = strcmp(argv[5], "page") == 0;
+    }
     display = wl_display_connect(NULL);
     if (!display) {
         fprintf(stderr, "no Wayland display\n");
@@ -215,8 +269,8 @@ main(int argc, char **argv) {
     xdg_surface_add_listener(xdg_surface, &xdg_surface_listener, NULL);
     struct xdg_toplevel *toplevel = xdg_surface_get_toplevel(xdg_surface);
     xdg_toplevel_add_listener(toplevel, &toplevel_listener, NULL);
-    xdg_toplevel_set_title(toplevel, "busy-client");
-    xdg_toplevel_set_app_id(toplevel, "test-busy");
+    xdg_toplevel_set_title(toplevel, page ? "page-client" : "busy-client");
+    xdg_toplevel_set_app_id(toplevel, page ? "test-page" : "test-busy");
     wl_surface_commit(surface);
 
     double last_write = 0;

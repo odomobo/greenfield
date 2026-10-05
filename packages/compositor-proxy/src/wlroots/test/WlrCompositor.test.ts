@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { onViewerFeedback, setViewerAttached } from '../../FramePacing.js'
+import { MAX_FRAME_HOLD_MS, onViewerFeedback, setViewerAttached } from '../../FramePacing.js'
 import { ControlMessage } from '../../viewer/ViewerTransport.js'
 import type { EncodingSink } from '../../encoding/SurfaceEncoder.js'
 import { FRAME_BORDER, FRAME_TITLE_HEIGHT } from '@gfld/scene-protocol'
@@ -926,6 +926,8 @@ function holdingSink() {
   const sink: EncodingSink = {
     active: true,
     bandwidthLimited: false,
+    linkBandwidth: undefined,
+    queuedBytes: () => 0,
     sendFrame: (_surface, _frame, _class, done) => held.push(done),
     sendPatch: (_surface, _patch, _class, done) => held.push(done),
     requireKeyFrame: () => undefined,
@@ -966,8 +968,8 @@ test('frame callbacks are held while both of the surface’s slots are taken, an
     core.newWindow(1, { width: 400, height: 256 })
     await waitFor(() => held.length === 2)
     core.commit(1, 400, 256, true)
-    // several frame clock ticks pass with no free slot: the callback is held
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    // a frame clock tick or two pass with no free slot: the callback is held (for up to MAX_FRAME_HOLD_MS)
+    await new Promise((resolve) => setTimeout(resolve, 50))
     assert.deepEqual(core.frameDone, [])
     // the network takes the surface's items one by one; its queued patches refill the slots until they are all out
     const start = Date.now()
@@ -976,6 +978,27 @@ test('frame callbacks are held while both of the surface’s slots are taken, an
       await new Promise((resolve) => setTimeout(resolve, 5))
     }
     assert.deepEqual(core.frameDone, [1])
+  } finally {
+    setViewerAttached(false)
+  }
+})
+
+test('a surface whose slots stay taken still gets its frame callback after MAX_FRAME_HOLD_MS (10 a second)', async () => {
+  setViewerAttached(true)
+  onViewerFeedback(16)
+  const { sink, held } = holdingSink()
+  compositor.setFrameSink(sink)
+  readablePixels()
+  try {
+    core.newWindow(1, { width: 400, height: 256 })
+    await waitFor(() => held.length === 2)
+    const start = performance.now()
+    core.commit(1, 400, 256, true)
+    await waitFor(() => core.frameDone.length > 0)
+    const waited = performance.now() - start
+    assert.deepEqual(core.frameDone, [1])
+    assert.ok(waited >= MAX_FRAME_HOLD_MS - 40 && waited < MAX_FRAME_HOLD_MS + 150, `after ${Math.round(waited)} ms`)
+    assert.equal(held.length, 2, 'nothing was sent meanwhile')
   } finally {
     setViewerAttached(false)
   }

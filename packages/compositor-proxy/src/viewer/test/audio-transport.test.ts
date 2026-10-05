@@ -46,7 +46,7 @@ test('audio packets are sent at once, whatever the congestion controller says ab
   const { ws, transport } = setup()
   transport.send({
     priority: 'patch',
-    surfaceClass: 'normal',
+    tier: 'normal',
     surface: 's',
     patch: { contentSerial: 1, surfaceSize: { width: 1, height: 1 }, rect: { x: 0, y: 0, width: 1, height: 1 }, format: PatchFormat.QOI, channels: 4, data: new Uint8Array(1) },
   })

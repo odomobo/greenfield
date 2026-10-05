@@ -3,15 +3,29 @@
  * streaming priority class (relentless surfaces, see RelentlessMeter). Its content goes out as patches of the damaged
  * areas, or, for streaming surfaces when a hardware video encoder is available, as H.264 video of the whole surface.
  * Patches are lossless, except a streaming surface's while the link is short of bandwidth (the sink says so): those may
- * be JPEG. The areas whose last update was lossy (JPEG patches, video) are tracked and sent again losslessly once the
- * surface no longer goes lossy. Each surface has a few slots for items (patches or video frames) between capture and
- * the socket. Native code is reached only through the injected host, sink and pool, so this runs (and is tested)
- * without it.
+ * be JPEG. The areas whose last update was lossy (JPEG patches, video) are tracked, and a surface settles them: whenever
+ * it has no damage to send, it sends them again losslessly, in the transport's lowest tier (new damage comes first).
+ * Each surface has a few slots for items (patches or video frames) between capture and the socket.
+ *
+ * Besides the time measure (RelentlessMeter), a normal surface is promoted by a burst: each surface keeps an estimate
+ * of its lossless bytes per pixel, so its unsent damage predicts a backlog in bytes, and while the normal surfaces'
+ * predicted backlog needs more than BURST_MS at the link's bandwidth (known once the link was limited), the one with
+ * the largest is promoted (EncodingContext.checkBurst). A streaming surface is demoted only once it has no damage left
+ * and is fully settled. Native code is reached only through the injected host, sink and pool, so this runs (and is
+ * tested) without it.
  */
 import { isLossyPatchFormat, type Patch } from '@gfld/scene-protocol'
 import { EncoderPool } from './EncoderPool.js'
 import type { EncodedPatch } from './patch-encoder.js'
-import { MAX_PATCH_PIXELS, PeriodFractions, planPatches, RelentlessMeter, SurfaceClass } from './policy.js'
+import {
+  BURST_MS,
+  MAX_PATCH_PIXELS,
+  PeriodFractions,
+  planPatches,
+  RelentlessMeter,
+  SendTier,
+  SurfaceClass,
+} from './policy.js'
 import { area, boundingBox, clip, disjoint, intersect, Rect, subtract } from './region.js'
 
 /** Items (patches or video frames) of one surface that may exist between capture and the socket. */
@@ -20,6 +34,10 @@ export const SURFACE_SLOTS = 2
 export const MAX_NORMAL_ENCODES = 4
 /** A surface's lossy area in more pieces than this is tracked as its bounding box (refreshing a little more). */
 export const MAX_LOSSY_RECTS = 32
+/** A surface's lossless bytes per pixel before any lossless patch of it was measured: uncompressed RGBA. */
+export const UNCOMPRESSED_BYTES_PER_PIXEL = 4
+/** Weight of the older samples in a surface's lossless bytes per pixel (per patch). */
+const BYTES_PER_PIXEL_DECAY = 0.8
 
 export type BufferInfo = {
   bufferId: number
@@ -45,10 +63,20 @@ export interface EncodingSink {
   readonly active: boolean
   /** the link is short of bandwidth: streaming surfaces go lossy (JPEG patches, lower-quality video) */
   readonly bandwidthLimited: boolean
+  /**
+   * The link's bandwidth (bytes per ms) as measured when it was last bandwidth-limited; undefined if it never was on
+   * this connection (an estimate of a link that was never full is only a lower bound).
+   */
+  readonly linkBandwidth: number | undefined
+  /** The bytes of the surface's items waiting to be sent, except settling patches. */
+  queuedBytes(surface: string): number
   /** `done` must be called exactly once: when the frame was handed to the network (true) or dropped (false) */
   sendFrame(surface: string, frame: Uint8Array, surfaceClass: SurfaceClass, done: (sent: boolean) => void): void
-  /** `done` must be called exactly once: when the patch was handed to the network (true) or dropped (false) */
-  sendPatch(surface: string, patch: Patch, surfaceClass: SurfaceClass, done: (sent: boolean) => void): void
+  /**
+   * `done` must be called exactly once: when the patch was handed to the network (true) or dropped (false). `tier`: the
+   * surface's class, or settle for a settling patch.
+   */
+  sendPatch(surface: string, patch: Patch, tier: SendTier, done: (sent: boolean) => void): void
   /** drop everything unsent of the surface, its video restarts with a key frame */
   requireKeyFrame(surface: string): void
   dropPatches(surface: string): void
@@ -82,14 +110,15 @@ function isSmall(buffer: BufferInfo): boolean {
   return buffer.width * buffer.height <= MAX_PATCH_PIXELS
 }
 
-type CapturedPatch = {
+export type CapturedPatch = {
   rect: Rect
   pixels: Uint8Array
   opaque: boolean
   surfaceSize: { width: number; height: number }
   serial: number
   epoch: number
-  surfaceClass: SurfaceClass
+  /** the surface's class, or settle: a lossless resend of a lossy area */
+  tier: SendTier
   /** may be encoded lossily (JPEG), if that's smaller */
   lossy: boolean
 }
@@ -100,12 +129,14 @@ export interface PatchSource {
   readonly destroyed: boolean
   readonly hasQueuedPatches: boolean
   readonly hasFreeSlot: boolean
-  readonly surfaceClass: SurfaceClass
+  /** the tier of its next patch: its class for damage, settle when it settles */
+  readonly sendTier: SendTier
   /** Takes a slot, which the pump gives back with `releaseSlot` once the patch is sent or dropped. */
   capturePatch(): CapturedPatch | undefined
-  /** A patch goes to the sink now (called in capture order): whether its area is now lossy or lossless. */
-  patchSending(rect: Rect, lossy: boolean): void
-  releaseSlot(): void
+  /** A captured patch goes to the sink now, encoded (called in capture order). */
+  patchSending(captured: CapturedPatch, encoded: EncodedPatch): void
+  /** The patch was handed to the socket, or dropped (sent or not). */
+  releaseSlot(captured?: CapturedPatch): void
   /** false if results captured at this epoch are stale (class switched, surface destroyed) */
   isCurrent(epoch: number): boolean
 }
@@ -138,13 +169,23 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
    * one marked (and never the other way round).
    */
   private lossyArea: Rect[] = []
+  /** the lossy areas to send again losslessly, as patches: captured when the surface has no damage to send */
+  private settleQueue: Rect[] = []
+  /** slots holding settling patches */
+  private settleSlots = 0
+  /** captured patches not handed to the sink yet (encoding) */
+  private readonly encoding = new Set<CapturedPatch>()
+  /** decayed sums of the surface's lossless patches (sizes encoded, pixels): its lossless bytes per pixel */
+  private losslessBytes = 0
+  private losslessPixels = 0
 
   constructor(
     readonly key: string,
     private readonly host: SurfaceHost<V>,
     private readonly context: EncodingContext<V>,
   ) {
-    this.meter = new RelentlessMeter(context.now())
+    // demoted only once it has no damage left and is fully settled (video: stopping it sends a crisp image)
+    this.meter = new RelentlessMeter(context.now(), undefined, () => !this.hasDamageWork && (this.lease !== undefined || this.lossyArea.length === 0))
     context.surfaces.add(this)
   }
 
@@ -157,11 +198,23 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   }
 
   get hasQueuedPatches(): boolean {
-    return this.queued.length > 0
+    return this.queued.length > 0 || this.mayCaptureSettling
+  }
+
+  get sendTier(): SendTier {
+    return this.queued.length > 0 ? this.surfaceClass : 'settle'
   }
 
   get hasFreeSlot(): boolean {
     return this.slotsUsed < SURFACE_SLOTS
+  }
+
+  /**
+   * The app may draw its next frame now (its frame callbacks wait for this, see FramePacing.ts): a slot is free, or one
+   * holds a settling patch (new damage comes before settling) and no damage is waiting for it already.
+   */
+  get readyForFrame(): boolean {
+    return this.queued.length === 0 ? this.slotsUsed - this.settleSlots < SURFACE_SLOTS : this.hasFreeSlot
   }
 
   /** the surface streams video now */
@@ -171,7 +224,33 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
 
   /** Queued rectangles, captured or encoding items, or a video frame wanted: anything not handed to the socket yet. */
   get hasUnsentWork(): boolean {
-    return this.queued.length > 0 || this.slotsUsed > 0 || this.videoWanted !== undefined
+    return this.hasDamageWork || this.settleSlots > 0 || this.settleQueue.length > 0
+  }
+
+  /** Unsent work except settling: what makes the surface busy (see RelentlessMeter), and what settling waits for. */
+  get hasDamageWork(): boolean {
+    return this.queued.length > 0 || this.slotsUsed > this.settleSlots || this.videoWanted !== undefined
+  }
+
+  /** The surface's lossless bytes per pixel, as measured on its lossless patches (uncompressed before any). */
+  get bytesPerPixel(): number {
+    return this.losslessPixels > 0 ? this.losslessBytes / this.losslessPixels : UNCOMPRESSED_BYTES_PER_PIXEL
+  }
+
+  /** The predicted size of its damage not handed to the sink yet (queued or encoding), at its lossless bytes per pixel. */
+  get unencodedBytes(): number {
+    let pixels = area(this.queued)
+    for (const captured of this.encoding) {
+      if (captured.tier !== 'settle') {
+        pixels += captured.rect.width * captured.rect.height
+      }
+    }
+    return pixels * this.bytesPerPixel
+  }
+
+  /** Its predicted backlog: the damage's bytes waiting in the sink, and those still to be encoded. Settling never counts. */
+  get predictedBacklogBytes(): number {
+    return this.context.sink.queuedBytes(this.key) + this.unencodedBytes
   }
 
   /** the surface is backlogged (see RelentlessMeter) */
@@ -207,13 +286,29 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     return this.surfaceClass === 'streaming' && this.context.sink.bandwidthLimited
   }
 
+  /** A settling patch is queued and may be captured now. */
+  private get mayCaptureSettling(): boolean {
+    return this.settleQueue.length > 0 && this.canSettle
+  }
+
+  /** It may send its lossy areas again: it has no damage to send (and no video, which is lossy anyway). */
+  private get canSettle(): boolean {
+    return (
+      !this.hasDamageWork &&
+      this.lease === undefined &&
+      !this.patchUnsupported &&
+      !this._destroyed &&
+      this.context.sink.active
+    )
+  }
+
   /**
    * The surface committed a new buffer with this damage (buffer coordinates). Returns when no encoding still needs the
    * buffer.
    */
   commit(damage: Rect[]): Promise<void> {
     const result = this.commitNow(damage)
-    this.refreshLossy()
+    this.startSettling()
     this.updateBusy()
     return result
   }
@@ -270,7 +365,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     if (buffer && !this._destroyed) {
       this.updateBusy()
       void this.evaluate(this.context.now(), buffer)
-      this.refreshLossy()
+      this.startSettling()
       this.updateBusy()
     }
   }
@@ -313,6 +408,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   /** The surface lost its buffer (null attach): nothing to read anymore. */
   bufferDetached(): void {
     this.queued = []
+    this.settleQueue = []
     this.videoWanted = undefined
     this.context.sink.dropPatches(this.key)
     this.updateBusy()
@@ -325,73 +421,110 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this._destroyed = true
     this.epoch++
     this.queued = []
+    this.settleQueue = []
+    this.encoding.clear()
     this.videoWanted = undefined
     this.releaseLease()
     this.context.surfaces.delete(this)
   }
 
   /**
-   * Take the next queued patch and read its pixels now, using a slot. From here on its content is fixed, new damage
-   * over it is queued again. Called by the patch pump when there is room to encode.
+   * Take the next queued patch and read its pixels now, using a slot: damage first, else (with no damage left to
+   * send) a settling patch. From here on its content is fixed, new damage over it is queued again. Called by the patch
+   * pump when there is room to encode.
    */
   capturePatch(): CapturedPatch | undefined {
     if (!this.hasFreeSlot) {
       return undefined
     }
     while (this.queued.length) {
-      const buffer = this.host.currentBuffer()
-      if (buffer === undefined) {
-        this.queued = []
-        return undefined
+      const captured = this.capture(this.queued.shift()!, false)
+      if (captured !== null) {
+        return captured
       }
-      const rect = intersect(this.queued.shift()!, boundsOf(buffer))
-      if (rect === undefined) {
-        continue
-      }
-      const read = this.host.readPixels(rect)
-      if (read === undefined) {
-        // can't read this buffer's pixels: stream it as video if there is an encoder, else it can't be shown
-        this.patchUnsupported = true
-        this.queued = []
-        if (this.startVideo() === undefined) {
-          this.logUnsupported()
-        }
-        this.updateBusy()
-        return undefined
-      }
-      this.slotsUsed++
-      return {
-        rect,
-        pixels: read.pixels,
-        opaque: read.opaque,
-        surfaceSize: { width: buffer.width, height: buffer.height },
-        serial: buffer.contentSerial,
-        epoch: this.epoch,
-        surfaceClass: this.surfaceClass,
-        lossy: this.goesLossy,
+    }
+    while (this.mayCaptureSettling) {
+      const captured = this.capture(this.settleQueue.shift()!, true)
+      if (captured !== null) {
+        return captured
       }
     }
     return undefined
   }
 
-  patchSending(rect: Rect, lossy: boolean): void {
-    if (lossy) {
+  /** Read a patch's pixels: undefined if it can't be (and none can), null if the rectangle is gone. */
+  private capture(queued: Rect, settle: boolean): CapturedPatch | undefined | null {
+    const buffer = this.host.currentBuffer()
+    if (buffer === undefined) {
+      this.queued = []
+      this.settleQueue = []
+      return undefined
+    }
+    const rect = intersect(queued, boundsOf(buffer))
+    if (rect === undefined) {
+      return null
+    }
+    const read = this.host.readPixels(rect)
+    if (read === undefined) {
+      // can't read this buffer's pixels: stream it as video if there is an encoder, else it can't be shown
+      this.patchUnsupported = true
+      this.queued = []
+      this.settleQueue = []
+      if (this.startVideo() === undefined) {
+        this.logUnsupported()
+      }
+      this.updateBusy()
+      return undefined
+    }
+    this.slotsUsed++
+    if (settle) {
+      this.settleSlots++
+    }
+    const captured: CapturedPatch = {
+      rect,
+      pixels: read.pixels,
+      opaque: read.opaque,
+      surfaceSize: { width: buffer.width, height: buffer.height },
+      serial: buffer.contentSerial,
+      epoch: this.epoch,
+      tier: settle ? 'settle' : this.surfaceClass,
+      // settling is lossless, whatever the link
+      lossy: !settle && this.goesLossy,
+    }
+    this.encoding.add(captured)
+    return captured
+  }
+
+  patchSending(captured: CapturedPatch, encoded: EncodedPatch): void {
+    this.encoding.delete(captured)
+    const rect = captured.rect
+    if (isLossyPatchFormat(encoded.format)) {
       this.markLossy([rect])
-    } else if (this.lossyArea.length) {
+      return
+    }
+    if (this.lossyArea.length) {
       this.lossyArea = subtract(this.lossyArea, [rect])
     }
+    this.losslessBytes = this.losslessBytes * BYTES_PER_PIXEL_DECAY + encoded.data.length
+    this.losslessPixels = this.losslessPixels * BYTES_PER_PIXEL_DECAY + rect.width * rect.height
   }
 
   /** An item was handed to the socket or dropped: its slot is free again. */
-  releaseSlot(): void {
+  releaseSlot(captured?: CapturedPatch): void {
+    if (captured) {
+      this.encoding.delete(captured)
+      if (captured.tier === 'settle' && this.settleSlots > 0) {
+        this.settleSlots--
+      }
+    }
     if (this.slotsUsed > 0) {
       this.slotsUsed--
     }
-    if (this.queued.length && !this._destroyed) {
+    void this.pumpVideo()
+    this.startSettling()
+    if (this.hasQueuedPatches && !this._destroyed) {
       this.context.pump.schedule(this)
     }
-    void this.pumpVideo()
-    this.refreshLossy()
     this.updateBusy()
   }
 
@@ -405,28 +538,31 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   }
 
   /**
-   * Once the surface no longer goes lossy (it was demoted, or bandwidth recovered) and its pending damage is sent (none
-   * queued, nothing in its slots), send its lossy areas again, losslessly.
+   * Settle: once the surface has no damage to send (none queued, none in its slots), plan its lossy areas as patches,
+   * sent again losslessly at the lowest tier, whatever the link. The areas stay lossy until those are sent (new damage
+   * may make them lossy again, then they are planned again once the queue is done).
    */
-  private refreshLossy() {
-    if (
-      this.lossyArea.length === 0 ||
-      this._destroyed ||
-      this.lease !== undefined ||
-      this.hasUnsentWork ||
-      this.goesLossy ||
-      !this.context.sink.active
-    ) {
+  private startSettling() {
+    if (this.lossyArea.length === 0 || this.settleQueue.length > 0 || !this.canSettle) {
       return
+    }
+    for (const captured of this.encoding) {
+      if (captured.tier === 'settle') {
+        // its area is still marked lossy: wait until it's sent
+        return
+      }
     }
     const buffer = this.host.currentBuffer()
-    if (buffer === undefined || this.patchUnsupported) {
+    if (buffer === undefined) {
       return
     }
-    const region = this.lossyArea
-    this.lossyArea = []
-    this.context.logger.info?.(`Surface ${this.key}: sending its ${area(region)} lossy pixels again, losslessly.`)
-    this.queuePatches(region, boundsOf(buffer))
+    this.settleQueue = planPatches(this.lossyArea, [], boundsOf(buffer))
+    if (this.settleQueue.length) {
+      this.context.logger.info?.(
+        `Surface ${this.key}: sending its ${area(this.lossyArea)} lossy pixels again, losslessly (settling).`,
+      )
+      this.context.pump.schedule(this)
+    }
   }
 
   isCurrent(epoch: number): boolean {
@@ -450,9 +586,9 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     }
   }
 
-  /** Tell the meter whether the surface has unsent work now. */
+  /** Tell the meter whether the surface has damage to send now (settling doesn't count). */
   private updateBusy() {
-    const busy = this.hasUnsentWork
+    const busy = this.hasDamageWork
     if (busy && !this.meter.busy) {
       this.meter.markBusyStart(this.context.now())
     } else if (!busy && this.meter.busy) {
@@ -489,6 +625,25 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   }
 
   /**
+   * Promote the surface now: a burst (see EncodingContext.checkBurst). `backlogMs`: the normal surfaces' predicted
+   * backlog that made it, for the log.
+   */
+  promoteBurst(backlogMs: number): void {
+    const buffer = this.host.currentBuffer()
+    if (buffer === undefined || this._destroyed || this.appliedClass === 'streaming') {
+      return
+    }
+    this.meter.promote()
+    this.appliedClass = 'streaming'
+    this.context.logger.info?.(
+      `Surface ${this.key} is now streaming (a burst: the normal surfaces' predicted backlog is ${Math.round(backlogMs)} ms).`,
+    )
+    if (this.lease === undefined && this.videoEligible(buffer) && this.context.pool.available > 0) {
+      void this.startVideo()
+    }
+  }
+
+  /**
    * Start streaming video: unsent patches are superseded by the key frame. Undefined if there is no encoder to start
    * it with.
    */
@@ -501,6 +656,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     }
     this.epoch++
     this.queued = []
+    this.settleQueue = []
+    this.encoding.clear()
     this.context.sink.dropPatches(this.key)
     const buffer = this.host.currentBuffer()
     if (buffer) {
@@ -516,6 +673,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this.videoWanted = undefined
     this.epoch++
     this.queued = []
+    this.settleQueue = []
+    this.encoding.clear()
     if (this.context.sink.active) {
       // the whole surface is about to be sent, a lossy part of it marks itself again
       this.lossyArea = []
@@ -580,9 +739,15 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   }
 
   private queuePatches(damage: Rect[], bounds: Rect) {
+    if (this.settleQueue.length) {
+      // the damage replaces the settling patches it covers
+      this.settleQueue = subtract(this.settleQueue, clip(damage, bounds))
+    }
     const patches = planPatches(damage, this.queued, bounds)
     if (patches.length) {
       this.queued.push(...patches)
+      // (before the pump captures any of it: a burst's first patches already go out lossy)
+      this.context.checkBurst()
       this.context.pump.schedule(this)
     }
   }
@@ -617,7 +782,11 @@ export interface StreamingEncodePool {
  * pool. Patches wait in their surface's queue (where new damage merges into them) instead of in a send buffer.
  */
 export class PatchPump {
-  private readonly ready: Record<SurfaceClass, Set<PatchSource>> = { normal: new Set(), streaming: new Set() }
+  private readonly ready: Record<SendTier, Set<PatchSource>> = {
+    normal: new Set(),
+    streaming: new Set(),
+    settle: new Set(),
+  }
   private normalEncodes = 0
   private pumping = false
   private again = false
@@ -643,7 +812,7 @@ export class PatchPump {
   }
 
   schedule(surface: PatchSource): void {
-    this.ready[surface.surfaceClass].add(surface)
+    this.ready[surface.sendTier].add(surface)
     this.pump()
   }
 
@@ -657,7 +826,9 @@ export class PatchPump {
     try {
       do {
         this.again = false
+        // settling shares the low priority pool with the streaming class, after it
         this.pumpClass('streaming')
+        this.pumpClass('settle')
         this.pumpClass('normal')
       } while (this.again)
     } finally {
@@ -665,13 +836,13 @@ export class PatchPump {
     }
   }
 
-  private hasCapacity(surfaceClass: SurfaceClass): boolean {
-    return surfaceClass === 'streaming' ? this.streaming.canAccept : this.normalEncodes < this.maxNormalEncodes
+  private hasCapacity(tier: SendTier): boolean {
+    return tier === 'normal' ? this.normalEncodes < this.maxNormalEncodes : this.streaming.canAccept
   }
 
-  private pumpClass(surfaceClass: SurfaceClass) {
-    const set = this.ready[surfaceClass]
-    while (this.sink.active && this.hasCapacity(surfaceClass)) {
+  private pumpClass(tier: SendTier) {
+    const set = this.ready[tier]
+    while (this.sink.active && this.hasCapacity(tier)) {
       const next = set.values().next()
       if (next.done) {
         return
@@ -681,9 +852,9 @@ export class PatchPump {
       if (surface.destroyed || !surface.hasQueuedPatches) {
         continue
       }
-      if (surface.surfaceClass !== surfaceClass) {
-        // its class changed since it was scheduled
-        this.ready[surface.surfaceClass].add(surface)
+      if (surface.sendTier !== tier) {
+        // its class changed since it was scheduled, or it has damage again (or none left)
+        this.ready[surface.sendTier].add(surface)
         this.again = true
         continue
       }
@@ -694,7 +865,8 @@ export class PatchPump {
       const captured = surface.capturePatch()
       if (surface.hasQueuedPatches) {
         // back of the line, for fairness between surfaces
-        set.add(surface)
+        this.ready[surface.sendTier].add(surface)
+        this.again ||= surface.sendTier !== tier
       }
       if (captured === undefined) {
         continue
@@ -704,16 +876,16 @@ export class PatchPump {
   }
 
   private encode(surface: PatchSource, captured: ReturnType<PatchSource['capturePatch']> & object) {
-    const surfaceClass = captured.surfaceClass
+    const tier = captured.tier
     let released = false
     const done = () => {
       if (!released) {
         released = true
-        surface.releaseSlot()
+        surface.releaseSlot(captured)
       }
     }
     let encoding: Promise<EncodedPatch>
-    if (surfaceClass === 'normal') {
+    if (tier === 'normal') {
       this.normalEncodes++
       encoding = this.encodeNormal(captured.pixels, captured.rect.width, captured.rect.height, captured.opaque)
       const finished = () => {
@@ -739,11 +911,11 @@ export class PatchPump {
             done()
             return
           }
-          surface.patchSending(captured.rect, isLossyPatchFormat(encoded.format))
+          surface.patchSending(captured, encoded)
           this.sink.sendPatch(
             surface.key,
             { contentSerial: captured.serial, surfaceSize: captured.surfaceSize, rect: captured.rect, ...encoded },
-            surfaceClass,
+            tier,
             done,
           )
         },
@@ -766,6 +938,7 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
   readonly surfaces = new Set<SurfaceEncoder<V>>()
   readonly pump: PatchPump
   private ticker?: ReturnType<typeof setInterval>
+  private checkingBurst = false
 
   constructor(
     readonly sink: EncodingSink,
@@ -797,6 +970,57 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
     void this.sink.bandwidthLimited
     for (const surface of this.surfaces) {
       surface.tick()
+    }
+    this.checkBurst()
+  }
+
+  /** The surfaces' predicted backlog not handed to the sink yet (the sink adds what waits in it). */
+  get unencodedBytes(): number {
+    let bytes = 0
+    for (const surface of this.surfaces) {
+      bytes += surface.unencodedBytes
+    }
+    return bytes
+  }
+
+  /**
+   * Burst promotion: while the normal surfaces' predicted backlog would take the link more than BURST_MS (at its
+   * bandwidth as measured when it was last limited; never before it was), promote the one with the largest. Streaming
+   * surfaces don't count: they don't push others out of the normal class.
+   */
+  checkBurst(): void {
+    const bandwidth = this.sink.linkBandwidth
+    if (bandwidth === undefined || bandwidth <= 0 || !this.sink.active || this.checkingBurst) {
+      return
+    }
+    this.checkingBurst = true
+    try {
+      for (;;) {
+        let total = 0
+        let largest: SurfaceEncoder<V> | undefined
+        let largestBytes = 0
+        for (const surface of this.surfaces) {
+          if (surface.surfaceClass !== 'normal' || surface.destroyed) {
+            continue
+          }
+          const bytes = surface.predictedBacklogBytes
+          total += bytes
+          if (bytes > largestBytes) {
+            largest = surface
+            largestBytes = bytes
+          }
+        }
+        if (largest === undefined || total <= BURST_MS * bandwidth) {
+          return
+        }
+        largest.promoteBurst(total / bandwidth)
+        if (largest.surfaceClass === 'normal') {
+          // couldn't be promoted (no buffer)
+          return
+        }
+      }
+    } finally {
+      this.checkingBurst = false
     }
   }
 }

@@ -60,7 +60,7 @@ function setup(congestion?: Congestion) {
     congestion: congestion ?? controller,
   })
   const queuePatch = (serial: number, bytes: number) =>
-    transport.send({ priority: 'patch', surface: 's', surfaceClass: 'normal', patch: patch(serial, bytes) })
+    transport.send({ priority: 'patch', surface: 's', tier: 'normal', patch: patch(serial, bytes) })
   const queueControl = () => transport.send({ priority: 'control', message: { type: 'scene' } })
   return { ws, clock, controller, transport, queuePatch, queueControl }
 }
@@ -116,7 +116,7 @@ test('a paced item goes out when it is due, by a timer', async () => {
   }
   const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, { now: () => Date.now(), congestion })
   for (let i = 1; i <= 2; i++) {
-    transport.send({ priority: 'patch', surface: 's', surfaceClass: 'normal', patch: patch(i, 100) })
+    transport.send({ priority: 'patch', surface: 's', tier: 'normal', patch: patch(i, 100) })
   }
   await settle()
   assert.equal(ws.sent.length, 1)

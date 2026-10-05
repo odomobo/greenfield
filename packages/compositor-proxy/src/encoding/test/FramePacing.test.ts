@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { FrameCallbackQueue, MAX_FRAME_RATE, tickIntervalFor } from '../../FramePacing.js'
+import { FrameCallbackQueue, MAX_FRAME_HOLD_MS, MAX_FRAME_RATE, MIN_FRAME_RATE, tickIntervalFor } from '../../FramePacing.js'
 
 test('a frame callback is held while the surface has no free slot and released at the next tick once it has one', () => {
   const queue = new FrameCallbackQueue()
@@ -18,6 +18,28 @@ test('a frame callback is held while the surface has no free slot and released a
   queue.tick(16, 132)
   assert.deepEqual(called, [132])
   assert.equal(queue.length, 0)
+})
+
+test('a surface that stays busy still gets a frame callback at least 10 times a second', () => {
+  assert.equal(MIN_FRAME_RATE, 10)
+  const queue = new FrameCallbackQueue()
+  const called: number[] = []
+  queue.schedule(0, () => false, (time) => called.push(time))
+  let time = 0
+  for (let waited = 25; waited < MAX_FRAME_HOLD_MS; waited += 25) {
+    queue.tick(25, (time += 25))
+  }
+  assert.equal(called.length, 0, 'held for less than MAX_FRAME_HOLD_MS')
+  queue.tick(25, (time += 25))
+  assert.equal(called[0], MAX_FRAME_HOLD_MS)
+  // the hold counts only after the minimum wait (no pacing viewer)
+  queue.schedule(1000, () => false, (time) => called.push(time))
+  for (let i = 0; i < (1000 + MAX_FRAME_HOLD_MS) / 25 - 1; i++) {
+    queue.tick(25, (time += 25))
+  }
+  assert.equal(called.length, 1)
+  queue.tick(25, (time += 25))
+  assert.equal(called.length, 2)
 })
 
 test('the viewer decode time delays the callback even when a slot is free', () => {

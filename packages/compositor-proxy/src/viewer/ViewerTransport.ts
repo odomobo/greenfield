@@ -2,7 +2,7 @@ import { WebSocket } from 'ws'
 import { Socket } from 'node:net'
 import { performance } from 'node:perf_hooks'
 import { createLogger } from '../Logger.js'
-import type { SurfaceClass } from '../encoding/policy.js'
+import type { SendTier, SurfaceClass } from '../encoding/policy.js'
 import { setSocketSendBuffer, setTcpNotSentLowat } from '../socket-options.js'
 import { CongestionController } from './congestion.js'
 import { BandwidthMonitor } from './bandwidth.js'
@@ -18,7 +18,6 @@ import {
   encodeFrame,
   encodePatch,
   isKeyFrame,
-  isLossyPatchFormat,
   Patch,
   ViewerAck,
 } from './protocol.js'
@@ -45,11 +44,12 @@ export type OutgoingMessage =
       readonly surfaceClass: SurfaceClass
       readonly done?: (sent: boolean) => void
     }
+  /** A patch's tier: its surface's class, or settle for a lossless resend of a lossy area. */
   | {
       readonly priority: 'patch'
       readonly surface: string
       readonly patch: Patch
-      readonly surfaceClass: SurfaceClass
+      readonly tier: SendTier
       readonly done?: (sent: boolean) => void
     }
 
@@ -61,10 +61,12 @@ export interface ViewerTransport {
   /**
    * Queue a message. Control messages are always sent before pending frames and patches, never held back; audio
    * packets are written to the socket at once too (not subject to the congestion controller), unless the socket's
-   * buffer is over AUDIO_BUFFERED_LIMIT, then they're dropped. Of those,
-   * the two priority classes share the link by byte-weighted deficit round-robin (normal 3 : streaming 1,
-   * work-conserving), surfaces of a class take turns, one item per visit, as fast as the congestion controller lets
-   * them go (see congestion.ts: pacing, in-flight limit, the viewer's backlog). Video frames and patches of a surface are sent in order. A video key frame replaces everything unsent of its surface (it covers the whole surface),
+   * buffer is over AUDIO_BUFFERED_LIMIT, then they're dropped. Of the rest, the three send tiers (the normal and
+   * streaming classes, then settling) share the link by byte-weighted deficit round-robin (9 : 3 : 1, work-conserving),
+   * surfaces of a tier take turns, one item per visit, as fast as the congestion controller lets them go (see
+   * congestion.ts: pacing, in-flight limit, the viewer's backlog). Video frames and patches of a surface are sent in
+   * order, so a surface's items wait in the highest tier of any of them. A video key frame replaces everything unsent
+   * of its surface (it covers the whole surface),
    * delta frames are chained behind it up to a small limit. Patches are never coalesced or dropped, except by a later
    * key frame or the calls below.
    */
@@ -84,6 +86,12 @@ export interface ViewerTransport {
    * lower-quality video) while it is.
    */
   readonly bandwidthLimited: boolean
+
+  /** The link's bandwidth (bytes per ms) as measured when it was saturated; undefined if it never was. */
+  readonly linkBandwidth: number | undefined
+
+  /** The bytes of the surface's frames and patches waiting to be sent, except settling patches. */
+  queuedBytes(surface: string): number
 
   close(code: number, reason: string): void
 
@@ -112,18 +120,23 @@ const SEND_BUFFERED_LIMIT = 256 * 1024
 // Audio packets are dropped instead of sent while more than this is buffered for the socket (about 9 s of audio at
 // 112 kbps behind video data): audio that late is useless, and it must never pile up.
 const AUDIO_BUFFERED_LIMIT = 128 * 1024
-// Deficit round-robin between the priority classes: each turn a class may send up to its quantum (plus what it carried
-// over) in bytes. Normal surfaces get 3 times the share of streaming ones, and the other class gets all of the link
-// when one has nothing waiting.
-const DRR_QUANTUM = 16 * 1024
-const DRR_QUANTUM_NORMAL = 3 * DRR_QUANTUM
-const DRR_QUANTUM_STREAMING = 1 * DRR_QUANTUM
+// Deficit round-robin between the send tiers: each turn a tier may send up to its quantum (plus what it carried over)
+// in bytes. Normal surfaces get 3 times the share of streaming ones, which get 3 times the share of settling, and the
+// others get all of the link when a tier has nothing waiting.
+const DRR_QUANTUM_STREAMING_BASE = 16 * 1024
+const DRR_QUANTUM: Record<SendTier, number> = {
+  normal: 3 * DRR_QUANTUM_STREAMING_BASE,
+  streaming: DRR_QUANTUM_STREAMING_BASE,
+  settle: Math.round(DRR_QUANTUM_STREAMING_BASE / 3),
+}
+/** The tiers from the highest priority, the round-robin's order. */
+const TIERS: readonly SendTier[] = ['normal', 'streaming', 'settle']
 // Max unsent delta frames per surface. Beyond that the viewer is too far behind: drop them and resync with a key frame.
 const MAX_UNSENT_FRAMES_PER_SURFACE = 3
 
-type QueuedEntry = { readonly surfaceClass: SurfaceClass; readonly done?: (sent: boolean) => void } & (
+type QueuedEntry = { readonly tier: SendTier; readonly done?: (sent: boolean) => void } & (
   | { readonly kind: 'frame'; readonly frame: Uint8Array }
-  | { readonly kind: 'patch'; readonly envelope: Uint8Array; readonly pixels: number; readonly lossy: boolean }
+  | { readonly kind: 'patch'; readonly envelope: Uint8Array }
 )
 
 /**
@@ -150,7 +163,16 @@ function envelopeSizeOf(surface: string, entry: QueuedEntry): number {
   return entry.kind === 'frame' ? 4 + Buffer.byteLength(surface) + entry.frame.length : entry.envelope.length
 }
 
-const otherClass = (surfaceClass: SurfaceClass): SurfaceClass => (surfaceClass === 'normal' ? 'streaming' : 'normal')
+const nextTier = (tier: SendTier): SendTier => TIERS[(TIERS.indexOf(tier) + 1) % TIERS.length]
+
+/** The tier a surface's items wait in: the highest of any of them (they're sent in order). */
+function tierOf(chain: QueuedEntry[]): SendTier {
+  let rank = TIERS.length - 1
+  for (const entry of chain) {
+    rank = Math.min(rank, TIERS.indexOf(entry.tier))
+  }
+  return TIERS[rank]
+}
 
 export class WebSocketViewerTransport implements ViewerTransport {
   onMessage: (message: ControlMessage) => void = () => {
@@ -173,13 +195,13 @@ export class WebSocketViewerTransport implements ViewerTransport {
   /**
    * Unsent frames and patches per surface, in order. Video in a chain starts with a key frame or continues a stream
    * the viewer already decodes. Map iteration order (insertion) is the round-robin order between surfaces: a surface
-   * goes to the back after each of its items is sent. A surface's class is that of its next item.
+   * goes to the back after each of its items is sent. A surface's tier is the highest of its items' (see tierOf).
    */
   private readonly pendingFrames = new Map<string, QueuedEntry[]>()
   /** deficit round-robin state: whose turn it is, whether it got its quantum for this turn, bytes carried over */
-  private drrTurn: SurfaceClass = 'normal'
+  private drrTurn: SendTier = 'normal'
   private drrQuantumGiven = false
-  private readonly drrDeficit: Record<SurfaceClass, number> = { normal: 0, streaming: 0 }
+  private readonly drrDeficit: Record<SendTier, number> = { normal: 0, streaming: 0, settle: 0 }
   /**
    * Surfaces whose next frame must be a key frame because a frame was dropped.
    */
@@ -202,19 +224,27 @@ export class WebSocketViewerTransport implements ViewerTransport {
 
   constructor(
     private readonly ws: WebSocket,
-    options: { now?: () => number; congestion?: Congestion; link?: SimulatedLink } = {},
+    options: {
+      now?: () => number
+      congestion?: Congestion
+      link?: SimulatedLink
+      /** the predicted backlog of the surfaces' damage not handed to the transport yet (see bandwidth.ts) */
+      unencodedBytes?: () => number
+    } = {},
   ) {
     this.now = options.now ?? (() => performance.now())
     this.congestion = options.congestion ?? new CongestionController({ now: this.now() })
     this.link = options.link
+    const unencodedBytes = options.unencodedBytes ?? (() => 0)
     this.bandwidth = new BandwidthMonitor(
       this.now(),
       () => this.congestion.bandwidthEstimate ?? 0,
-      (limited, period) =>
+      () => this.queuedBacklogBytes() + unencodedBytes(),
+      (limited, { held, backlogMs }) =>
         logger.info(
           limited
-            ? `Bandwidth-limited: streaming surfaces go lossy (held back ${Math.round(period.held * 100)}% of the last second).`
-            : `No longer bandwidth-limited: streaming surfaces go lossless again (held back ${Math.round(period.held * 100)}%, lossless demand ${Math.round(period.demand * 100)}% of the bandwidth).`,
+            ? `Bandwidth-limited: streaming surfaces go lossy (held back ${Math.round(held * 100)}% of the period, predicted backlog ${Math.round(backlogMs)} ms).`
+            : `No longer bandwidth-limited: streaming surfaces go lossless again (held back ${Math.round(held * 100)}% of the last second, predicted backlog ${Math.round(backlogMs)} ms).`,
         ),
     )
     ws.binaryType = 'nodebuffer'
@@ -260,6 +290,28 @@ export class WebSocketViewerTransport implements ViewerTransport {
     return this.bandwidth.limited(this.now())
   }
 
+  get linkBandwidth(): number | undefined {
+    return this.bandwidth.linkBandwidth
+  }
+
+  queuedBytes(surface: string): number {
+    let bytes = 0
+    for (const entry of this.pendingFrames.get(surface) ?? []) {
+      if (entry.tier !== 'settle') {
+        bytes += sizeOf(entry)
+      }
+    }
+    return bytes
+  }
+
+  private queuedBacklogBytes(): number {
+    let bytes = 0
+    for (const surface of this.pendingFrames.keys()) {
+      bytes += this.queuedBytes(surface)
+    }
+    return bytes
+  }
+
   send(message: OutgoingMessage): void {
     if (this._closed) {
       if (message.priority === 'frame' || message.priority === 'patch') {
@@ -276,7 +328,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
     } else if (message.priority === 'frame') {
       this.queueFrame(message.surface, message.frame, message.surfaceClass, message.done)
     } else {
-      this.queuePatch(message.surface, message.patch, message.surfaceClass, message.done)
+      this.queuePatch(message.surface, message.patch, message.tier, message.done)
     }
     this.pump()
   }
@@ -344,7 +396,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
   }
 
   private queueFrame(surface: string, frame: Uint8Array, surfaceClass: SurfaceClass, done?: (sent: boolean) => void) {
-    const entry: QueuedEntry = { kind: 'frame', frame, surfaceClass, done }
+    const entry: QueuedEntry = { kind: 'frame', frame, tier: surfaceClass, done }
     if (isKeyFrame(frame)) {
       // everything unsent is superseded, a key frame covers the whole surface
       this.dropQueued(surface)
@@ -375,15 +427,8 @@ export class WebSocketViewerTransport implements ViewerTransport {
     }
   }
 
-  private queuePatch(surface: string, patch: Patch, surfaceClass: SurfaceClass, done?: (sent: boolean) => void) {
-    const entry: QueuedEntry = {
-      kind: 'patch',
-      envelope: encodePatch(surface, patch),
-      pixels: patch.rect.width * patch.rect.height,
-      lossy: isLossyPatchFormat(patch.format),
-      surfaceClass,
-      done,
-    }
+  private queuePatch(surface: string, patch: Patch, tier: SendTier, done?: (sent: boolean) => void) {
+    const entry: QueuedEntry = { kind: 'patch', envelope: encodePatch(surface, patch), tier, done }
     const chain = this.pendingFrames.get(surface)
     if (chain === undefined) {
       this.pendingFrames.set(surface, [entry])
@@ -392,10 +437,10 @@ export class WebSocketViewerTransport implements ViewerTransport {
     }
   }
 
-  /** The first surface of the class, in round-robin order, and its chain of items. */
-  private findHead(surfaceClass: SurfaceClass): { surface: string; chain: QueuedEntry[] } | undefined {
+  /** The first surface of the tier, in round-robin order, and its chain of items. */
+  private findHead(tier: SendTier): { surface: string; chain: QueuedEntry[] } | undefined {
     for (const [surface, chain] of this.pendingFrames) {
-      if (chain[0].surfaceClass === surfaceClass) {
+      if (tierOf(chain) === tier) {
         return { surface, chain }
       }
     }
@@ -403,19 +448,23 @@ export class WebSocketViewerTransport implements ViewerTransport {
   }
 
   /**
-   * The next data item to send, by deficit round-robin between the classes, weighted by bytes: on its turn a class adds
-   * its quantum to its deficit and sends items while the next fits in the deficit. A class with nothing waiting loses
-   * its turn and its deficit, so the other class gets the whole link. If nothing is taken (nothing is waiting, or
+   * The next data item to send, by deficit round-robin between the tiers, weighted by bytes: on its turn a tier adds
+   * its quantum to its deficit and sends items while the next fits in the deficit. A tier with nothing waiting loses
+   * its turn and its deficit, so the others share the whole link. If nothing is taken (nothing is waiting, or
    * `allowed` refuses the next item by its envelope size), the round-robin state stays as it was: the transport asks
    * again whenever the congestion controller might allow more, and those questions must not count as turns.
    */
   private takeNext(allowed: (envelopeBytes: number) => boolean): { surface: string; entry: QueuedEntry } | undefined {
+    if (this.pendingFrames.size === 0) {
+      return undefined
+    }
     const saved = { turn: this.drrTurn, quantumGiven: this.drrQuantumGiven, ...this.drrDeficit }
     const nothingTaken = () => {
       this.drrTurn = saved.turn
       this.drrQuantumGiven = saved.quantumGiven
-      this.drrDeficit.normal = saved.normal
-      this.drrDeficit.streaming = saved.streaming
+      for (const tier of TIERS) {
+        this.drrDeficit[tier] = saved[tier]
+      }
       return undefined
     }
     // a deficit grows every turn, so even a huge item fits eventually
@@ -425,15 +474,12 @@ export class WebSocketViewerTransport implements ViewerTransport {
       if (head === undefined) {
         this.drrDeficit[turn] = 0
         this.drrQuantumGiven = false
-        this.drrTurn = otherClass(turn)
-        if (this.findHead(this.drrTurn) === undefined) {
-          return nothingTaken()
-        }
+        this.drrTurn = nextTier(turn)
         continue
       }
       if (!this.drrQuantumGiven) {
         this.drrQuantumGiven = true
-        this.drrDeficit[turn] += turn === 'normal' ? DRR_QUANTUM_NORMAL : DRR_QUANTUM_STREAMING
+        this.drrDeficit[turn] += DRR_QUANTUM[turn]
       }
       const entry = head.chain[0]
       if (sizeOf(entry) <= this.drrDeficit[turn]) {
@@ -450,7 +496,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
         return { surface: head.surface, entry }
       }
       this.drrQuantumGiven = false
-      this.drrTurn = otherClass(turn)
+      this.drrTurn = nextTier(turn)
     }
     return nothingTaken()
   }
@@ -510,20 +556,8 @@ export class WebSocketViewerTransport implements ViewerTransport {
           this.keyFrameSent.add(surface)
         }
         data = encodeFrame(surface, entry.frame)
-        this.bandwidth.onSent({ kind: 'frame', surface, surfaceClass: entry.surfaceClass, bytes: data.length }, now)
       } else {
         data = entry.envelope
-        this.bandwidth.onSent(
-          {
-            kind: 'patch',
-            surface,
-            surfaceClass: entry.surfaceClass,
-            bytes: data.length,
-            pixels: entry.pixels,
-            lossy: entry.lossy,
-          },
-          now,
-        )
       }
       this.congestion.onSend(data.length, now)
       // The callback fires once the data was handed to the kernel. With TCP_NOTSENT_LOWAT that means most of it has

@@ -31,6 +31,9 @@ export interface WindowSceneEndpoint {
 export interface SurfaceContent {
   setFrameSink(sink: EncodingSink): void
 
+  /** The predicted size of the surfaces' damage not handed to the sink yet (see SurfaceEncoder.unencodedBytes). */
+  unencodedBytes?(): number
+
   /** Send the whole current content of a surface again (a video key frame or a full set of patches). */
   requestKeyFrame(surface: string): void
 
@@ -77,6 +80,7 @@ export class ViewerHost {
   ) {
     const isAttached = () => this.transport !== undefined
     const isBandwidthLimited = () => this.transport?.bandwidthLimited ?? false
+    const linkBandwidth = () => this.transport?.linkBandwidth
     content.setFrameSink({
       get active() {
         return isAttached()
@@ -84,6 +88,10 @@ export class ViewerHost {
       get bandwidthLimited() {
         return isBandwidthLimited()
       },
+      get linkBandwidth() {
+        return linkBandwidth()
+      },
+      queuedBytes: (surfaceKey) => this.transport?.queuedBytes(surfaceKey) ?? 0,
       sendFrame: (surfaceKey, frame, surfaceClass, done) => {
         if (this.transport) {
           this.transport.send({ priority: 'frame', surface: surfaceKey, frame, surfaceClass, done })
@@ -91,9 +99,9 @@ export class ViewerHost {
           done(false)
         }
       },
-      sendPatch: (surfaceKey, patch, surfaceClass, done) => {
+      sendPatch: (surfaceKey, patch, tier, done) => {
         if (this.transport) {
-          this.transport.send({ priority: 'patch', surface: surfaceKey, patch, surfaceClass, done })
+          this.transport.send({ priority: 'patch', surface: surfaceKey, patch, tier, done })
         } else {
           done(false)
         }
@@ -140,7 +148,10 @@ export class ViewerHost {
       this.audioEndpoint?.detach()
     }
 
-    const transport = new WebSocketViewerTransport(ws, { link: this.options.link })
+    const transport = new WebSocketViewerTransport(ws, {
+      link: this.options.link,
+      unencodedBytes: () => this.content.unencodedBytes?.() ?? 0,
+    })
     this.transport = transport
     transport.onKeyFrameNeeded = (surface) => this.content.requestKeyFrame(surface)
     transport.onMessage = (message) => this.onMessage(transport, message)

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
 import { decodeEnvelope, Patch, PatchFormat } from '@gfld/scene-protocol'
-import type { SurfaceClass } from '../policy.js'
+import type { SendTier } from '../policy.js'
 import { Congestion, WebSocketViewerTransport } from '../../viewer/ViewerTransport.js'
 
 /** Just enough of a ws WebSocket: sends complete when the test says so. */
@@ -51,8 +51,8 @@ function setup() {
   // These tests are about the order of sending when the network is the bottleneck, not about congestion control: one
   // data item at a time, the next once the socket took the last (the test's flush()).
   const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, { congestion: oneAtATime(ws) })
-  const queue = (surface: string, surfaceClass: SurfaceClass, serial: number, bytes: number) =>
-    transport.send({ priority: 'patch', surface, surfaceClass, patch: patch(serial, bytes) })
+  const queue = (surface: string, tier: SendTier, serial: number, bytes: number) =>
+    transport.send({ priority: 'patch', surface, tier, patch: patch(serial, bytes) })
   /** Let every pending send complete, in order, and say what was sent: [surface, serial, wire size]. */
   const drain = () => {
     const result: { surface: string; serial: number; size: number }[] = []
@@ -95,6 +95,52 @@ test('the classes share the link 3 : 1 by bytes, also with mixed item sizes', ()
   assert.ok(bytes.streaming > 0, 'streaming is not starved')
   const ratio = bytes.normal / bytes.streaming
   assert.ok(ratio > 2.6 && ratio < 3.4, `normal : streaming was ${ratio.toFixed(2)} : 1`)
+})
+
+const SETTLE = 300
+
+test('settling gets a third of the streaming share: 9 : 3 : 1 by bytes, and all of what the others leave', () => {
+  const { queue, drain, block } = setup()
+  block()
+  for (let i = 0; i < 300; i++) {
+    queue('n', 'normal', NORMAL + i, 4000)
+    queue('s', 'streaming', STREAMING + i, 4000)
+    queue('x', 'settle', SETTLE + i, 4000)
+  }
+  const sent = drain()
+  const bytes = { normal: 0, streaming: 0, settle: 0 }
+  for (const { serial, size } of sent.slice(1, 131)) {
+    bytes[serial >= SETTLE ? 'settle' : serial >= STREAMING ? 'streaming' : 'normal'] += size
+  }
+  assert.ok(bytes.settle > 0, 'settling is not starved')
+  const normal = bytes.normal / bytes.settle
+  const streaming = bytes.streaming / bytes.settle
+  assert.ok(normal > 7.5 && normal < 10.5, `normal : settle was ${normal.toFixed(2)} : 1`)
+  assert.ok(streaming > 2.4 && streaming < 3.6, `streaming : settle was ${streaming.toFixed(2)} : 1`)
+  // the end: settling alone takes the whole link
+  assert.ok(sent.slice(-20).every(({ serial }) => serial >= SETTLE))
+})
+
+test("a surface's settling patch followed by damage waits in the damage's tier (they go in order)", () => {
+  const { transport, queue, drain, block } = setup()
+  block()
+  queue('a', 'settle', SETTLE, 4000)
+  assert.equal(transport.queuedBytes('a'), 0, 'settling never counts as backlog')
+  queue('a', 'normal', NORMAL, 100)
+  assert.ok(transport.queuedBytes('a') > 100)
+  for (let i = 0; i < 20; i++) {
+    queue('x', 'settle', SETTLE + 1 + i, 4000)
+  }
+  // the normal tier takes its turn first: 'a' is in it, settling patch and all
+  assert.deepEqual(
+    drain()
+      .slice(1, 3)
+      .map(({ surface, serial }) => [surface, serial]),
+    [
+      ['a', SETTLE],
+      ['a', NORMAL],
+    ],
+  )
 })
 
 test('an item larger than the quantum is still sent, after its class saved up', () => {

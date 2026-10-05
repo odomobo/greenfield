@@ -326,14 +326,13 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
 
 **As built** (item 5b phase 2, scene protocol 18):
 
-- **Bandwidth-limited** is judged by the transport (`viewer/bandwidth.ts`, `BandwidthMonitor`, one per connection), on
-  1 s periods, from two measures: the share of the period during which streaming items waited in the transport while
-  the congestion controller (or the socket's safety limit) held them back, and the period's demand counted losslessly
-  (lossy patches at the lossless bytes per pixel last measured for their surface, or 3 times their size if none was;
-  lower-quality video frames at twice their size) against the controller's `max_bw`. Limited after 2 periods in a row
-  held back at least 80% of the time (one isn't enough: Startup and ProbeRTT hold data back for a period on a busy link
-  that keeps up); recovered after a period held back under 50% whose lossless demand fits in 70% of `max_bw`, at least
-  2 s after it became limited. On the simulated link (`test/sim-link.ts`, 20 Mbit/s): a stream at 40-80% of the link
+- **Bandwidth-limited** is judged by the transport (`viewer/bandwidth.ts`, `BandwidthMonitor`, one per connection).
+  Since phase 3 it is either/or: the link is saturated (1 s periods; 2 in a row in which streaming items waited in
+  the transport while the congestion controller, or the socket's safety limit, held them back at least 80% of the time;
+  one isn't enough: Startup and ProbeRTT hold data back for a period on a busy link that keeps up), or, at once, the
+  predicted backlog is over `BURST_MS` (see phase 3 below). It ends at the end of a period held back under 50% with
+  the predicted backlog under `BURST_MS`, at least 2 s after it began. (Phase 2's lossless-demand check, with
+  per-surface sizes in the monitor, was replaced by the predicted backlog.) On the simulated link (`test/sim-link.ts`, 20 Mbit/s): a stream at 40-80% of the link
   never makes it limited, an endless one does within 2-3 s. Transitions are logged ("Bandwidth-limited: ...", "No
   longer bandwidth-limited: ..."). The sink tells the encoders (`EncodingSink.bandwidthLimited`).
 - **JPEG or lossless, whichever is smaller** (a deviation from "JPEG patches while limited"): a streaming surface's
@@ -342,9 +341,35 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
   losslessly (QOI + LZ4), and then nothing needs refreshing; QOI costs a fraction of the JPEG encode.
 - **Lossy areas** are tracked per surface (`SurfaceEncoder.lossyArea`, at most 32 rectangles, else their bounding
   box), updated in send order (each patch as it goes to the sink, so a later lossless patch always clears an earlier
-  lossy one), the whole surface while it streams video. Refresh: once the surface doesn't go lossy anymore (demoted, or
-  bandwidth recovered) and it has no unsent work (nothing queued, nothing in its slots), its lossy areas are queued as
-  lossless patches (logged: "sending its N lossy pixels again, losslessly").
+  lossy one), the whole surface while it streams video. Settling (phase 3; phase 2 refreshed only once the surface
+  no longer went lossy, at normal priority): whenever the surface has no damage to send (none queued, none in its
+  slots), its lossy areas are planned as lossless patches and sent in the transport's lowest tier, whatever the link
+  (logged: "sending its N lossy pixels again, losslessly (settling)").
+- **Phase 3, bursts and settling** (built 2026-10-05):
+  - Each surface keeps a pixel-weighted, decayed (0.8 per patch) average of its lossless bytes per pixel, from all its
+    lossless patches (`SurfaceEncoder.bytesPerPixel`; 4 before any).
+  - Predicted backlog of a surface (`predictedBacklogBytes`): its frames and patches waiting in the transport (real
+    size, settling patches excluded) plus its damage queued or encoding times its bytes per pixel. In time at the link's
+    bandwidth: `max_bw` remembered from the last saturated period (or the current `max_bw` if higher); unknown, and
+    nothing below applies, until the link was saturated once on the connection.
+  - **Burst promotion** (`EncodingContext.checkBurst`, run whenever damage is queued, before the pump captures it, and
+    on every tick): while the normal surfaces' predicted backlog is over `BURST_MS` (200 ms, `policy.ts`), the normal
+    surface with the largest is promoted ("is now streaming (a burst: ...)"). The total backlog (all surfaces) over
+    `BURST_MS` makes the link bandwidth-limited at once, so a burst's first patches already go out as JPEG.
+  - **Settling** may fill both of the surface's slots, but new damage is captured first as soon as one frees, and
+    drops the settling patches it covers. An app's frame callbacks wait for `readyForFrame`: a free slot, or one
+    holding a settling patch (unless damage already waits for it). Settling doesn't make the surface busy or
+    backlogged for the relentless measure.
+  - **Minimum frame rate** (`FramePacing.ts`, `MIN_FRAME_RATE` 10): a frame callback held because the surface isn't
+    ready goes anyway after `MAX_FRAME_HOLD_MS` (100 ms). The app's next frame is queued as damage and read when a
+    slot frees, so a slow repaint may show parts of different frames (tearing), but the app keeps responding while a
+    page takes the link seconds to send.
+  - **Demotion** only once the surface has no damage left and nothing lossy (a video surface: no damage; stopping the
+    video sends a crisp image), and its last period was backlogged under 15% (`RelentlessMeter`'s `canDemote`), at a
+    period end or any time after.
+  - **Third send tier**: the transport's deficit round-robin runs over normal, streaming and settle, quanta 48 KB,
+    16 KB and 5.3 KB (9 : 3 : 1), work-conserving. A surface's items go in order, so a surface waits in the highest
+    tier of its items (a settling patch ahead of damage goes with the damage).
 - **Video** has a constant QP, no bitrate cap: `QP_HIGH` 24 normally, `QP_LOW` 32 while limited (nvh264enc
   `rc-mode=constqp`/`qp-const`, vaapih264enc `rate-control=cqp`/`init-qp`), switched while the encoder runs with a key
   frame (`setQuality`). Untested: no GPU here.
@@ -401,7 +426,8 @@ data message handed to the socket at a time and `bufferedAmount` under 64 KB; in
 allows it):
 
 1. Control messages first, always, all of them.
-2. Data items (patches and video frames) by **deficit round-robin between the two classes, weighted by bytes**:
+2. Data items (patches and video frames) by **deficit round-robin between the two classes, weighted by bytes** (since
+   item 5b phase 3 a third tier below them, settling, with a third of the streaming quantum):
    - Each class keeps a deficit counter (bytes). When a class's turn comes, it adds its quantum: normal
      `3 × DRR_QUANTUM`, streaming `1 × DRR_QUANTUM`, with `DRR_QUANTUM` = 16 KB. It then sends items while the next
      item's size is at most its deficit, subtracting each item's size. Then the other class's turn.
@@ -1158,7 +1184,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
    - Not verified by ear (needs the user): sound quality, clicks at underruns, drift over a long listen, recovery after
      a network hiccup, real apps (Firefox/Chrome video), and Chrome's behavior on a machine with real audio output.
 
-### Next: QOI patches and lossy encoding (phases 1 and 2 done)
+### Done: QOI patches and lossy encoding (phases 1 to 3)
 
 5b. **QOI instead of PNG for patches** (user's request, 2026-10-05; the design is in [Encoding
     policy](#qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)). Today every patch is a PNG from our
@@ -1233,7 +1259,25 @@ single large item never stalls the link. Initial window before any estimate: 64 
        - Not verified: the GPU half (no GPU here: whether nvh264enc and vaapih264enc take a QP change while playing, and
          the QPs' look); a real slow link (only the simulated one); real apps with transparency as JPEG with alpha (only
          the page-made test images).
-    4. **Phase 3: fast mode for bursts, and settling at the lowest priority** (user's design, agreed 2026-10-05).
+    4. **Done.** **Phase 3: fast mode for bursts, and settling at the lowest priority** (user's design, agreed
+       2026-10-05).
+       - Status (built 2026-10-05, no protocol change; details under "As built" in [Encoding
+         policy](#qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)): as designed below, plus (user's
+         follow-up) frame callbacks no longer wait behind settling (`readyForFrame`), and never more than 100 ms
+         (`MIN_FRAME_RATE` 10: a slow repaint may tear, the app stays responsive). The bytes-per-pixel estimate moved
+         to `SurfaceEncoder`; `BandwidthMonitor` lost its
+         lossless-demand measure and takes the predicted backlog; `EncodingSink` gained `linkBandwidth` and
+         `queuedBytes`, `sendPatch` takes a tier; the transport's patch messages carry `tier`.
+       - Tests: compositor-proxy 199 (the minimum frame rate; burst promotion order and its first patches lossy, none before the link was
+         limited, the estimate, settling at the lowest tier while still limited, pre-empted by damage, re-settling
+         damage that went lossy, demotion only once settled, the 9 : 3 : 1 tiers and a settling patch waiting in its
+         damage's tier, the monitor's backlog trigger, exit and remembered bandwidth). `lossy.sh` (about 17 s) also
+         runs the busy client's new page mode (1200x660 of text-like glyphs on a faintly textured background): after
+         the link was limited once, its first paint is a burst (JPEG), settled and demoted; scrolled, it is promoted
+         again and JPEG arrives about 130 ms after the first scroll frame (polling included); stopped, it settles,
+         is demoted, and the viewer shows its last frame exactly. `test-gateway.sh`: about 27 s.
+       - Tuning knobs: `BURST_MS` (200), `MIN_FRAME_RATE` (10), the settle quantum (a third of streaming's).
+       - Not verified: real apps (foot, a browser) scrolling on a real slow link; with a GPU (a burst starts video).
        The problem: scrolling a static page on a slow link is very slow for the first seconds. The surface is normal
        (lossless, medium priority) until the relentless measure promotes it (1.5–2.25 s), and the link only counts as
        bandwidth-limited after two held-back periods. Then, once quiet, the lossless refresh of its lossy areas runs at
@@ -1373,7 +1417,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
 - Item 5b phase 2's video: constant QP (`QP_HIGH` 24, `QP_LOW` 32) on nvh264enc and vaapih264enc, and whether they take
   a QP change while playing (`setQuality`); if not, the pipelines have to be rebuilt on a change.
 - Lossy encoding on a real slow link (only the simulated `--dev-link-kbps` one is tested): when it goes lossy, how JPEG
-  at quality 70 looks, how often it flaps.
+  at quality 70 looks, how often it flaps; phase 3's bursts and settling with real apps scrolling.
 - Congestion control on real links: slow, distant (100-300 ms), Wi-Fi and mobile. Only the simulated link and
   loopback are tested.
 - Congestion control sharing a bottleneck with other traffic (a download filling the router's buffer). Not in the

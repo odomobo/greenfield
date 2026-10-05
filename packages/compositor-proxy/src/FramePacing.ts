@@ -3,10 +3,12 @@ import { performance } from 'node:perf_hooks'
 /**
  * Frame callback pacing shared by all surfaces of the session, driven by the attached viewer. No native code.
  *
- * A surface's frame callbacks are held while it has no free slot (it has as many items between capture and the socket
- * as it may), and released at the next tick of the frame clock once it has one. So an app slows down to what can be
- * sent (the transport's congestion control and the viewer's backlog decide when items go out, see ROADMAP.md). Without
- * a viewer apps are throttled.
+ * A surface's frame callbacks are held while it isn't ready for a new frame (its slots are full of damage: it has as
+ * many items between capture and the socket as it may), and released at the next tick of the frame clock once it is.
+ * So an app slows down to what can be sent (the transport's congestion control and the viewer's backlog decide when
+ * items go out, see ROADMAP.md). But never below MIN_FRAME_RATE: after MAX_FRAME_HOLD_MS the callback goes anyway, and
+ * the app's next frame is queued as damage, read when a slot frees (a slow repaint may then show parts of different
+ * frames, but the app keeps responding). Without a viewer apps are throttled.
  */
 
 /**
@@ -23,6 +25,12 @@ const DETACHED_TICK_INTERVAL = 100
  */
 export const MAX_FRAME_RATE = 30
 const MIN_TICK_INTERVAL = 1000 / MAX_FRAME_RATE
+/**
+ * Apps get frame callbacks at least this often (Hz), even while their surface isn't ready: a page that takes the link
+ * seconds to send keeps updating (scrolling, typing) meanwhile, at the cost of tearing.
+ */
+export const MIN_FRAME_RATE = 10
+export const MAX_FRAME_HOLD_MS = 1000 / MIN_FRAME_RATE
 
 /** The frame clock's interval (ms) for a viewer whose display refreshes every `refreshInterval` ms (0: unknown). */
 export function tickIntervalFor(refreshInterval: number): number {
@@ -33,7 +41,9 @@ type PendingCallback = {
   callback: (time: number) => void
   /** ms left of the minimum wait (only without a pacing viewer) */
   frameCallbackDelay: number
-  /** whether the surface has a free slot */
+  /** ms left until it goes even if the surface isn't ready (counted after the minimum wait) */
+  holdLeft: number
+  /** whether the surface is ready for a new frame */
   ready: () => boolean
 }
 
@@ -45,11 +55,14 @@ export class FrameCallbackQueue {
     return this.queue.length
   }
 
-  schedule(delay: number, ready: () => boolean, callback: (time: number) => void): void {
-    this.queue.push({ callback, frameCallbackDelay: delay, ready })
+  schedule(delay: number, ready: () => boolean, callback: (time: number) => void, maxHold = MAX_FRAME_HOLD_MS): void {
+    this.queue.push({ callback, frameCallbackDelay: delay, holdLeft: maxHold, ready })
   }
 
-  /** One tick of the frame clock: call back everything whose delay has passed and that is ready. */
+  /**
+   * One tick of the frame clock: call back everything whose delay has passed and that is ready, or has been held for
+   * its longest hold.
+   */
   tick(tickInterval: number, time: number): void {
     if (this.queue.length === 0) {
       return
@@ -58,8 +71,12 @@ export class FrameCallbackQueue {
     this.queue = []
     const waiting: PendingCallback[] = []
     for (const pending of current) {
-      pending.frameCallbackDelay -= tickInterval
-      if (pending.frameCallbackDelay <= 0 && pending.ready()) {
+      if (pending.frameCallbackDelay > 0) {
+        pending.frameCallbackDelay -= tickInterval
+      } else {
+        pending.holdLeft -= tickInterval
+      }
+      if (pending.frameCallbackDelay <= 0 && (pending.ready() || pending.holdLeft <= 0)) {
         pending.callback(time)
       } else {
         waiting.push(pending)
@@ -121,8 +138,8 @@ function viewerIsPacing(): boolean {
 }
 
 /**
- * Call back on a later tick of the frame clock once `ready()` (the surface has a free slot) is true; throttled without
- * a pacing viewer. The callback gets the frame time (ms).
+ * Call back on a later tick of the frame clock once `ready()` (the surface is ready for a new frame) is true, or after
+ * MAX_FRAME_HOLD_MS anyway; throttled without a pacing viewer. The callback gets the frame time (ms).
  */
 export function scheduleFrameCallback(ready: () => boolean, callback: (time: number) => void): void {
   callbacks.schedule(viewerIsPacing() ? 0 : DETACHED_FRAME_CALLBACK_DELAY, ready, callback)

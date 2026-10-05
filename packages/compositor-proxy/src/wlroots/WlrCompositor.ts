@@ -152,8 +152,10 @@ type Window = {
 const inactiveSink: EncodingSink = {
   active: false,
   bandwidthLimited: false,
+  linkBandwidth: undefined,
+  queuedBytes: () => 0,
   sendFrame: (_surface, _frame, _class, done) => done(false),
-  sendPatch: (_surface, _patch, _class, done) => done(false),
+  sendPatch: (_surface, _patch, _tier, done) => done(false),
   requireKeyFrame: () => undefined,
   dropPatches: () => undefined,
 }
@@ -203,8 +205,12 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       get bandwidthLimited() {
         return currentSink().bandwidthLimited
       },
+      get linkBandwidth() {
+        return currentSink().linkBandwidth
+      },
+      queuedBytes: (surface) => this.sink.queuedBytes(surface),
       sendFrame: (surface, frame, surfaceClass, done) => this.sink.sendFrame(surface, frame, surfaceClass, done),
-      sendPatch: (surface, patch, surfaceClass, done) => this.sink.sendPatch(surface, patch, surfaceClass, done),
+      sendPatch: (surface, patch, tier, done) => this.sink.sendPatch(surface, patch, tier, done),
       requireKeyFrame: (surface) => this.sink.requireKeyFrame(surface),
       dropPatches: (surface) => this.sink.dropPatches(surface),
     }
@@ -249,6 +255,10 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   setFrameSink(sink: EncodingSink): void {
     this.sink = sink
+  }
+
+  unencodedBytes(): number {
+    return this.encoding.unencodedBytes
   }
 
   requestKeyFrame(key: string): void {
@@ -543,9 +553,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
     if (hasFrameCallbacks && !surface.frameScheduled) {
       surface.frameScheduled = true
-      // held while the surface has no free slot: an app slows down to what can be sent
+      // held while the surface's slots are full of damage: an app slows down to what can be sent (but see MIN_FRAME_RATE)
       scheduleFrameCallback(
-        () => surface.encoder?.hasFreeSlot ?? true,
+        () => surface.encoder?.readyForFrame ?? true,
         (time) => {
           surface.frameScheduled = false
           if (this.surfaces.get(sid) === surface) {

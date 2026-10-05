@@ -93,14 +93,14 @@ test('frames and patches of a surface are sent in order', () => {
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 's', frame: h264Frame(2, false) })
   transport.send({
     priority: 'patch',
-    surfaceClass: 'normal',
+    tier: 'normal',
     surface: 's',
     patch: patch(3),
     done: (sent) => done.push(sent),
   })
   transport.send({
     priority: 'patch',
-    surfaceClass: 'normal',
+    tier: 'normal',
     surface: 's',
     patch: patch(4),
     done: (sent) => done.push(sent),
@@ -115,14 +115,14 @@ test('a key frame supersedes unsent patches', () => {
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 'other', frame: h264Frame(9, true) }) // occupies the socket
   transport.send({
     priority: 'patch',
-    surfaceClass: 'normal',
+    tier: 'normal',
     surface: 's',
     patch: patch(1),
     done: (sent) => done.push(sent),
   })
   transport.send({
     priority: 'patch',
-    surfaceClass: 'normal',
+    tier: 'normal',
     surface: 's',
     patch: patch(2),
     done: (sent) => done.push(sent),
@@ -139,7 +139,7 @@ test('dropPatches keeps video, requireKeyFrame drops everything', () => {
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 's', frame: h264Frame(1, true) })
   transport.send({
     priority: 'patch',
-    surfaceClass: 'normal',
+    tier: 'normal',
     surface: 's',
     patch: patch(2),
     done: (sent) => done.push(sent),
@@ -151,7 +151,7 @@ test('dropPatches keeps video, requireKeyFrame drops everything', () => {
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 'other', frame: h264Frame(10, false) })
   transport.send({
     priority: 'patch',
-    surfaceClass: 'normal',
+    tier: 'normal',
     surface: 's',
     patch: patch(3),
     done: (sent) => done.push(sent),
@@ -168,7 +168,7 @@ test('closing reports unsent patches as dropped', () => {
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 'other', frame: h264Frame(9, true) })
   transport.send({
     priority: 'patch',
-    surfaceClass: 'normal',
+    tier: 'normal',
     surface: 's',
     patch: patch(1),
     done: (sent) => done.push(sent),
@@ -181,7 +181,7 @@ test('patches are never coalesced, deltas beyond the limit resync', () => {
   const { transport, delivered, keyFramesNeeded } = setup()
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 'other', frame: h264Frame(9, true) })
   for (let i = 1; i <= 10; i++) {
-    transport.send({ priority: 'patch', surfaceClass: 'normal', surface: 'p', patch: patch(i) })
+    transport.send({ priority: 'patch', tier: 'normal', surface: 'p', patch: patch(i) })
   }
   transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 'v', frame: h264Frame(20, true) })
   for (let i = 21; i <= 24; i++) {
@@ -201,7 +201,7 @@ test('frames held back by a full socket go out once queued control messages are 
   // a burst of control messages (as on attach) fills the socket, with no frame in flight
   ws.bufferedAmount = 1024 * 1024
   transport.send({ priority: 'control', message: { type: 'scene' } })
-  transport.send({ priority: 'patch', surfaceClass: 'normal', surface: 's', patch: patch(1) })
+  transport.send({ priority: 'patch', tier: 'normal', surface: 's', patch: patch(1) })
   assert.equal(ws.sent.length, 1, 'only the control message is sent while the socket is full')
   // the socket drains; nothing else is sent, the control message's completion must restart the frames
   ws.bufferedAmount = 0
