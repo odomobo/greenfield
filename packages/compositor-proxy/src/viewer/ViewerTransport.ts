@@ -9,7 +9,9 @@ import { CongestionController } from './congestion.js'
 /** What the transport needs of a congestion controller (tests pass one that never holds anything back). */
 export type Congestion = Pick<CongestionController, 'canSend' | 'nextSendTime' | 'onSend' | 'onAck' | 'setDataWaiting'>
 import {
+  AudioPacket,
   decodeViewerEnvelope,
+  encodeAudio,
   encodeControl,
   encodeFrame,
   encodePatch,
@@ -24,6 +26,11 @@ export type ControlMessage = { type: string; [key: string]: any }
 
 export type OutgoingMessage =
   | { readonly priority: 'control'; readonly message: ControlMessage }
+  /**
+   * An audio packet (see the AUDIO envelope): control priority, sent right away, but dropped instead of queued when
+   * the connection's send buffer is full.
+   */
+  | { readonly priority: 'audio'; readonly packet: AudioPacket }
   /**
    * Video frames and patches carry their surface's priority class, and `done`, which is called once: sent true when
    * handed to the socket, false when dropped unsent.
@@ -49,7 +56,9 @@ export type OutgoingMessage =
  */
 export interface ViewerTransport {
   /**
-   * Queue a message. Control messages are always sent before pending frames and patches, never held back. Of those,
+   * Queue a message. Control messages are always sent before pending frames and patches, never held back; audio
+   * packets are written to the socket at once too (not subject to the congestion controller), unless the socket's
+   * buffer is over AUDIO_BUFFERED_LIMIT, then they're dropped. Of those,
    * the two priority classes share the link by byte-weighted deficit round-robin (normal 3 : streaming 1,
    * work-conserving), surfaces of a class take turns, one item per visit, as fast as the congestion controller lets
    * them go (see congestion.ts: pacing, in-flight limit, the viewer's backlog). Video frames and patches of a surface are sent in order. A video key frame replaces everything unsent of its surface (it covers the whole surface),
@@ -91,6 +100,9 @@ const UNIX_SEND_BUFFER_BYTES = 32 * 1024
 // A safety limit under the congestion controller: never hand a data item to the socket while more than this is still
 // buffered in user space (with the controller working, it shouldn't be reached).
 const SEND_BUFFERED_LIMIT = 256 * 1024
+// Audio packets are dropped instead of sent while more than this is buffered for the socket (about 9 s of audio at
+// 112 kbps behind video data): audio that late is useless, and it must never pile up.
+const AUDIO_BUFFERED_LIMIT = 128 * 1024
 // Deficit round-robin between the priority classes: each turn a class may send up to its quantum (plus what it carried
 // over) in bytes. Normal surfaces get 3 times the share of streaming ones, and the other class gets all of the link
 // when one has nothing waiting.
@@ -162,6 +174,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
   private pacingTimer?: NodeJS.Timeout
   private pacingAt = Infinity
   private safetyLimitLogged = false
+  private audioDropLogged = false
   private _closed = false
 
   constructor(
@@ -210,9 +223,13 @@ export class WebSocketViewerTransport implements ViewerTransport {
 
   send(message: OutgoingMessage): void {
     if (this._closed) {
-      if (message.priority !== 'control') {
+      if (message.priority === 'frame' || message.priority === 'patch') {
         message.done?.(false)
       }
+      return
+    }
+    if (message.priority === 'audio') {
+      this.sendAudio(message.packet)
       return
     }
     if (message.priority === 'control') {
@@ -223,6 +240,22 @@ export class WebSocketViewerTransport implements ViewerTransport {
       this.queuePatch(message.surface, encodePatch(message.surface, message.patch), message.surfaceClass, message.done)
     }
     this.pump()
+  }
+
+  private sendAudio(packet: AudioPacket) {
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      return
+    }
+    if (this.ws.bufferedAmount > AUDIO_BUFFERED_LIMIT) {
+      if (!this.audioDropLogged) {
+        this.audioDropLogged = true
+        logger.info(`More than ${AUDIO_BUFFERED_LIMIT} bytes buffered for the viewer, dropping audio packets.`)
+      }
+      return
+    }
+    // after queued control messages (normally none wait), before any data item
+    this.flushControl()
+    this.ws.send(encodeAudio(packet), { binary: true })
   }
 
   close(code: number, reason: string): void {
@@ -396,9 +429,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
     // Control messages always go first, they are small, and the congestion controller never holds them back. A burst
     // of them (e.g. on attach) can fill the socket past SEND_BUFFERED_LIMIT, so once one is written, check again for
     // data to send.
-    while (this.controlQueue.length) {
-      this.ws.send(this.controlQueue.shift()!, { binary: true }, () => this.pump())
-    }
+    this.flushControl()
 
     this.congestion.setDataWaiting(this.pendingFrames.size > 0)
     for (;;) {
@@ -445,6 +476,12 @@ export class WebSocketViewerTransport implements ViewerTransport {
       })
     }
     this.congestion.setDataWaiting(this.pendingFrames.size > 0)
+  }
+
+  private flushControl() {
+    while (this.controlQueue.length) {
+      this.ws.send(this.controlQueue.shift()!, { binary: true }, () => this.pump())
+    }
   }
 
   private schedulePacing(at: number, now: number) {

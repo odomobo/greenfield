@@ -2,7 +2,7 @@ import { WebSocket } from 'ws'
 import { createLogger } from '../Logger.js'
 import { onViewerFeedback, setViewerAttached } from '../FramePacing.js'
 import type { EncodingSink } from '../encoding/SurfaceEncoder.js'
-import { CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
+import { AudioPacket, CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
 import { ControlMessage, ViewerTransport, WebSocketViewerTransport } from './ViewerTransport.js'
 
 const logger = createLogger('viewer-host')
@@ -50,12 +50,25 @@ export interface ShellEndpoint {
 }
 
 /**
+ * The session's audio (its PipeWire and the capture of its output), provided by the session process. Gets the
+ * viewer's `audio.*` messages. Sends control messages (`audio.state`) and, while the viewer wants audio, packets.
+ */
+export interface AudioEndpoint {
+  attach(send: (message: ControlMessage) => void, sendAudio: (packet: AudioPacket) => void): void
+
+  detach(): void
+
+  handleMessage(message: ControlMessage): void
+}
+
+/**
  * Owns the (at most one) viewer connection of this session. A new viewer takes over from the previous one. The
  * session, its compositor and apps live on without a viewer.
  */
 export class ViewerHost {
   private transport?: ViewerTransport
   private shellEndpoint?: ShellEndpoint
+  private audioEndpoint?: AudioEndpoint
 
   constructor(
     private readonly scene: WindowSceneEndpoint,
@@ -93,6 +106,21 @@ export class ViewerHost {
     }
   }
 
+  set audio(audio: AudioEndpoint) {
+    this.audioEndpoint = audio
+    const transport = this.transport
+    if (transport) {
+      this.attachAudio(audio, transport)
+    }
+  }
+
+  private attachAudio(audio: AudioEndpoint, transport: ViewerTransport) {
+    audio.attach(
+      (message) => transport.send({ priority: 'control', message }),
+      (packet) => transport.send({ priority: 'audio', packet }),
+    )
+  }
+
   attach(ws: WebSocket): void {
     const previous = this.transport
     if (previous) {
@@ -104,6 +132,7 @@ export class ViewerHost {
       previous.close(CLOSE_TAKEN_OVER, 'Session taken over by another viewer.')
       this.scene.detach()
       this.shellEndpoint?.detach()
+      this.audioEndpoint?.detach()
     }
 
     const transport = new WebSocketViewerTransport(ws)
@@ -120,6 +149,7 @@ export class ViewerHost {
       setViewerAttached(false)
       this.scene.detach()
       this.shellEndpoint?.detach()
+      this.audioEndpoint?.detach()
     }
 
     logger.info('Viewer attached.')
@@ -130,6 +160,9 @@ export class ViewerHost {
     })
     this.scene.attach((message) => transport.send({ priority: 'control', message }))
     this.shellEndpoint?.attach((message) => transport.send({ priority: 'control', message }))
+    if (this.audioEndpoint) {
+      this.attachAudio(this.audioEndpoint, transport)
+    }
     // the viewer has nothing yet, every surface starts with its whole current content (key frame or patches)
     this.content.requestKeyFramesForAllSurfaces()
   }
@@ -149,6 +182,8 @@ export class ViewerHost {
         try {
           if (message.type.startsWith('shell.')) {
             this.shellEndpoint?.handleMessage(message)
+          } else if (message.type.startsWith('audio.')) {
+            this.audioEndpoint?.handleMessage(message)
           } else {
             this.scene.handleMessage(message)
           }
