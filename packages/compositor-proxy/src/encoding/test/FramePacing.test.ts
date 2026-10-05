@@ -42,6 +42,20 @@ test('a surface that stays busy still gets a frame callback at least 10 times a 
   assert.equal(called.length, 2)
 })
 
+test('a surface streamed as video is never forced: its callback waits until it is ready', () => {
+  const queue = new FrameCallbackQueue()
+  const called: number[] = []
+  let ready = false
+  queue.schedule(0, () => ready, (time) => called.push(time), () => false)
+  for (let time = 25; time <= 4 * MAX_FRAME_HOLD_MS; time += 25) {
+    queue.tick(25, time)
+  }
+  assert.equal(called.length, 0)
+  ready = true
+  queue.tick(25, 1000)
+  assert.deepEqual(called, [1000])
+})
+
 test('the viewer decode time delays the callback even when a slot is free', () => {
   const queue = new FrameCallbackQueue()
   const called: number[] = []

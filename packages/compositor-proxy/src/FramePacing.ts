@@ -6,9 +6,10 @@ import { performance } from 'node:perf_hooks'
  * A surface's frame callbacks are held while it isn't ready for a new frame (its slots are full of damage: it has as
  * many items between capture and the socket as it may), and released at the next tick of the frame clock once it is.
  * So an app slows down to what can be sent (the transport's congestion control and the viewer's backlog decide when
- * items go out, see ROADMAP.md). But never below MIN_FRAME_RATE: after MAX_FRAME_HOLD_MS the callback goes anyway, and
- * the app's next frame is queued as damage, read when a slot frees (a slow repaint may then show parts of different
- * frames, but the app keeps responding). Without a viewer apps are throttled.
+ * items go out, see ROADMAP.md). But a surface sent as patches never below MIN_FRAME_RATE: after MAX_FRAME_HOLD_MS the
+ * callback goes anyway, and the app's next frame is queued as damage, read when a slot frees (a slow repaint may then
+ * show parts of different frames, but the app keeps responding). Not one streamed as video: a video frame is the whole
+ * surface at once, it never shows a partial repaint to get ahead of. Without a viewer apps are throttled.
  */
 
 /**
@@ -45,6 +46,8 @@ type PendingCallback = {
   holdLeft: number
   /** whether the surface is ready for a new frame */
   ready: () => boolean
+  /** whether it may go after its longest hold even if not ready */
+  mayForce: () => boolean
 }
 
 /** The frame callbacks waiting for a tick of the frame clock. */
@@ -55,13 +58,19 @@ export class FrameCallbackQueue {
     return this.queue.length
   }
 
-  schedule(delay: number, ready: () => boolean, callback: (time: number) => void, maxHold = MAX_FRAME_HOLD_MS): void {
-    this.queue.push({ callback, frameCallbackDelay: delay, holdLeft: maxHold, ready })
+  schedule(
+    delay: number,
+    ready: () => boolean,
+    callback: (time: number) => void,
+    mayForce: () => boolean = () => true,
+    maxHold = MAX_FRAME_HOLD_MS,
+  ): void {
+    this.queue.push({ callback, frameCallbackDelay: delay, holdLeft: maxHold, ready, mayForce })
   }
 
   /**
    * One tick of the frame clock: call back everything whose delay has passed and that is ready, or has been held for
-   * its longest hold.
+   * its longest hold and may be forced.
    */
   tick(tickInterval: number, time: number): void {
     if (this.queue.length === 0) {
@@ -76,7 +85,7 @@ export class FrameCallbackQueue {
       } else {
         pending.holdLeft -= tickInterval
       }
-      if (pending.frameCallbackDelay <= 0 && (pending.ready() || pending.holdLeft <= 0)) {
+      if (pending.frameCallbackDelay <= 0 && (pending.ready() || (pending.holdLeft <= 0 && pending.mayForce()))) {
         pending.callback(time)
       } else {
         waiting.push(pending)
@@ -139,8 +148,13 @@ function viewerIsPacing(): boolean {
 
 /**
  * Call back on a later tick of the frame clock once `ready()` (the surface is ready for a new frame) is true, or after
- * MAX_FRAME_HOLD_MS anyway; throttled without a pacing viewer. The callback gets the frame time (ms).
+ * MAX_FRAME_HOLD_MS anyway if `mayForce()` (the surface isn't streamed as video); throttled without a pacing viewer.
+ * The callback gets the frame time (ms).
  */
-export function scheduleFrameCallback(ready: () => boolean, callback: (time: number) => void): void {
-  callbacks.schedule(viewerIsPacing() ? 0 : DETACHED_FRAME_CALLBACK_DELAY, ready, callback)
+export function scheduleFrameCallback(
+  ready: () => boolean,
+  callback: (time: number) => void,
+  mayForce: () => boolean = () => true,
+): void {
+  callbacks.schedule(viewerIsPacing() ? 0 : DETACHED_FRAME_CALLBACK_DELAY, ready, callback, mayForce)
 }

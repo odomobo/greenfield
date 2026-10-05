@@ -32,6 +32,8 @@ export type GatewayConfig = {
   timeScale: number
   /** dev auth only: sessions send to their viewer through a simulated link of this many kbit/s (0: none) */
   linkKbps: number
+  /** dev auth only: the order surfaces send their queued patches in (an experiment) */
+  patchOrder: 'oldest' | 'random'
 }
 
 const usage = `Usage: gateway [options]
@@ -54,6 +56,8 @@ const usage = `Usage: gateway [options]
   --dev-time-scale <n>       with --dev-auth only: divide the failed-sign-in delay and the presence timeouts by n (tests)
   --dev-link-kbps <n>        with --dev-auth only: sessions send to their viewer through a simulated link of n kbit/s
                              (a FIFO that drains at that rate), to try the encoding on a slow link (tests)
+  --dev-patch-order <order>  with --dev-auth only: oldest (default) or random, the order a window's queued patches
+                             are sent in (an experiment: what a slow repaint looks like in random order)
 `
 
 function fail(message: string): never {
@@ -106,6 +110,7 @@ export function parseConfig(argv: string[]): GatewayConfig {
         'dev-auth': { type: 'boolean', default: false },
         'dev-time-scale': { type: 'string', default: '1' },
         'dev-link-kbps': { type: 'string', default: '0' },
+        'dev-patch-order': { type: 'string', default: 'oldest' },
       },
     }).values
   } catch (e: any) {
@@ -146,6 +151,13 @@ export function parseConfig(argv: string[]): GatewayConfig {
   }
   if (linkKbps !== 0 && !values['dev-auth']) {
     fail('--dev-link-kbps is only allowed together with --dev-auth')
+  }
+  const patchOrder = values['dev-patch-order']
+  if (patchOrder !== 'oldest' && patchOrder !== 'random') {
+    fail('invalid --dev-patch-order (oldest or random)')
+  }
+  if (patchOrder !== 'oldest' && !values['dev-auth']) {
+    fail('--dev-patch-order is only allowed together with --dev-auth')
   }
   const authMode: AuthMode = values['dev-auth'] ? 'dev' : 'pam'
   let devUser: string | undefined
@@ -191,6 +203,7 @@ export function parseConfig(argv: string[]): GatewayConfig {
     authMode,
     timeScale,
     linkKbps,
+    patchOrder,
     devUser,
     devPassword,
     webUser: values['web-user']!,

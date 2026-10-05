@@ -363,7 +363,11 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
   - **Minimum frame rate** (`FramePacing.ts`, `MIN_FRAME_RATE` 10): a frame callback held because the surface isn't
     ready goes anyway after `MAX_FRAME_HOLD_MS` (100 ms). The app's next frame is queued as damage and read when a
     slot frees, so a slow repaint may show parts of different frames (tearing), but the app keeps responding while a
-    page takes the link seconds to send.
+    page takes the link seconds to send. Not for a surface streamed as video: a video frame is the whole surface, there
+    is no partial repaint to get ahead of, so its callbacks wait until it's ready.
+  - Experiment (dev only): `--dev-patch-order random` (with `--dev-auth`) makes surfaces capture their queued patches
+    (damage and settling) in random order instead of oldest first, to see what a slow repaint looks like that way.
+    Still correct: queued rectangles are disjoint and read the latest pixels when captured.
   - **Demotion** only once the surface has no damage left and nothing lossy (a video surface: no damage; stopping the
     video sends a crisp image), and its last period was backlogged under 15% (`RelentlessMeter`'s `canDemote`), at a
     period end or any time after.

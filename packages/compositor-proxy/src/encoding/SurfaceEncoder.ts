@@ -47,6 +47,13 @@ export type BufferInfo = {
   height: number
 }
 
+/**
+ * The order a surface's queued patches (damage, and settling) are captured in: oldest first, or (an experiment, the
+ * gateway's --dev-patch-order) at random. Either is correct: queued rectangles are disjoint and read the latest pixels
+ * when captured, so only the order the viewer sees a repaint arrive in changes.
+ */
+export type PatchOrder = 'oldest' | 'random'
+
 /** Video has a fixed quality target (and a variable bitrate): higher, or lower while bandwidth is short. */
 export type VideoQuality = 'high' | 'low'
 
@@ -438,18 +445,26 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       return undefined
     }
     while (this.queued.length) {
-      const captured = this.capture(this.queued.shift()!, false)
+      const captured = this.capture(this.takeNext(this.queued), false)
       if (captured !== null) {
         return captured
       }
     }
     while (this.mayCaptureSettling) {
-      const captured = this.capture(this.settleQueue.shift()!, true)
+      const captured = this.capture(this.takeNext(this.settleQueue), true)
       if (captured !== null) {
         return captured
       }
     }
     return undefined
+  }
+
+  /** Take the next rectangle of a queue (non-empty), in the context's patch order. */
+  private takeNext(queue: Rect[]): Rect {
+    if (this.context.patchOrder === 'random') {
+      return queue.splice(Math.floor(Math.random() * queue.length), 1)[0]
+    }
+    return queue.shift()!
   }
 
   /** Read a patch's pixels: undefined if it can't be (and none can), null if the rectangle is gone. */
@@ -939,6 +954,8 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
   readonly pump: PatchPump
   private ticker?: ReturnType<typeof setInterval>
   private checkingBurst = false
+  /** development only: the order surfaces capture their queued patches in */
+  patchOrder: PatchOrder = 'oldest'
 
   constructor(
     readonly sink: EncodingSink,

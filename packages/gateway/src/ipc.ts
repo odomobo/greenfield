@@ -81,4 +81,6 @@ export type SessionStart = {
   timeScale: number
   /** test only (see --dev-link-kbps): the simulated link to the viewer in kbit/s; 0 in production */
   linkKbps: number
+  /** test only (see --dev-patch-order): 'oldest' in production */
+  patchOrder: 'oldest' | 'random'
 }

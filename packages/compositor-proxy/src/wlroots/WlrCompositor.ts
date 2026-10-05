@@ -7,7 +7,14 @@ import type * as WlrCoreAddon from '../addons/wlr-core-addon'
 import { createLogger } from '../Logger.js'
 import { scheduleFrameCallback } from '../FramePacing.js'
 import { EncoderPool } from '../encoding/EncoderPool.js'
-import { EncodingContext, EncodingSink, SurfaceEncoder, SurfaceHost, VideoQuality } from '../encoding/SurfaceEncoder.js'
+import {
+  EncodingContext,
+  EncodingSink,
+  PatchOrder,
+  SurfaceEncoder,
+  SurfaceHost,
+  VideoQuality,
+} from '../encoding/SurfaceEncoder.js'
 import { encodePng } from '../encoding/png.js'
 import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool } from '../encoding/PatchWorkerPool.js'
 import { Rect } from '../encoding/region.js'
@@ -191,7 +198,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private constraint?: { sid: number; confined: boolean }
 
   constructor(
-    config: { h264Encoder?: H264Encoder; videoStreams: number },
+    config: { h264Encoder?: H264Encoder; videoStreams: number; patchOrder?: PatchOrder },
     private readonly wlr: WlrNative,
     watchFd: FdWatcher,
     /** where files dropped from the user's computer are saved */
@@ -226,6 +233,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     const streamingPool = new PatchWorkerPool(logger)
     const normalPool = new PatchWorkerPool(logger, NORMAL_ENCODE_WORKERS, NORMAL_ENCODE_NICE)
     this.encoding = new EncodingContext(forwardingSink, pool, { normal: (rgba, width, height, opaque) => normalPool.encode(rgba, width, height, opaque), streaming: streamingPool }, logger)
+    this.encoding.patchOrder = config.patchOrder ?? 'oldest'
     this.encoding.startTicking()
 
     this.clipboard = new Clipboard((text) => this.wlr.setClipboardText(text))
@@ -553,7 +561,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
     if (hasFrameCallbacks && !surface.frameScheduled) {
       surface.frameScheduled = true
-      // held while the surface's slots are full of damage: an app slows down to what can be sent (but see MIN_FRAME_RATE)
+      // held while the surface's slots are full of damage: an app slows down to what can be sent (but see MIN_FRAME_RATE;
+      // not for video, a whole frame at a time)
       scheduleFrameCallback(
         () => surface.encoder?.readyForFrame ?? true,
         (time) => {
@@ -562,6 +571,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
             this.wlr.sendFrameDone(sid, time)
           }
         },
+        () => !surface.encoder?.usesVideo,
       )
     }
     this.scheduleScene()
@@ -1224,6 +1234,8 @@ export function startWlrootsCompositor(config: {
   videoStreams?: number
   /** development only: a simulated slow link to the viewer (see SimulatedLink) */
   link?: SimulatedLink
+  /** development only: the order a surface's queued patches are captured in (see PatchOrder) */
+  patchOrder?: PatchOrder
 }): {
   viewerHost: ViewerHost
   compositor: WlrCompositor
@@ -1235,7 +1247,7 @@ export function startWlrootsCompositor(config: {
   const { startPoll } = require('../addons/proxy-poll-addon') as typeof import('../addons/proxy-poll-addon')
   /* eslint-enable @typescript-eslint/no-var-requires */
   const compositor = new WlrCompositor(
-    { h264Encoder: config.h264Encoder, videoStreams: config.videoStreams ?? 4 },
+    { h264Encoder: config.h264Encoder, videoStreams: config.videoStreams ?? 4, patchOrder: config.patchOrder },
     native,
     (fd, readable) => {
       startPoll(fd, readable)

@@ -887,6 +887,28 @@ test('a streaming surface is demoted only once it is fully settled', async () =>
   assert.equal(encoder.surfaceClass, 'normal')
 })
 
+test('random patch order: every queued rectangle is still sent once, just not oldest first', async () => {
+  const env = setup(0)
+  env.context.patchOrder = 'random'
+  env.holdNormal(true)
+  const { encoder, host } = env.surface('a', 1000, 1000)
+  await encoder.commit(full(host))
+  const planned = encoder.queuedPatches.length + SURFACE_SLOTS
+  for (let i = 0; i < 200 && env.normalCalls.length > 0; i++) {
+    env.normalCalls.shift()!.resolve()
+    await settle()
+  }
+  const rects = env.sink.patches.map(({ patch }) => patch.rect)
+  assert.equal(rects.length, planned)
+  assert.equal(area(rects), 1000 * 1000)
+  const ys = rects.map((rect) => rect.y * 1000 + rect.x)
+  assert.notDeepEqual(
+    ys,
+    [...ys].sort((a, b) => a - b),
+    'not in order (could be by chance with 16 patches: 1 in 16!)',
+  )
+})
+
 test("a surface's lossless bytes per pixel: measured on all its lossless patches", async () => {
   const env = setup(0)
   const { encoder, host } = env.surface('a', 100, 100)
