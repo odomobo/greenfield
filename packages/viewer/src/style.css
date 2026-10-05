@@ -274,8 +274,10 @@
   display: none;
 }
 
+/* the user on the left, the session's name centered, the session menu on the right */
 .apps-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr);
   align-items: center;
   gap: 8px;
 }
@@ -284,8 +286,12 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: 40%;
   min-width: 0;
+  justify-self: start;
+}
+
+#session-menu-button {
+  justify-self: end;
 }
 
 .apps-avatar {
@@ -308,12 +314,38 @@
 }
 
 .apps-session {
-  flex: 1;
   min-width: 0;
+  max-width: 300px;
 }
 
+/*
+ * The name's field is as wide as its text (hovered, focused or not), so it stays centered while it's edited: the field
+ * and a hidden copy of the text (the label's data-value, kept up to date by session-name.tsx) share one grid cell,
+ * and the copy sets the width. Padding on both sides alike (the pencil sits in the right one) keeps the text centered.
+ */
 .apps-session .session-name {
-  margin-left: 0;
+  display: grid;
+  margin: 0;
+}
+
+.apps-session .session-name::after {
+  content: attr(data-value) ' ';
+  grid-area: 1 / 1;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  white-space: pre;
+  padding: 0 28px;
+  border: 1px solid transparent;
+  font-weight: 600;
+}
+
+.apps-session .session-name input[type='text'] {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-width: 0;
+  padding: 0 28px;
+  text-align: center;
 }
 
 #apps-menu .error {
@@ -745,7 +777,7 @@
   transform-origin: 0 0;
   color: var(--color-frame-text-inactive);
   font-family: var(--font-family);
-  font-size: var(--font-size-small);
+  font-size: var(--font-size);
   line-height: 1;
   /* the title bar's top corners are rounded (not when maximized): the border and the shadow follow them */
   border-radius: var(--radius-frame) var(--radius-frame) 0 0;
@@ -800,24 +832,25 @@
   background: var(--color-frame);
 }
 
+/* centered in a square at the left, like the buttons on the right */
 #output .frame-icon {
   flex: none;
   display: inline-flex;
-  width: 16px;
-  height: 16px;
-  margin-left: 10px;
+  width: 20px;
+  height: 20px;
+  margin-left: calc((var(--frame-title-height) - 20px) / 2);
 }
 
 #output .frame-icon img,
 #output .frame-icon svg {
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
 }
 
 #output .frame-text {
   flex: 1;
   min-width: 0;
-  margin: 0 8px;
+  margin: 0 10px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;

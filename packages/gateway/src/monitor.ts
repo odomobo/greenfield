@@ -387,14 +387,14 @@ export class Monitor {
     return [...this.sessions.values()].filter((session) => session.uid === uid && !session.ending)
   }
 
-  /** "Session N" with the lowest N none of the user's sessions is called, so names don't shift when one ends. */
+  /** "Nebula N" with the lowest N none of the user's sessions is called, so names don't shift when one ends. */
   private defaultSessionName(uid: number): string {
     const taken = new Set(this.userSessions(uid).map((session) => session.name))
     let n = 1
-    while (taken.has(`Session ${n}`)) {
+    while (taken.has(`Nebula ${n}`)) {
       n++
     }
-    return `Session ${n}`
+    return `Nebula ${n}`
   }
 
   private shuttingDown = false

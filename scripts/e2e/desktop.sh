@@ -149,7 +149,7 @@ click_element '#apps-button'
 wait_for "() => $(visible apps-menu) && !!document.querySelector('.app-row[data-app=\"$TEST_APP\"]')" "the test app in the Apps menu"
 [ "$(pw_eval "() => document.activeElement.id")" = '"apps-search"' ] || fail "the search field doesn't have the keyboard"
 [ "$(pw_eval "() => document.querySelector('.apps-username').textContent")" = "\"$ME\"" ] || fail "the user isn't shown"
-[ "$(pw_eval "() => document.querySelector('#apps-session-name input').value")" = '"Session 1"' ] ||
+[ "$(pw_eval "() => document.querySelector('#apps-session-name input').value")" = '"Nebula 1"' ] ||
   fail "the session name isn't shown"
 # searching narrows the list
 pw_eval "() => { const i = document.getElementById('apps-search'); i.value = 'test term'; i.dispatchEvent(new Event('input')); return true }" >/dev/null

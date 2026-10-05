@@ -8,7 +8,7 @@ import type { SessionEncoder } from './encoder'
  */
 export type SessionInfo = {
   id: string
-  /** user-visible name, "Session N" until the user renames it */
+  /** user-visible name, "Nebula N" until the user renames it */
   name: string
   createdAt: number
 }

@@ -56,7 +56,7 @@ This document records the design decisions made so far and the order of the rema
 
 ## Sessions
 
-- Default name "Session N" (lowest free number). Rename by clicking the name itself, in the session list and in the
+- Default name "Nebula N" (lowest free number). Rename by clicking the name itself, in the session list and in the
   Apps menu. Both use the same click-to-edit component, which shows it is editable on hover (outline, pencil icon).
 - **Disconnect** returns to the session list; the session keeps running. **Log out** ends the session and returns to
   the sign-in page.
