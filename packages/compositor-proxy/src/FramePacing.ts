@@ -16,7 +16,18 @@ import { performance } from 'node:perf_hooks'
 const DETACHED_FRAME_CALLBACK_DELAY = 1000
 const VIEWER_FEEDBACK_TIMEOUT = 1500
 const DETACHED_TICK_INTERVAL = 100
-const DEFAULT_TICK_INTERVAL = 16.667
+/**
+ * The frame clock ticks at most this often (Hz): everything an app draws goes over the network, and 30 frames a second
+ * is enough for smooth motion, so apps aren't asked for more (moving windows, the cursor and the shell are the
+ * browser's, at the display's own rate). A viewer whose display refreshes less often slows it down to its rate.
+ */
+export const MAX_FRAME_RATE = 30
+const MIN_TICK_INTERVAL = 1000 / MAX_FRAME_RATE
+
+/** The frame clock's interval (ms) for a viewer whose display refreshes every `refreshInterval` ms (0: unknown). */
+export function tickIntervalFor(refreshInterval: number): number {
+  return Math.max(MIN_TICK_INTERVAL, refreshInterval > 0 ? refreshInterval : 0)
+}
 
 type PendingCallback = {
   callback: (time: number) => void
@@ -59,31 +70,31 @@ export class FrameCallbackQueue {
   }
 }
 
-let tickInterval = DEFAULT_TICK_INTERVAL
-let nextTickInterval = tickInterval
-let feedbackClockTimer: NodeJS.Timeout | undefined
+let tickInterval = tickIntervalFor(0)
 const callbacks = new FrameCallbackQueue()
 
-function configureFramePipelineTicks(interval: number) {
-  if (feedbackClockTimer) {
-    return
+/**
+ * The frame clock: ticks every `tickInterval` ms, scheduled against exact deadlines (timers only have whole
+ * milliseconds: an interval timer of 33.3 ms would tick every 33). A changed interval applies from the next tick; a
+ * clock that fell behind (a busy event loop) starts over from now instead of catching up with a burst of ticks.
+ */
+let nextTickAt = performance.now()
+function scheduleTick() {
+  nextTickAt += tickInterval
+  const now = performance.now()
+  if (nextTickAt < now - tickInterval) {
+    nextTickAt = now
   }
-
-  tickInterval = interval
-  feedbackClockTimer = setInterval(() => {
-    callbacks.tick(tickInterval, performance.now() >>> 0)
-
-    if (tickInterval !== nextTickInterval) {
-      if (feedbackClockTimer) {
-        clearInterval(feedbackClockTimer)
-        feedbackClockTimer = undefined
-      }
-      configureFramePipelineTicks(nextTickInterval)
-    }
-  }, tickInterval)
+  setTimeout(
+    () => {
+      const interval = tickInterval
+      callbacks.tick(interval, performance.now() >>> 0)
+      scheduleTick()
+    },
+    Math.max(0, nextTickAt - now),
+  )
 }
-
-configureFramePipelineTicks(nextTickInterval)
+scheduleTick()
 
 const viewerPacing = {
   attached: false,
@@ -94,19 +105,14 @@ export function setViewerAttached(attached: boolean): void {
   viewerPacing.attached = attached
   viewerPacing.lastFeedbackTimestamp = performance.now()
   if (!attached) {
-    nextTickInterval = DETACHED_TICK_INTERVAL
+    tickInterval = DETACHED_TICK_INTERVAL
   }
 }
 
 export function onViewerFeedback(refreshInterval: number): void {
   viewerPacing.lastFeedbackTimestamp = performance.now()
   if (refreshInterval > 0) {
-    nextTickInterval = Math.floor(refreshInterval)
-    if (Math.abs(tickInterval - nextTickInterval) > 500 && feedbackClockTimer) {
-      clearInterval(feedbackClockTimer)
-      feedbackClockTimer = undefined
-      configureFramePipelineTicks(nextTickInterval)
-    }
+    tickInterval = tickIntervalFor(refreshInterval)
   }
 }
 

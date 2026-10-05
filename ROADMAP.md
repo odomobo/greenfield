@@ -332,7 +332,10 @@ allows it):
 ### Frame callbacks
 
 - A surface's frame callbacks are held while both of its slots are taken; they're released at the next tick of the
-  frame clock (`FramePacing.ts`, at the viewer's refresh rate) once a slot is free. So an app slows down to what we
+  frame clock (`FramePacing.ts`) once a slot is free. The clock ticks at 30 Hz (`MAX_FRAME_RATE`, user decision
+  2026-10-04: everything apps draw goes over the network, and 30 frames a second is the minimum for smooth motion, so
+  nothing above it is targeted), or at the viewer's display rate if that's slower. Moving windows, the cursor and the
+  shell are the browser's and run at the display's own rate. So an app slows down to what we
   can send (a game rendering on the CPU with llvmpipe doesn't render frames that would only be merged away), and a
   vsync game runs at exactly the rate it's given.
 - This replaces the delay by the server's average processing time (`ProcessingDuration`). The viewer's decode-time

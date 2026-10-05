@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { FrameCallbackQueue } from '../../FramePacing.js'
+import { FrameCallbackQueue, MAX_FRAME_RATE, tickIntervalFor } from '../../FramePacing.js'
 
 test('a frame callback is held while the surface has no free slot and released at the next tick once it has one', () => {
   const queue = new FrameCallbackQueue()
@@ -44,4 +44,14 @@ test('callbacks are independent and one scheduled from a callback waits for the 
   aFree = true
   queue.tick(16, 2)
   assert.deepEqual(called, ['b', 'a', 'c'])
+})
+
+test('the frame clock ticks at most 30 times a second, slower only for a slower display', () => {
+  assert.equal(MAX_FRAME_RATE, 30)
+  // a 60 Hz or 144 Hz display, or none reported yet: 30 Hz
+  assert.equal(tickIntervalFor(16.667), 1000 / 30)
+  assert.equal(tickIntervalFor(6.944), 1000 / 30)
+  assert.equal(tickIntervalFor(0), 1000 / 30)
+  // a display refreshing 24 times a second: its rate
+  assert.equal(tickIntervalFor(41.667), 41.667)
 })
