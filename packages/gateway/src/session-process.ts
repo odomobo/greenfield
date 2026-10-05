@@ -17,6 +17,7 @@ import {
 import { existsSync, unlinkSync } from 'node:fs'
 import { createServer, IncomingMessage } from 'node:http'
 import { Socket } from 'node:net'
+import { AudioService } from './audio/service'
 import { SessionStart } from './ipc'
 import { scrubEnvironment, setupSessionEnvironment } from './session-environment'
 import { ShellService } from './shell/service'
@@ -41,16 +42,21 @@ process.once('message', (message: SessionStart) => {
 })
 
 async function start({ socketPath, encoder }: SessionStart) {
-  setupSessionEnvironment()
+  const { audioDir } = setupSessionEnvironment()
 
   const { viewerHost, apps } = startWlrootsCompositor({ h264Encoder: encoder === 'none' ? undefined : encoder })
   // Apps get WAYLAND_DISPLAY when launched; it's not set in this process: GStreamer's GL would connect to our own
   // display as a client.
   viewerHost.shell = new ShellService(apps)
+  // the session's own PipeWire starts in the background; until it is up (or if it can't) the session has no audio
+  const audio = new AudioService(audioDir)
+  viewerHost.audio = audio
+  audio.start().catch((e) => logger.error(`Session audio failed: ${e.message}`))
+  process.once('exit', () => audio.cleanUpAtExit())
   const controller = createSessionController(viewerHost)
 
   // the gateway went away or asked us to stop: don't leave orphaned apps behind
-  const terminate = () => endSession(apps)
+  const terminate = () => endSession(apps, audio)
   process.once('disconnect', terminate)
   // on, not once: a second signal while ending must not kill us before we exit (exiting cleans up after XWayland)
   process.on('SIGTERM', terminate)
@@ -63,13 +69,14 @@ async function start({ socketPath, encoder }: SessionStart) {
 
 let ending = false
 
-function endSession(apps: Apps) {
+function endSession(apps: Apps, audio: AudioService) {
   if (ending) {
     return
   }
   ending = true
   logger.info('Session ending, terminating its apps.')
   apps.terminate()
+  audio.stop()
   setTimeout(() => process.exit(), 500)
 }
 

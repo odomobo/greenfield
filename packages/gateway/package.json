@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "build:native": "sh ./native/build.sh",
-    "build": "yarn run rimraf dist && yarn run tsc && node dist/build-dconf.js && yarn build:native",
+    "build": "yarn run rimraf dist && yarn run tsc && node dist/build-dconf.js && node dist/build-audio.js && yarn build:native",
     "run": "yarn node dist/main.js",
     "test": "node --test --test-force-exit dist/test/",
     "lint": "eslint src --ext .ts",
