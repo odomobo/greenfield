@@ -570,9 +570,17 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.active = sid
     if (sid) {
       this.wlr.configure(sid, -1, -1, { activated: true })
-      // raise it, with its children above it
-      this.stack = this.stack.filter((other) => other !== sid)
-      this.stack.push(sid)
+      // raise it with its parents (a dialog brings its main window along), its children above it
+      const raised = [sid]
+      for (let window = this.windows.get(sid); window?.parent !== undefined && this.windows.has(window.parent); ) {
+        if (raised.includes(window.parent)) {
+          break
+        }
+        raised.unshift(window.parent)
+        window = this.windows.get(window.parent)
+      }
+      this.stack = this.stack.filter((other) => !raised.includes(other))
+      this.stack.push(...raised)
     }
     this.wlr.keyboardFocus(this.pageFocused ? sid : 0)
     this.releaseConstraintIfUnfocused()

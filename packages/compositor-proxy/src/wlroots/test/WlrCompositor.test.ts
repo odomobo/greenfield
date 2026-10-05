@@ -277,6 +277,29 @@ test('activating a window raises it; closing the active one activates the next',
   )
 })
 
+test('activating a dialog raises it with its parent, above the parent’s other dialogs', async () => {
+  core.newWindow(1)
+  core.newWindow(2, { parent: 1 })
+  core.newWindow(3, { parent: 1 })
+  core.newWindow(4)
+  await flush()
+  assert.deepEqual(
+    windowsOf(lastScene()).map((window) => window.id),
+    ['1/1', '1/2', '1/3', '1/4'],
+  )
+  compositor.handleMessage({ type: 'window.activate', window: '1/2' })
+  await flush()
+  assert.deepEqual(
+    windowsOf(lastScene()).map((window) => [window.id, window.activated]),
+    [
+      ['1/4', false],
+      ['1/1', false],
+      ['1/3', false],
+      ['1/2', true],
+    ],
+  )
+})
+
 test('closing a dialog gives the focus back to its parent, not the topmost window', async () => {
   core.newWindow(1)
   core.newWindow(2)
