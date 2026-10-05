@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useCore } from '../core'
-import { shellStore } from '../state'
+import { audioStore, shellStore } from '../state'
 import { closePopup, isOpen, openPopup, usePopupStack } from '../popups'
 import { useStore, useStorePart } from '../store'
 import { computeGroups, Group, groupName } from './groups'
@@ -109,7 +109,9 @@ function TaskbarButton({ group, onClick }: TaskbarButtonProps) {
           nested: false,
         })
       }}
-      onPointerEnter={(event) => buttonRef.current && schedulePreviewOpen(group.key, buttonRef.current, event.pointerType)}
+      onPointerEnter={(event) =>
+        buttonRef.current && schedulePreviewOpen(group.key, buttonRef.current, event.pointerType)
+      }
       onPointerLeave={() => schedulePreviewClose()}
     >
       <GroupIcon app={group.app} windows={group.windows} size={24} />
@@ -125,7 +127,44 @@ const CONNECTION_LABELS: Record<string, string> = {
   offline: 'Not connected',
 }
 
-/** The right side of the taskbar: the connection indicator and the clock with the notification bell. */
+function audioLabel(state: { muted: boolean; available: boolean; supported: boolean; running: boolean }): string {
+  if (!state.supported) {
+    return 'This browser cannot play the session audio'
+  }
+  if (state.muted) {
+    return 'Sound is off, click to turn it on'
+  }
+  if (!state.available) {
+    return 'This session has no audio'
+  }
+  return state.running ? 'Sound is on, click to mute' : 'Sound is on, click anywhere to start it'
+}
+
+/** The mute toggle: audio on or off for this viewer (a muted viewer's session doesn't even encode it). */
+function MuteButton() {
+  const audio = useStore(audioStore)
+  const { audio: player } = useCore()
+  const label = audioLabel(audio)
+  return (
+    <button
+      type="button"
+      id="audio-button"
+      className={
+        'taskbar-button tray-item' +
+        (audio.muted ? ' muted' : '') +
+        (audio.available && audio.supported ? '' : ' unavailable')
+      }
+      aria-pressed={audio.muted}
+      aria-label={audio.muted ? 'Unmute' : 'Mute'}
+      title={label}
+      disabled={!audio.supported}
+      onClick={() => player.toggleMuted()}
+      dangerouslySetInnerHTML={{ __html: audio.muted ? glyphs.speakerMuted() : glyphs.speaker() }}
+    />
+  )
+}
+
+/** The right side of the taskbar: the mute toggle, the connection indicator and the clock with the notification bell. */
 function Tray() {
   const connection = useStorePart(shellStore, (state) => state.connection)
   const unseen = useStorePart(shellStore, (state) => state.unseen)
@@ -134,6 +173,7 @@ function Tray() {
   const now = useClock()
   return (
     <div id="tray">
+      <MuteButton />
       <span
         id="connection-indicator"
         className="tray-item"

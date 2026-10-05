@@ -76,3 +76,17 @@ export const shellStore = createStore<ShellState>({
   toasts: [],
   icons: {},
 })
+
+/** The session's audio as the taskbar's mute toggle shows it. Published by the AudioPlayer (audio/player.ts). */
+export type AudioState = {
+  /** the user muted audio on this viewer (remembered per browser) */
+  muted: boolean
+  /** the session has audio (its PipeWire runs) */
+  available: boolean
+  /** this browser can play it (WebCodecs, AudioWorklet) */
+  supported: boolean
+  /** the audio context runs: browsers start it only after the first user input */
+  running: boolean
+}
+
+export const audioStore = createStore<AudioState>({ muted: false, available: false, supported: true, running: false })

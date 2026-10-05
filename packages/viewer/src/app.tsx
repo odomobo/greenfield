@@ -4,6 +4,7 @@ import { Connection } from './connection'
 import { Core } from './core'
 import { Desktop } from './desktop'
 import { SessionInfo } from './session-name'
+import { AudioPlayer } from './audio/player'
 import { ShellController } from './shell/shell'
 import { AppsMenuActions } from './shell/apps-menu'
 import { appForWindow, groupKey } from './shell/groups'
@@ -159,7 +160,9 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
     const connection = new Connection()
     const desktop = new Desktop(output, connection)
     const shell = new ShellController((message) => connection.send(message))
-    const mounted: Core = { connection, desktop, shell }
+    const audio = new AudioPlayer((message) => connection.send(message))
+    const stopAudioGestures = audio.install()
+    const mounted: Core = { connection, desktop, shell, audio }
     coreRef.current = mounted
     setCore(mounted)
 
@@ -211,14 +214,21 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
       })
     }
 
-    connection.onOpen = () => desktop.reset()
+    connection.onOpen = () => {
+      desktop.reset()
+      audio.onOpen()
+    }
     connection.onEnvelope = (envelope, applied) => {
       if (envelope.kind === 'control') {
         if (envelope.message.type.startsWith('shell.')) {
           shell.handleMessage(envelope.message)
+        } else if (envelope.message.type === 'audio.state') {
+          audio.setAvailable(envelope.message.available)
         } else {
           desktop.handleMessage(envelope.message)
         }
+      } else if (envelope.kind === 'audio') {
+        audio.handlePacket(envelope)
       } else if (envelope.kind === 'frame') {
         desktop.handleFrame(envelope.surface, envelope.frame, applied)
       } else {
@@ -298,6 +308,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
           desktop.debugSceneDelay = ms
         },
         shellWindows: () => desktop.shellWindows(),
+        audio: () => audio.debug(),
         contentSize: (surface: string) => desktop.debugContentSize(surface),
         readLuma: (x: number, y: number, width: number, height: number) => desktop.debugReadLuma(x, y, width, height),
         surfacePixels: (surface: string, x: number, y: number, width: number, height: number) =>
@@ -325,6 +336,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
     }
 
     return () => {
+      stopAudioGestures()
       window.removeEventListener('pointerdown', onUserInput, { capture: true })
       window.removeEventListener('keydown', onUserInput, { capture: true })
       window.removeEventListener('beforeunload', onBeforeUnload)
