@@ -1,4 +1,5 @@
 import type { SurfaceView } from './surface-view'
+import { snapToDevicePixel } from './surface-geometry'
 import type { Rect } from './windows'
 
 /** How a window is shown right now. */
@@ -66,7 +67,7 @@ export class WindowView {
     const transform = stretched
       ? `translate(${x}px, ${y}px) scale(${scaleX}, ${scaleY})`
       : // unstretched content sits on whole device pixels: a half pixel offset would blur it
-        `translate(${Math.round(x * pixelRatio) / pixelRatio}px, ${Math.round(y * pixelRatio) / pixelRatio}px)`
+        `translate(${snapToDevicePixel(x, pixelRatio)}px, ${snapToDevicePixel(y, pixelRatio)}px)`
     if (hidden) {
       return
     }

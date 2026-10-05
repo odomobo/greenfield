@@ -1618,6 +1618,10 @@ export class Desktop {
     container.addEventListener('dragenter', fileDragOver)
     container.addEventListener('dragover', fileDragOver)
     container.addEventListener('dragleave', (event) => {
+      // moving from one window's element to another's isn't leaving the desktop (relatedTarget: where it went, where known)
+      if (event.relatedTarget instanceof Node && container.contains(event.relatedTarget)) {
+        return
+      }
       if (this.fileDragAt && dragHasFiles(event.dataTransfer)) {
         this.fileDragAt = undefined
         this.connection.send({ type: 'file-drag', over: false, ...this.target(point(event), event.timeStamp) })

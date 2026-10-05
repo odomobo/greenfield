@@ -25,12 +25,12 @@ export class SurfaceView {
   }
 
   get hasContent(): boolean {
-    return this.contentDrawn
+    return this.contentDrawn && this.canvas.width > 0 && this.canvas.height > 0
   }
 
   /** The size of the app's buffer, in pixels, whatever size the surface is shown at. */
   get contentSize(): Size | undefined {
-    return this.contentDrawn ? { width: this.canvas.width, height: this.canvas.height } : undefined
+    return this.hasContent ? { width: this.canvas.width, height: this.canvas.height } : undefined
   }
 
   /**

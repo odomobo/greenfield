@@ -269,6 +269,20 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
           new Promise<void>((resolve) =>
             desktop.handleFrame(surface, Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)), resolve),
           ),
+        // the same for a lossless patch: the PNG of the rectangle (base64) and the size of the whole surface
+        injectPatch: (
+          surface: string,
+          surfaceSize: { width: number; height: number },
+          rect: { x: number; y: number; width: number; height: number },
+          png: string,
+        ) =>
+          new Promise<void>((resolve) =>
+            desktop.handlePatch(
+              surface,
+              { contentSerial: 0, surfaceSize, rect, png: Uint8Array.from(atob(png), (c) => c.charCodeAt(0)) },
+              resolve,
+            ),
+          ),
       }
     }
 

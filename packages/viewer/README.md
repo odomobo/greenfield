@@ -1,7 +1,8 @@
 # Viewer
 
 Browser viewer and window manager for server-side sessions. The session (compositor + apps) runs on the server
-in a per-user session process behind the gateway; the viewer renders its windows, does hit testing, interactive move/resize and window placement, and
+in a per-user session process behind the gateway; the viewer shows each window as an element of its own (a canvas per surface, moved and stretched by CSS transforms, composited and
+hit tested by the browser), does interactive move/resize and window placement, and
 can disconnect and reattach at any time without the apps noticing.
 
 ## Running
@@ -16,7 +17,7 @@ everything.
 
 Query parameters:
 
-- `test=1` expose test hooks (`window.__viewerTest`), used by `scripts/e2e/desktop.sh`
+- `test=1` expose test hooks (`window.__viewerTest`), used by the scripts in `scripts/e2e` (readLuma, surfacePixels, injectFrame, ...)
 
 ## Desktop shell
 
