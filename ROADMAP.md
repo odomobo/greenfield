@@ -1147,8 +1147,8 @@ single large item never stalls the link. Initial window before any estimate: 64 
      acknowledged and not counted by the congestion controller (about 14 KB/s). Unlike control messages it is dropped
      (not queued) while more than 128 KB sit in the socket's buffer, so it never gets later and later.
    - Viewer: `viewer/src/audio/`: WebCodecs `AudioDecoder` -> `AudioWorklet` with the jitter buffer (`jitter-buffer.ts`,
-     pure and unit tested: 70 ms target, +-0.1% linear-interpolation rate following the smoothed level, 3 ms fade out
-     before running dry, rebuffer, 3 ms fade in, backlog over 300 ms dropped with a 5 ms crossfade). The audio context
+     pure and unit tested: 160 ms target (was 70, 5ef434a), +-0.1% linear-interpolation rate following the smoothed level, 3 ms fade out
+     before running dry, rebuffer, 3 ms fade in, backlog over 360 ms dropped with a 5 ms crossfade). The audio context
      is created on the first pointer or key event (the sign-in click), and the viewer tells the server it is muted until
      it runs. The taskbar's mute toggle (right side, left of the connection indicator) is remembered in localStorage and
      sent on every (re)connection. Test hook: `window.__viewerTest.audio()`.

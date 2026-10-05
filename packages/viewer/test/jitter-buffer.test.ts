@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { JitterBuffer } from '../src/audio/jitter-buffer.js'
+import { defaultJitterBufferOptions, JitterBuffer } from '../src/audio/jitter-buffer.js'
 
 const SAMPLE_RATE = 48000
 const BLOCK = 128
 const PACKET = 960
+// the tuning under test (the defaults), in frames
+const TARGET = (defaultJitterBufferOptions.targetMs * SAMPLE_RATE) / 1000
+const MAX = (defaultJitterBufferOptions.maxMs * SAMPLE_RATE) / 1000
+/** the fewest packets that reach the target */
+const TARGET_PACKETS = Math.ceil(TARGET / PACKET)
 const FREQUENCY = 440
 const AMPLITUDE = 0.5
 /** the steepest a sine of this frequency and amplitude gets, per sample */
@@ -75,8 +80,8 @@ describe('JitterBuffer', () => {
     const buffer = new JitterBuffer()
     const player = new Player(buffer)
     const source = new Source()
-    // 60 ms is below the 70 ms target
-    buffer.push(...source.packet(PACKET * 3))
+    // a packet short of the target
+    buffer.push(...source.packet(PACKET * (TARGET_PACKETS - 1)))
     player.block()
     assert.equal(buffer.stats.state, 'buffering')
     assert.ok(player.output.every((sample) => sample === 0))
@@ -95,7 +100,7 @@ describe('JitterBuffer', () => {
     const buffer = new JitterBuffer()
     const player = new Player(buffer)
     const source = new Source()
-    buffer.push(...source.packet(PACKET * 5))
+    buffer.push(...source.packet(PACKET * (TARGET_PACKETS + 1)))
     player.block()
     // 10 ms fade: the first frames are quiet, the signal is up to full level a few hundred frames in
     const firstStart = player.output.findIndex((sample) => sample !== 0)
@@ -124,14 +129,15 @@ describe('JitterBuffer', () => {
         lastSound = i
       }
     })
-    assert.ok(lastSound > 0.04 * SAMPLE_RATE && lastSound < 0.08 * SAMPLE_RATE, `ran dry after ${lastSound} frames`)
+    // it played about the target's worth (held there by the rate, give or take a packet) before running dry
+    assert.ok(lastSound > TARGET - 1.5 * PACKET && lastSound < TARGET + 0.5 * PACKET, `ran dry after ${lastSound} frames`)
     // the fade out is a few ms long: full level 10 ms before the end, almost nothing in the last 0.5 ms
     const peak = (from: number, to: number) => Math.max(...stalled.slice(from, to).map(Math.abs))
     assert.ok(peak(lastSound - 480, lastSound - 240) > 0.4)
     assert.ok(peak(lastSound - 24, lastSound + 1) < 0.1)
     // the data resumes: a burst of the target's worth after the silence, then steady
     const resumeAt = player.output.length
-    buffer.push(...source.packet(PACKET * 4))
+    buffer.push(...source.packet(PACKET * TARGET_PACKETS))
     player.run(source, SAMPLE_RATE / 2, 1)
     assert.equal(buffer.stats.state, 'playing')
     assert.equal(buffer.stats.underruns, 1)
@@ -181,8 +187,8 @@ describe('JitterBuffer', () => {
       const stats = buffer.stats
       assert.equal(stats.underruns, 0, `rate ${rate}`)
       assert.equal(stats.drops, 0, `rate ${rate}`)
-      // within a packet or two of the 70 ms target (3360 frames)
-      assert.ok(Math.abs(stats.level - 3360) < 3 * PACKET, `rate ${rate} level ${stats.level}`)
+      // within a packet or two of the target
+      assert.ok(Math.abs(stats.level - TARGET) < 3 * PACKET, `rate ${rate} level ${stats.level}`)
     }
   })
 
@@ -200,23 +206,23 @@ describe('JitterBuffer', () => {
     }
   })
 
-  it('drops a backlog over 300 ms down to the target with a crossfade and no click', () => {
+  it('drops a backlog over the maximum down to the target with a crossfade and no click', () => {
     const buffer = new JitterBuffer()
     const player = new Player(buffer)
     const source = new Source()
     player.run(source, SAMPLE_RATE / 2, 1)
     const before = player.output.length
-    // a burst of 600 ms arrives at once (the tab was in the background)
+    // a burst of 600 ms arrives at once (the tab was in the background): well over the maximum
     for (let i = 0; i < 30; i++) {
       buffer.push(...source.packet())
     }
-    assert.ok(buffer.stats.level > 0.3 * SAMPLE_RATE)
+    assert.ok(buffer.stats.level > MAX)
     player.run(source, SAMPLE_RATE / 2, 1)
     const stats = buffer.stats
     assert.equal(stats.drops, 1)
     assert.ok(stats.droppedFrames > 0.2 * SAMPLE_RATE)
     // back near the target, not drained
-    assert.ok(stats.level > 0.04 * SAMPLE_RATE && stats.level < 0.12 * SAMPLE_RATE, `level ${stats.level}`)
+    assert.ok(stats.level > TARGET - 0.03 * SAMPLE_RATE && stats.level < TARGET + 0.05 * SAMPLE_RATE, `level ${stats.level}`)
     assert.equal(stats.underruns, 0)
     assert.ok(maxStep(player.output, before) < CLICK_LIMIT, `step ${maxStep(player.output, before)}`)
     // the audio after the drop is the source's later part: the sine continues at the right phase

@@ -3,7 +3,7 @@
  * (worklet.ts) only calls `push` with decoded audio and `read` to fill its output.
  *
  * Simple on purpose:
- * - A fixed target level (default 70 ms). Playback starts once the buffer holds the target.
+ * - A fixed target level (default 160 ms). Playback starts once the buffer holds the target.
  * - The server's capture clock and the browser's audio clock differ a little. The buffer's level (smoothed) is held at
  *   the target by playing at a slightly different rate, plain linear interpolation, at most +-0.1% (about 1.7 cents
  *   of pitch, inaudible). No prediction, no time stretching.
@@ -11,7 +11,7 @@
  *   so no click), then it is silent until the buffer holds the target again (rebuffering), then fades in.
  * - Stop (muting, a new stream): the same fade out, then what was buffered before the stop is dropped and the next
  *   stream starts like the first, with a fade in. Never a jump to silence: that is a click.
- * - Backlog: over the maximum (300 ms, e.g. after the tab was in the background, or a network stall that released a
+ * - Backlog: over the maximum (360 ms, e.g. after the tab was in the background, or a network stall that released a
  *   burst) the excess is dropped, with a short crossfade (5 ms) from where we were to where we continue.
  * - No packet loss concealment: a lost packet is simply not there.
  *
