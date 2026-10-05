@@ -267,6 +267,49 @@ Changing class:
   photo- or game-like content about 40–150 KB, noise ~256 KB. Most patches are far smaller (a keystroke, a cursor
   blink: under 2 KB).
 
+### Planned: QOI patches, and lossy encoding only when bandwidth is short
+
+(Decided 2026-10-05; the work is item 5b and later items. Why: PNG encoding hogs the CPU even on a Ryzen 7600, and a
+small VPS has far less. The QOI spike measured our PNG at 75–145 ms of CPU per 1080p frame, QOI + LZ4 at 3.5–4.8 ms on
+UI content and about 26 ms on noise.)
+
+**Lossless patches: the QOI cascade.** Every lossless patch, of any surface (windows, popups, cursors, drag icons: all
+surfaces go the same way, no special cases), is encoded like this:
+
+1. QOI (3 channels if the patch is opaque, else 4). If the result is at least 90% of the raw size, it's noise: send
+   the **raw** pixels if QOI came out bigger than raw, else the QOI as is, and don't try LZ4.
+2. Else LZ4 over the QOI. If that's smaller than the QOI, send **QOI + LZ4**, else the plain **QOI**.
+
+Each patch carries a one-byte format tag: raw, QOI, or QOI + LZ4 (width, height and channels are in the patch header).
+No PNG fallback for patches. Raw is RGB for opaque patches and RGBA otherwise. LZ4 finds exact repeats (4 bytes or
+more, within 64 KB): it helps a lot on text and UI (repeated glyphs, widgets) and little on video, photos and noise.
+
+Opaque: a patch is opaque if the buffer format has no alpha (XRGB/XBGR), or it lies entirely in the surface's opaque
+region (`wl_surface.set_opaque_region`, `wlr_surface.opaque_region`: the client promises alpha is 1 there, so we
+can drop it), else if a scan of the alpha bytes finds them all 255. The scan is folded into the pixel copy in
+`readPixels`, which already knows the format.
+
+**Which encoding, by class and bandwidth:**
+
+- **Normal class (medium priority): always lossless QOI patches**, GPU or not, bandwidth-limited or not. Normal is never
+  treated as the bottleneck: a surface that keeps the link or CPU busy becomes relentless and goes to streaming.
+- **Streaming class (low priority)**, depending on whether we're **bandwidth-limited**, judged by our BBRv3-style
+  controller (its bandwidth estimate and app-limited state; for example, the streaming surfaces' lossless output would
+  exceed most of the estimated bandwidth):
+  - Not limited, without GPU: QOI patches (lossless).
+  - Not limited, with GPU: real-time video at a higher quality.
+  - Limited, without GPU: **JPEG patches at medium quality** (4:4:4, so coloured text stays readable; libjpeg-turbo;
+    the browser decodes them natively). JPEG has no alpha: patches that aren't opaque stay QOI (or get their alpha sent
+    separately; decide when implementing).
+  - Limited, with GPU: real-time video at a lower quality, still enough to read text.
+  - Video always has a **fixed quality target and variable bitrate**, no bitrate cap. Under contention the frame rate
+    drops instead: that is what the per-surface two slots are for (frames are only taken when a slot is free), and they
+    are believed to work. If they don't, rewrite them; don't add bitrate caps.
+- **Refreshes are intelligent.** Track per surface which areas are lossy (JPEG or video) and which are known lossless.
+  Whenever a surface leaves a lossy mode (bandwidth recovers, or it returns to the normal class), refresh only the
+  areas known to be lossy, losslessly, and only after its pending damage has been sent. Flapping between lossless and
+  lossy is then harmless (refreshes stay bounded by the lossy area); hysteresis is optional tuning.
+
 ### Per-surface slots
 
 Each surface is a source with at most **2 slots** (`SURFACE_SLOTS` = 2). An item is one patch or one video frame.
@@ -1039,36 +1082,35 @@ single large item never stalls the link. Initial window before any estimate: 64 
 
 ### Next: QOI patches
 
-5b. **QOI instead of PNG for window patches** (user's request, 2026-10-05). Without GPU acceleration every patch is a
-    PNG today: our own encoder (`compositor-proxy/src/encoding/png.ts`: row filters in JS, deflate on libuv's thread
-    pool, `png-worker.ts` threads for the streaming class), decoded by the browser's `createImageBitmap`
-    (`viewer/src/decoder.ts`), off the main thread for free. QOI (https://github.com/phoboslab/qoi, MIT, one header)
-    encodes many times faster, so it should save server CPU, which limits us on VPSes without a GPU. The library is
-    owned in the codebase (vendored with its licence, not a dependency): a native encoder in the session process, a
-    wasm decoder in the browser.
-    1. **Spike first (Sonnet agent): measure before building.** Record real patches (foot with text, a GTK app such as
-       gtk4-demo, a busy client, a browser page if available) from a session, and compare per patch and in total:
-       - size and encode time of our PNG, QOI, and QOI followed by a fast general compressor (deflate level 1 and LZ4),
-         since QOI files are usually larger than PNG on UI content (text, flat areas, gradients) and bandwidth matters
-         over the internet;
-       - decode time in a browser: `createImageBitmap` of the PNG against a wasm QOI decoder (and the same decoder in
-         plain JS, for comparison), plus the extra step of each (`DecompressionStream` for deflate, LZ4 in the wasm).
-       Report the numbers and a recommendation (QOI, QOI + deflate or QOI + LZ4, or stay with PNG for some content). The
-       spike code lives in a scratch directory or a branch; nothing in the product changes yet. The user decides after.
-    2. **Then the implementation**, in the shape the spike recommends:
-       - Encoder: a native addon in compositor-proxy's CMake project (or a function in an existing addon), called
-         synchronously from the existing worker threads (they already run at low priority for the streaming class);
-         the normal class keeps its own thread(s). Handle the pixel format: wlroots buffers are BGRA/XRGB, so swap
-         channels in the encoder or the decoder, and opaque (XRGB) surfaces get alpha 255 or QOI's 3-channel mode.
-         Later, possibly: encode straight from the wlroots buffer without a JS copy.
+5b. **QOI instead of PNG for patches** (user's request, 2026-10-05; the design is in [Encoding
+    policy](#planned-qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)). Today every patch is a PNG from our
+    own encoder (`compositor-proxy/src/encoding/png.ts`), which hogs the CPU. QOI (https://github.com/phoboslab/qoi,
+    MIT, one header) and LZ4 (BSD) are owned in the codebase (vendored with their licences, not dependencies).
+    1. **Done: the spike** (Sonnet, branch `worktree-agent-a1e5c33d5ee632214`, `spike/qoi/results.md`; not merged, its
+       patch recorder in `SurfaceEncoder.ts` must never be merged). 1032 real patches (foot, xterm, GTK 4 apps, Chrome
+       in the session, the busy client). Encode CPU per 1080p frame: our PNG 75–83 ms on UI content and 145 ms on
+       noise; libpng 43–58 / 131 ms; QOI 3.3–4.1 / 17.5 ms; QOI + LZ4 3.5–4.8 / 26.5 ms; QOI + deflate 1 5.3–10 / 66
+       ms. Bytes as a share of our PNG: QOI 1.5x on text, 1.1x GTK, 2.9x Chrome, 2.9x noise; QOI + LZ4 0.69x, 0.90x,
+       0.77x, 2.28x; QOI + deflate 1 the smallest but its browser decode (`DecompressionStream`, ~0.4 ms per call) is
+       slower than PNG's. Browser decode per 64k-pixel tile: PNG 0.66 ms, QOI + LZ4 in wasm 0.27 ms, QOI in plain JS
+       0.37 ms. All patches round-trip exactly. The wasm decoder (QOI into a caller buffer + LZ4) is 2.1 KB.
+    2. **The implementation**: the QOI cascade (raw / QOI / QOI + LZ4, one-byte format tag; see Encoding policy) for
+       every patch of every surface, no PNG fallback for patches and no special cases.
+       - Encoder: native C (QOI + LZ4) in compositor-proxy's CMake project, called synchronously from worker threads
+         (the streaming class's already run at low priority; the normal class keeps its own). Opaque detection as in
+         Encoding policy (format, opaque region, else an alpha scan folded into the copy in `readPixels`). Later,
+         possibly: encode straight from the wlroots buffer without a JS copy.
        - Decoder: wasm built with plain `clang --target=wasm32` and `wasm-ld` (package `lld`, a new build requirement),
-         no Emscripten and no libc: change `qoi_decode` to decode into a buffer we pass in instead of calling `malloc`.
-         It must run in a Web Worker (wasm on the main thread would stutter the UI during busy updates): the worker
-         makes `ImageData` → `createImageBitmap` and transfers the bitmap to the main thread.
-       - Only window patches change; app icons, cursors, drag icons and shell images stay PNG (rare, cached). Keep PNG
-         as a fallback until QOI is proven. Protocol version bump.
-       - Afterwards, check the encoding policy's tuning (pool sizes, the relentless thresholds), which was measured
-         with PNG's costs.
+         no Emscripten and no libc (the spike's `qoi_wasm.c`/`lz4_wasm.c` show how). It runs in a Web Worker (wasm on
+         the main thread would stutter the UI): raw/QOI/QOI + LZ4 → `ImageData` → `createImageBitmap`, the bitmap
+         transferred to the main thread.
+       - PNG stays only for images that aren't surfaces (an X11 app's `_NET_WM_ICON` window icon, read from an X
+         property and sent as a data URL); `png.ts` and `png-worker.ts` otherwise go. Protocol version bump.
+       - Afterwards, check the encoding policy's tuning (pool sizes, the relentless thresholds), measured with PNG's
+         costs.
+    3. **Later: lossy streaming when bandwidth is short** (Encoding policy): the bandwidth-limited signal from the
+       controller, JPEG patches for streaming surfaces without GPU, two video qualities with GPU, per-area lossy
+       tracking and intelligent lossless refreshes.
 
 ### Lower priority
 
