@@ -8,7 +8,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--color-desktop);
+  /* the page's background picture shows through */
   color: var(--color-text);
   font-family: var(--font-family);
   font-size: var(--font-size-small);
@@ -26,6 +26,8 @@
   padding: 0 4px;
   background: var(--color-taskbar);
   border-bottom: 1px solid var(--color-taskbar-border);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
   /* always above the windows and their animations */
   position: relative;
   z-index: 2;
@@ -177,6 +179,8 @@
   border: 1px solid var(--color-flyout-border);
   border-radius: var(--radius-flyout);
   box-shadow: var(--shadow-flyout);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
   font-family: var(--font-family);
   font-size: var(--font-size);
   user-select: none;
@@ -601,7 +605,7 @@
   align-items: flex-start;
   gap: 10px;
   padding: 10px 36px 10px 10px;
-  background: var(--color-surface);
+  background: var(--color-control);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-surface);
 }
@@ -662,6 +666,8 @@
   background: var(--color-flyout);
   border-color: var(--color-flyout-border);
   box-shadow: var(--shadow-flyout);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
   animation: toast-in 200ms ease-out;
 }
 
@@ -741,10 +747,16 @@
   font-family: var(--font-family);
   font-size: var(--font-size-small);
   line-height: 1;
+  box-shadow: var(--shadow-frame);
 }
 
 #output .frame.active {
   color: var(--color-frame-text);
+  box-shadow: var(--shadow-frame-active);
+}
+
+#output .frame.maximized {
+  box-shadow: none;
 }
 
 #output .frame-border {
@@ -773,6 +785,8 @@
   align-items: center;
   overflow: hidden;
   background: var(--color-frame-inactive);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
   pointer-events: auto;
   cursor: default;
 }
@@ -935,7 +949,9 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: color-mix(in srgb, var(--color-desktop) 80%, transparent);
+  background: var(--surface-passive);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
   font-size: 16px;
 }
 
