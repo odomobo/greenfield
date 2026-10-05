@@ -429,6 +429,20 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       case 'x11-geometry':
         this.scheduleScene()
         break
+      case 'toplevel-request-position': {
+        // an X11 app moved its own window (it was told already): that's where the window is now, as if the viewer had
+        // moved it (the viewer still has the last word while it drags or resizes the window, and keeps it on screen)
+        const window = this.windows.get(args[0])
+        if (window) {
+          const parent = window.parent === undefined ? undefined : this.windows.get(window.parent)
+          const origin = parent ? this.positionOf(parent) : { x: 0, y: 0 }
+          window.x = args[1] - origin.x
+          window.y = args[2] - origin.y
+          window.placed = true
+          this.scheduleScene()
+        }
+        break
+      }
       case 'toplevel-icon':
         this.windowIcon(args[0], args[1], args[2], args[3])
         break

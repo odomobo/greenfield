@@ -18,8 +18,11 @@ Since wave 2 B, X11 apps run too (XWayland).
   started when the first X11 app connects) and its X11 window manager. Managed X11 windows are reported like xdg
   toplevels (`toplevel-new(sid, x11 = true)`, title, WM_CLASS as app id, WM_TRANSIENT_FOR as parent, move, resize,
   maximize, fullscreen and minimize requests), so the policy is the same for both; override-redirect windows (menus,
-  tooltips) are surfaces of the window they belong to, at their X11 position relative to it. `setPosition` tells X11
-  apps where the scene shows their windows. `wlr_core_internal.h` is what it shares with `wlr_core.c`.
+  tooltips) are surfaces of the window they belong to, at their X11 position relative to it (popups of it, see the
+  scene protocol). `setPosition` tells X11 apps where the scene shows their windows; a shown window's own configure
+  requests are granted, position included (`toplevel-request-position`: apps that drag themselves with XMoveWindow or
+  place themselves move, as under other X11 window managers; the viewer still has the last word while the user drags
+  or resizes the window). `wlr_core_internal.h` is what it shares with `wlr_core.c`.
 - `native/wlr-core/src/wlr_core_clipboard.c`: the clipboard bridge (wave 3 E). A remote app's selection is read through a
   non-blocking pipe on the `wl_event_loop` (text mime types in the order text/plain;charset=utf-8, UTF8_STRING,
   text/plain, TEXT, STRING; at most 4 MB, 3 s) and reported as `clipboard-text`; `setClipboardText` makes the browser's

@@ -131,6 +131,24 @@ test('a maximized X11 window is at the output origin, and back where it was when
   ])
 })
 
+test('an X11 window moving itself (XMoveWindow) is where the scene shows it; a dialog stays relative to its parent', async () => {
+  core.newWindow(1, true, { width: 400, height: 300 })
+  compositor.handleMessage({ type: 'window.move', window: '1/1', x: 100, y: 50 })
+  core.newWindow(2, true, { width: 100, height: 100, parent: 1 })
+  await flush()
+  core.onEvent('toplevel-request-position', 1, 140, 70)
+  await flush()
+  let [main, dialog] = windowsOf(lastScene())
+  assert.deepEqual([main.x, main.y, main.placed], [140, 70, true])
+  // (the dialog follows its parent, as when the viewer moves it)
+  assert.deepEqual([dialog.x, dialog.y], [290, 170])
+  core.onEvent('toplevel-request-position', 2, 10, 20)
+  await flush()
+  ;[main, dialog] = windowsOf(lastScene())
+  assert.deepEqual([dialog.x, dialog.y], [10, 20])
+  assert.deepEqual(positionsOf(2).slice(-1), [[10, 20]])
+})
+
 test('an X11 dialog is told its position on the output, not relative to its parent', async () => {
   core.newWindow(1, true, { width: 400, height: 300 })
   compositor.handleMessage({ type: 'window.move', window: '1/1', x: 100, y: 50 })

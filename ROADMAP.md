@@ -98,6 +98,9 @@ A stray press of the browser's back button (e.g. a mouse side button) must not t
 - **Popups** (xdg popups, X11 override-redirect menus and tooltips; scene protocol 13 marks them) are shown in a layer
   above all windows, in the windows' order: a menu or tooltip of a window that isn't on top isn't covered by the ones
   that are. They move, stretch, fade and hide with their window and aren't clipped to it.
+- **X11 apps that move themselves** (XMoveWindow, e.g. a borderless window dragging itself, or an app placing itself)
+  are moved as they ask, as under other X11 window managers. While the user drags or resizes such a window the pointer
+  decides, and the release is the last word (`scripts/e2e/x11-move.sh`).
 - **Input regions**: clicks outside a surface's input region (`wl_surface.set_input_region`, e.g. most of a client-side
   shadow) go to whatever is underneath; the pointer and cursor follow the same hit test.
 - **Child windows** (dialogs, `xdg_toplevel.set_parent`) are separate windows in the scene with a parent. They are

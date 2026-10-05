@@ -371,8 +371,15 @@ handle_request_configure(struct wl_listener *listener, void *data) {
         // keeps its size; X11 wants an answer
         wlr_xwayland_surface_configure(xsurface, xsurface->x, xsurface->y, xsurface->width, xsurface->height);
     } else {
-        // its size, not its position: windows are moved by the user
-        wlr_xwayland_surface_configure(xsurface, xsurface->x, xsurface->y, event->width, event->height);
+        // as it asks, position included: apps that drag themselves (XMoveWindow on every motion) or place themselves
+        // move, as with other X11 window managers; JavaScript makes the position the window's (the scene's)
+        bool moved = event->x != xsurface->x || event->y != xsurface->y;
+        wlr_xwayland_surface_configure(xsurface, event->x, event->y, event->width, event->height);
+        if (moved && xwin->toplevel) {
+            struct core *core = xwin->x11->core;
+            napi_value args[] = {u32(core, xwin->gsurf->sid), i32(core, event->x), i32(core, event->y)};
+            emit(core, "toplevel-request-position", 3, args);
+        }
     }
 }
 
