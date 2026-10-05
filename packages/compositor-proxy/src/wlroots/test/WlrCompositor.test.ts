@@ -981,20 +981,35 @@ test('a window that becomes decorated while maximized is reconfigured below its 
   assert.equal(lastConfigure(1)?.height, 700 - FRAME_TITLE_HEIGHT)
 })
 
+test('a shown window whose decorations change is told its size (Chrome redoes its window geometry then)', async () => {
+  core.newWindow(1)
+  // Chrome with its own title bar: the window geometry is inset by its shadow
+  core.toplevels.get(1)!.geometry = [16, 10, 368, 280]
+  const configures = core.configures.length
+  core.onEvent('toplevel-decorated', 1, true)
+  assert.deepEqual(lastConfigure(1), { sid: 1, width: 368, height: 280, state: {} })
+  // a window not shown yet (foot asks before its first commit) isn't
+  core.onEvent('surface-new', 2, '1/2')
+  core.toplevels.set(2, { ...core.toplevels.get(1)!, geometry: [0, 0, 400, 300] })
+  core.onEvent('toplevel-new', 2)
+  core.onEvent('toplevel-decorated', 2, true)
+  assert.equal(core.configures.length, configures + 1)
+})
+
 test('a dialog is centered on its parent counting both frames', async () => {
   core.newWindow(1, { width: 400, height: 300, decorated: true })
   compositor.handleMessage({ type: 'window.move', window: '1/1', x: 100, y: 50 })
   core.newWindow(2, { width: 100, height: 100, parent: 1, decorated: true })
   await flush()
   const [, dialog] = windowsOf(lastScene())
-  // equal frames around both: the outer rectangles share their centers, as the contents do
-  assert.deepEqual([dialog.x, dialog.y], [150, 100])
+  // equal frames around both: the outer rectangles share their centers, as the contents do (the parent is at 100, 50)
+  assert.deepEqual([dialog.x, dialog.y], [250, 150])
   // an undecorated dialog on a decorated parent: the parent's outer rectangle is the taller one (title bar, borders)
   core.newWindow(3, { width: 100, height: 100, parent: 1 })
   await flush()
   const third = windowsOf(lastScene()).find((window) => window.id === '1/3')
   // (parent outer rectangle: y from -title bar to height + bottom border; the dialog's: 0 to 100)
   const parentCenterY = (-FRAME_TITLE_HEIGHT + 300 + FRAME_BORDER) / 2
-  assert.equal(third.x, 150)
-  assert.equal(third.y, Math.round(parentCenterY - 50))
+  assert.equal(third.x, 250)
+  assert.equal(third.y, 50 + Math.round(parentCenterY - 50))
 })

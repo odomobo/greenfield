@@ -350,8 +350,13 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         if (window && window.decorated !== Boolean(args[1])) {
           window.decorated = Boolean(args[1])
           // a maximized window fills the output below its title bar (and the app's own title bar goes or comes)
-          if (this.wlr.toplevelState(window.sid)?.maximized) {
+          const state = this.wlr.toplevelState(window.sid)
+          if (state?.maximized) {
             this.setMaximized(window.sid, true)
+          } else if (state && !state.fullscreen && this.surfaces.get(window.sid)?.mapped && !this.x11.has(window.sid)) {
+            // a shown Wayland window is told its size: Chrome, switching to our frame, draws without its shadow but
+            // keeps its old window geometry (inset by the shadow) until it's resized, so our frame would overlap it
+            this.wlr.configure(window.sid, state.geometry[2], state.geometry[3], {})
           }
           this.scheduleScene()
         }
@@ -801,7 +806,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       const insets = frameInsets({ decorated: window.decorated, maximized: state.maximized, fullscreen: state.fullscreen })
       const { x, y } =
         state.maximized || state.fullscreen
-          ? { x: -state.geometry[0], y: insets.top - state.geometry[1] }
+          ? { x: insets.left - state.geometry[0], y: insets.top - state.geometry[1] }
           : this.positionOf(window)
       this.x11.shownAt(window.sid, x, y)
       if (!this.x11.has(window.sid)) {
