@@ -37,6 +37,11 @@ export const EASE_IN = cubicBezier(0.7, 0, 1, 1)
 /** Starts fast and eases out (restore). Subtle, like CSS ease-out. */
 export const EASE_OUT = cubicBezier(0, 0, 0.3, 1)
 
+/** The user asked for less motion (the system setting): no decorative animations. */
+export function reducedMotion(): boolean {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+}
+
 /** Eased progress (0..1) of something that started now and lasts `duration` ms. */
 export class Animation {
   private readonly start = performance.now()

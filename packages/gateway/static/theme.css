@@ -40,6 +40,10 @@
   --color-error-background: rgba(120, 20, 30, 0.45);
   --color-focus-ring: #ffffff;
 
+  /* animation curves: starting fast (things coming in) and accelerating out (things going away) */
+  --ease-out: cubic-bezier(0, 0, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 1, 1);
+
   --radius-surface: 8px;
   --radius-control: 4px;
   --shadow-surface: 0 2px 8px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.4);
