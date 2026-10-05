@@ -29,7 +29,7 @@
 #
 #   scripts/test-gateway.sh
 # The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it and the next one, desktop
-# and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen, decorations eighteen, x11-move twenty).
+# and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen, decorations eighteen, x11-move twenty, audio twenty-two).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
@@ -39,7 +39,7 @@ START="$EPOCHREALTIME"
 pids=()
 names=()
 i=0
-for part in auth desktop x11 clipboard dnd hidpi input busy video decorations x11-move; do
+for part in auth desktop x11 clipboard dnd hidpi input busy video decorations x11-move audio; do
   port=$((BASE_PORT + i * 2))
   i=$((i + 1))
   # prefix every line with the script's name; the exit status is the script's, not sed's
@@ -65,6 +65,6 @@ done
 seconds=$(((${EPOCHREALTIME/./} - ${START/./}) / 10000))
 printf 'all end-to-end scripts took %d.%02d s\n' $((seconds / 100)) $((seconds % 100))
 if [ "$status" = 0 ]; then
-  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client and the video path"
+  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, the video path and audio"
 fi
 exit "$status"

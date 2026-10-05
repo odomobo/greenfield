@@ -103,6 +103,15 @@
   height: 28px;
 }
 
+#audio-button.muted,
+#audio-button.unavailable {
+  color: var(--color-text-secondary);
+}
+
+#audio-button:disabled {
+  opacity: 0.5;
+}
+
 #connection-indicator[data-state='connected'] {
   color: var(--color-connection-ok);
 }

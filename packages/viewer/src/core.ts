@@ -1,4 +1,5 @@
 import { createContext, useContext } from 'react'
+import type { AudioPlayer } from './audio/player'
 import { Connection } from './connection'
 import { Desktop } from './desktop'
 import type { ShellController } from './shell/shell'
@@ -12,6 +13,7 @@ export type Core = {
   connection: Connection
   desktop: Desktop
   shell: ShellController
+  audio: AudioPlayer
 }
 
 export const CoreContext = createContext<Core | null>(null)

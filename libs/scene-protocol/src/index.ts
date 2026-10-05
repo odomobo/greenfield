@@ -14,6 +14,17 @@
  * FILE payload (viewer -> server): u32le file id, then the next bytes of that file: files dragged from the user's
  * computer onto the desktop are uploaded in chunks, announced by a `file-drop` message (ids, names, sizes), see there.
  * ACK payload (viewer -> server): u32le received, u32le backlogBytes, u32le largestPendingBytes, see `ViewerAck`.
+ * AUDIO payload (server -> viewer): u16le sequence number, u32le timestamp, one Opus packet (20 ms of 48 kHz stereo).
+ * The sequence number counts packets (mod 2^16), the timestamp counts samples at 48 kHz (mod 2^32; its origin is
+ * arbitrary and changes whenever the server starts capturing again, e.g. after a mute), so a viewer detects lost
+ * packets by gaps in the sequence, and how much audio is missing from the timestamps. Audio is sent only after the
+ * viewer asked for it with `audio.mute` (muted: false), see there.
+ *
+ * Audio envelopes have control priority: they go out right away, ahead of frames and patches, and are neither
+ * acknowledged nor counted by the congestion controller (about 14 KB/s, small next to the video). Control messages
+ * are never dropped, audio packets are: when the connection's send buffer is full the server drops packets instead of
+ * letting the audio get ever later (the sequence numbers show it). The viewer plays audio through a small jitter
+ * buffer and does not conceal losses.
  *
  * Data envelopes (FRAME and PATCH) are acknowledged for congestion control (see "Transport and congestion control" in
  * ROADMAP.md): the viewer sends an ACK first thing when a data envelope arrives, before decoding it, so the server's
@@ -57,7 +68,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 14
+export const PROTOCOL_VERSION = 15
 
 /** The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). */
 export const FRAME_TITLE_HEIGHT = 32
@@ -85,6 +96,7 @@ export const enum EnvelopeKind {
   PATCH = 3,
   FILE = 4,
   ACK = 5,
+  AUDIO = 6,
 }
 
 /**
@@ -241,6 +253,11 @@ export type ServerMessage =
   | { type: 'shell.notification'; notification: ShellNotification }
   | { type: 'shell.notification-closed'; id: number }
   | { type: 'shell.launch-failed'; app: string; reason: 'unknown' | 'not-runnable' | 'failed' }
+  /**
+   * Whether the session has audio (its own PipeWire is running); sent on attach and when it changes. Without it the
+   * session works silently and `audio.mute` has no effect.
+   */
+  | { type: 'audio.state'; available: boolean }
 
 export type ShellApp = {
   /** desktop file ID */
@@ -361,6 +378,11 @@ export type ViewerMessage =
   | { type: 'shell.notifications-clear' }
   /** re-read installed applications (the server rate-limits this) */
   | { type: 'shell.refresh-apps' }
+  /**
+   * Whether the viewer wants no audio. A session sends no audio to a viewer until it said `muted: false` (the viewer
+   * sends its state first thing after connecting), and stops capturing and encoding while it's muted.
+   */
+  | { type: 'audio.mute'; muted: boolean }
 
 /**
  * A loose control message, as the server side still parses it. New code should prefer the typed `ViewerMessage` /
@@ -431,6 +453,33 @@ export function encodeAck(ack: ViewerAck): Uint8Array {
   view.setUint32(6, Math.min(ack.backlogBytes, 0xffffffff) >>> 0, true)
   view.setUint32(10, Math.min(ack.largestPendingBytes, 0xffffffff) >>> 0, true)
   return envelope
+}
+
+/** Audio samples per second and per Opus packet's channel, and the packet duration: fixed by the protocol. */
+export const AUDIO_SAMPLE_RATE = 48000
+export const AUDIO_CHANNELS = 2
+export const AUDIO_PACKET_SAMPLES = 960
+
+/** One packet of the audio stream, see the AUDIO envelope. */
+export type AudioPacket = { seq: number; timestamp: number; opus: Uint8Array }
+
+const AUDIO_HEADER_BYTES = 2 + 2 + 4
+
+/** Encode a server -> viewer audio packet as a binary envelope. */
+export function encodeAudio(packet: AudioPacket): Uint8Array {
+  const envelope = new Uint8Array(AUDIO_HEADER_BYTES + packet.opus.byteLength)
+  const view = new DataView(envelope.buffer)
+  envelope[0] = PROTOCOL_VERSION
+  envelope[1] = EnvelopeKind.AUDIO
+  view.setUint16(2, packet.seq & 0xffff, true)
+  view.setUint32(4, packet.timestamp >>> 0, true)
+  envelope.set(packet.opus, AUDIO_HEADER_BYTES)
+  return envelope
+}
+
+/** The number of packets lost between two consecutive received sequence numbers (0 when `next` follows `previous`). */
+export function audioPacketsLost(previous: number, next: number): number {
+  return (next - previous - 1) & 0xffff
 }
 
 export type ViewerEnvelope =
@@ -518,6 +567,7 @@ export type DecodedEnvelope =
   | { kind: 'control'; message: ServerMessage }
   | { kind: 'frame'; surface: string; frame: Uint8Array }
   | { kind: 'patch'; surface: string; patch: Patch }
+  | ({ kind: 'audio' } & AudioPacket)
 
 /** Decode a server -> viewer envelope. Throws on an unsupported version or unknown kind. */
 export function decodeEnvelope(data: ArrayBuffer): DecodedEnvelope {
@@ -537,6 +587,18 @@ export function decodeEnvelope(data: ArrayBuffer): DecodedEnvelope {
     const keyLength = bytes[2] | (bytes[3] << 8)
     const surface = textDecoder.decode(bytes.subarray(4, 4 + keyLength))
     return { kind: 'patch', surface, patch: parsePatch(bytes.subarray(4 + keyLength)) }
+  }
+  if (bytes[1] === EnvelopeKind.AUDIO) {
+    if (bytes.byteLength <= AUDIO_HEADER_BYTES) {
+      throw new Error(`AUDIO envelope of ${bytes.byteLength} bytes.`)
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    return {
+      kind: 'audio',
+      seq: view.getUint16(2, true),
+      timestamp: view.getUint32(4, true),
+      opus: bytes.subarray(AUDIO_HEADER_BYTES),
+    }
   }
   throw new Error(`Unknown envelope kind ${bytes[1]}`)
 }

@@ -6,6 +6,7 @@ import { createLogger } from '@gfld/compositor-proxy'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { appAudioVariables, createAudioDirectory } from './audio/pipewire'
 import { dconfDir, profileText } from './nebula-settings'
 
 const logger = createLogger('session')
@@ -28,9 +29,10 @@ export function scrubEnvironment() {
  * What a desktop session needs so apps behave: a runtime dir, a D-Bus session bus, and the desktop portal and a
  * secrets service. With logind (pam_systemd) the runtime dir and bus exist already, and the portal and secrets
  * service are started by D-Bus activation when an app first asks. Without it we start a bus ourselves. Missing
- * services are reported, not fatal.
+ * services are reported, not fatal. Returns the directory of the session's audio (see audio/pipewire.ts), whose
+ * variables apps get here, whether or not the audio can be started.
  */
-export function setupSessionEnvironment() {
+export function setupSessionEnvironment(): { audioDir: string } {
   const env = process.env
   const uid = process.getuid?.() ?? 0
 
@@ -68,6 +70,11 @@ export function setupSessionEnvironment() {
       )
     }
   }
+
+  // The session's own PipeWire (see audio/pipewire.ts): apps must reach it and never the user's. Not added to
+  // dbus-update-activation-environment below either.
+  const audioDir = createAudioDirectory(env.XDG_RUNTIME_DIR)
+  Object.assign(env, appAudioVariables(audioDir))
 
   if (env.DBUS_SESSION_BUS_ADDRESS === undefined) {
     const userBus = path.join(env.XDG_RUNTIME_DIR, 'bus')
@@ -115,6 +122,7 @@ export function setupSessionEnvironment() {
   if (missing.length > 0) {
     logger.info(`Not installed (apps lose these features): ${missing.join(', ')}.`)
   }
+  return { audioDir }
 }
 
 function startDBus(): string {
