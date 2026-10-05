@@ -988,7 +988,11 @@ single large item never stalls the link. Initial window before any estimate: 64 
       79 unit tests, `test-gateway.sh` 22.8 s); master got the 30 Hz frame clock meanwhile (`FramePacing.ts` only).
       Its ROADMAP edit adds a status paragraph to 4b. After merging: `yarn build`, both unit suites (compare counts:
       `yarn test` runs compiled `dist/`), `test-gateway.sh`.
-   2. **`XDG_CURRENT_DESKTOP=nebula`** in our sessions (today `greenfield`; find where the session sets it). Check
+   2. **Done** (`XDG_CURRENT_DESKTOP` and `XDG_SESSION_DESKTOP` are `nebula` in `session-environment.ts` and
+      `pam-helper.c`; `greenfield-portals.conf` renamed to `nebula-portals.conf`, still `default=gtk`; no installed
+      desktop entry on the dev machine has `OnlyShowIn`/`NotShowIn` and none mentions greenfield or nebula, so no
+      visibility changed; autostart is not run by us; new gateway test `desktop-entries.test.ts`; compositor-proxy
+      156, viewer 79, gateway 9 unit tests, `test-gateway.sh` 22 s). Was: **`XDG_CURRENT_DESKTOP=nebula`** in our sessions (today `greenfield`; find where the session sets it). Check
       what reads it: `portals.conf` lookup (`nebula-portals.conf` later), `OnlyShowIn`/`NotShowIn` in desktop entries
       (the Apps menu), autostart. Desktop entries limited to `GNOME` or `KDE` shouldn't start showing or vanish by
       accident: say what changed.
