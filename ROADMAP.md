@@ -1158,7 +1158,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
    - Not verified by ear (needs the user): sound quality, clicks at underruns, drift over a long listen, recovery after
      a network hiccup, real apps (Firefox/Chrome video), and Chrome's behavior on a machine with real audio output.
 
-### QOI patches and lossy encoding (done)
+### Next: QOI patches and lossy encoding (phases 1 and 2 done)
 
 5b. **QOI instead of PNG for patches** (user's request, 2026-10-05; the design is in [Encoding
     policy](#qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)). Today every patch is a PNG from our
@@ -1233,6 +1233,49 @@ single large item never stalls the link. Initial window before any estimate: 64 
        - Not verified: the GPU half (no GPU here: whether nvh264enc and vaapih264enc take a QP change while playing, and
          the QPs' look); a real slow link (only the simulated one); real apps with transparency as JPEG with alpha (only
          the page-made test images).
+    4. **Phase 3: fast mode for bursts, and settling at the lowest priority** (user's design, agreed 2026-10-05).
+       The problem: scrolling a static page on a slow link is very slow for the first seconds. The surface is normal
+       (lossless, medium priority) until the relentless measure promotes it (1.5–2.25 s), and the link only counts as
+       bandwidth-limited after two held-back periods. Then, once quiet, the lossless refresh of its lossy areas runs at
+       normal priority and competes with the normal surfaces.
+       - **Per-surface compression estimate**: each surface keeps a rolling average of its lossless bytes per pixel
+         (pixel-weighted, from its lossless patches: text and UI look like text and UI, noise like noise). It lives in
+         the encoders (it's in the transport's `BandwidthMonitor` today) and pauses while the surface goes lossy (its
+         settle patches update it again). A surface without one counts as uncompressed (3 or 4 bytes per pixel).
+       - **Predicted backlog**: per surface, its bytes waiting in the transport (encoded, real size), plus its pixels
+         being encoded or queued times its estimate. In time: bytes / the bandwidth estimate (`max_bw`), only once the
+         link has been bandwidth-limited at least once on this connection: that estimate is remembered from then (before,
+         an app-limited estimate is only a lower bound, so nothing below applies). Threshold `BURST_MS` = 200 ms
+         (tunable). Settling work (below) never counts.
+       - **Burst promotion** (a second way to become streaming, besides the relentless measure): while the predicted
+         backlog of the normal surfaces alone is over `BURST_MS`, promote the normal surface with the largest predicted
+         backlog, and check again. Streaming surfaces don't add to the pressure to promote.
+       - **Lossy mode (bandwidth-limited) is either/or**: the link is saturated (the held-back measure as built: two 1 s
+         periods in a row held back >= 80%), or the predicted backlog of all surfaces (normal and streaming) is over
+         `BURST_MS`, which takes effect at once (a scroll's first frames go out as JPEG). It ends only when both are quiet:
+         a period held back < 50%, the total predicted backlog under `BURST_MS` (this replaces the lossless-demand check),
+         at least 2 s after it began. So streaming surfaces don't push to promote others, but they do keep the link in
+         lossy mode while they have a backlog.
+       - **Settling, per streaming surface, as a priority queue**: damage first (lossy while bandwidth-limited); when it
+         has no damage queued or in its slots, it settles its lossy areas losslessly (never lossy, whatever the link).
+         New damage pre-empts settling: settle rectangles it covers are dropped (the damage replaces them), the rest
+         wait. As built, the lossy areas are updated in send order, so this holds.
+       - **A third send tier for settling**: settle patches go out in their own class of the transport's deficit
+         round-robin, at a third of the streaming class's quantum (normal 3 x 16 KB, streaming 16 KB, settling about
+         5.3 KB per turn; work-conserving as before: an idle tier's share goes to the others). Within the tier,
+         surfaces take turns as in the others.
+       - **Demotion** (streaming -> normal) only when the surface has no damage, nothing lossy left (fully settled), and
+         its backlogged share of the last period is under `DEMOTE_FRACTION` (15%), where a streaming surface's busy and
+         backlogged time counts damage work only, not settling. (Today the refresh only starts after demotion or
+         recovery, at normal priority.)
+       - Small relentless surfaces still need the relentless (time) measure: a small video saturating the link never
+         has a big backlog at once. The two promotion criteria cover the two cases: a relentless stream of any size
+         (time) and a single large repaint (backlog).
+       - With a GPU, a burst-promoted surface starts video with a key frame like any promoted one (accepted).
+       - Tests: unit (the estimate, the predicted backlog, burst promotion order, lossy mode either/or and its exit,
+         settling pre-empted by damage, the third tier's share, demotion only when settled); e2e: on the 8 Mbit/s
+         simulated link, after the link was limited once, a static page (foot full of text, say) scrolled: JPEG patches
+         within a few hundred ms, then settled losslessly at the lowest tier and demoted; the viewer ends up exact.
 
 ### Lower priority
 
