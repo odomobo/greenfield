@@ -9,7 +9,7 @@ import { scheduleFrameCallback } from '../FramePacing.js'
 import { EncoderPool } from '../encoding/EncoderPool.js'
 import { EncodingContext, EncodingSink, SurfaceEncoder, SurfaceHost } from '../encoding/SurfaceEncoder.js'
 import { encodePng } from '../encoding/png.js'
-import { StreamingPngPool } from '../encoding/StreamingEncoder.js'
+import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool } from '../encoding/PatchWorkerPool.js'
 import { Rect } from '../encoding/region.js'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
 import { ControlMessage } from '../viewer/ViewerTransport.js'
@@ -25,7 +25,7 @@ const logger = createLogger('wlroots')
 /** GFLD_WLR_TRACE=1: log wlroots events and viewer messages */
 const TRACE = process.env.GFLD_WLR_TRACE === '1'
 
-/** The hardware video encoders; without one (`undefined`) everything is sent as PNG patches. */
+/** The hardware video encoders; without one (`undefined`) everything is sent as lossless patches. */
 type H264Encoder = 'nvh264' | 'vaapih264'
 
 /** The native core (native/wlr-core), injectable so the policy can be tested without wlroots. */
@@ -202,11 +202,12 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     const pool = new EncoderPool<WlrEncoder>(
       () => new WlrEncoder(wlr, h264Encoder!),
       h264Encoder ? config.videoStreams : 0,
-      (error) => logger.error(`Video encoder ${h264Encoder} is unavailable (${error.message}), sending PNG patches only.`),
+      (error) => logger.error(`Video encoder ${h264Encoder} is unavailable (${error.message}), sending lossless patches only.`),
     )
     pool.warm()
-    const streamingPool = new StreamingPngPool(logger)
-    this.encoding = new EncodingContext(forwardingSink, pool, { normal: encodePng, streaming: streamingPool }, logger)
+    const streamingPool = new PatchWorkerPool(logger)
+    const normalPool = new PatchWorkerPool(logger, NORMAL_ENCODE_WORKERS, NORMAL_ENCODE_NICE)
+    this.encoding = new EncodingContext(forwardingSink, pool, { normal: (rgba, width, height, opaque) => normalPool.encode(rgba, width, height, opaque), streaming: streamingPool }, logger)
     this.encoding.startTicking()
 
     this.clipboard = new Clipboard((text) => this.wlr.setClipboardText(text))

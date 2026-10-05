@@ -100,7 +100,7 @@ export function clip(region: Rect[], bounds: Rect): Rect[] {
 }
 
 /**
- * Split a rectangle into pieces of at most `maxPixels` each: full width bands (rows compress well in PNG), and for
+ * Split a rectangle into pieces of at most `maxPixels` each: full width bands (rows compress well), and for
  * absurdly wide rectangles also columns.
  */
 export function splitRect(rect: Rect, maxPixels: number): Rect[] {

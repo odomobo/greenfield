@@ -9,7 +9,9 @@
  * FRAME payload (server -> viewer): u16le surface key length, surface key, encoded frame blob as produced by the
  * proxy encoder (u32 bufferId, u32 bufferCreationSerial, u32 contentSerial, u16 encoding type, ...). The whole surface.
  * PATCH payload (server -> viewer): u16le surface key length, surface key, then (all u32le) contentSerial, surface
- * width, surface height, x, y, width, height, followed by an RGBA PNG of that rectangle of the surface.
+ * width, surface height, x, y, width, height, then u8 format (`PatchFormat`), u8 channels (3 or 4), followed by the
+ * pixels of that rectangle of the surface in that format: raw (RGB or RGBA, rows top to bottom), QOI, or the LZ4 block
+ * of a QOI stream (see `PatchFormat`). The rectangle's width and height are the image's.
  *
  * FILE payload (viewer -> server): u32le file id, then the next bytes of that file: files dragged from the user's
  * computer onto the desktop are uploaded in chunks, announced by a `file-drop` message (ids, names, sizes), see there.
@@ -34,7 +36,7 @@
  * the viewer sends a fresh ACK (same `received`) whenever its last report was over that, or the server would wait
  * forever. Control envelopes are never acknowledged.
  *
- * A surface is either streamed as video (FRAME, H.264) or updated with lossless PNG patches (PATCH) of its changed
+ * A surface is either streamed as video (FRAME, H.264) or updated with lossless patches (raw, QOI or QOI + LZ4) (PATCH) of its changed
  * areas, see the encoding policy in ROADMAP.md. Frames and patches of one surface arrive in order and are applied in
  * order: a patch draws over whatever the surface showed (including the last video frame), a video frame replaces it.
  *
@@ -68,7 +70,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 15
+export const PROTOCOL_VERSION = 16
 
 /** The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). */
 export const FRAME_TITLE_HEIGHT = 32
@@ -513,6 +515,19 @@ export function isDataEnvelope(data: Uint8Array): boolean {
   return data.byteLength >= 2 && (data[1] === EnvelopeKind.FRAME || data[1] === EnvelopeKind.PATCH)
 }
 
+/**
+ * How a patch's pixels are encoded (the format tag). Raw, QOI and QOI + LZ4 are lossless (the cascade of "Encoding
+ * policy" in ROADMAP.md). 3 and 4 are reserved for JPEG and JPEG with alpha (lossy patches, later).
+ */
+export enum PatchFormat {
+  /** width x height x channels bytes, RGB (opaque) or RGBA, rows top to bottom */
+  RAW = 0,
+  /** a QOI stream (https://qoiformat.org), 3 or 4 channels */
+  QOI = 1,
+  /** the LZ4 block (no frame, no length prefix) of a QOI stream; the viewer decompresses it into a buffer of the QOI size bound */
+  QOI_LZ4 = 2,
+}
+
 /** A lossless update of a rectangle of a surface, see the PATCH envelope. */
 export type Patch = {
   contentSerial: number
@@ -520,16 +535,20 @@ export type Patch = {
   surfaceSize: { width: number; height: number }
   /** the patched rectangle, in surface (buffer) pixels */
   rect: { x: number; y: number; width: number; height: number }
-  /** RGBA PNG of the rectangle */
-  png: Uint8Array
+  /** how `data` is encoded */
+  format: PatchFormat
+  /** 3 if the rectangle is opaque (the alpha was dropped), else 4 */
+  channels: 3 | 4
+  /** the rectangle's pixels in `format` */
+  data: Uint8Array
 }
 
-const PATCH_HEADER_BYTES = 7 * 4
+const PATCH_HEADER_BYTES = 7 * 4 + 2
 
 /** Encode a server -> viewer patch as a binary envelope addressed to the surface's key. */
 export function encodePatch(surfaceKey: string, patch: Patch): Uint8Array {
   const key = textEncoder.encode(surfaceKey)
-  const envelope = new Uint8Array(4 + key.byteLength + PATCH_HEADER_BYTES + patch.png.byteLength)
+  const envelope = new Uint8Array(4 + key.byteLength + PATCH_HEADER_BYTES + patch.data.byteLength)
   const view = new DataView(envelope.buffer)
   envelope[0] = PROTOCOL_VERSION
   envelope[1] = EnvelopeKind.PATCH
@@ -548,7 +567,9 @@ export function encodePatch(surfaceKey: string, patch: Patch): Uint8Array {
     view.setUint32(offset, value, true)
     offset += 4
   }
-  envelope.set(patch.png, offset)
+  envelope[offset] = patch.format
+  envelope[offset + 1] = patch.channels
+  envelope.set(patch.data, offset + 2)
   return envelope
 }
 
@@ -559,7 +580,9 @@ function parsePatch(payload: Uint8Array): Patch {
     contentSerial: u32(0),
     surfaceSize: { width: u32(1), height: u32(2) },
     rect: { x: u32(3), y: u32(4), width: u32(5), height: u32(6) },
-    png: payload.subarray(PATCH_HEADER_BYTES),
+    format: payload[28],
+    channels: payload[29] === 3 ? 3 : 4,
+    data: payload.subarray(PATCH_HEADER_BYTES),
   }
 }
 

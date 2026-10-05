@@ -6,5 +6,5 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  "include": ["test", "src/audio/jitter-buffer.ts", "src/resize.ts", "src/windows.ts", "src/modifiers.ts", "src/surface-geometry.ts"]
+  "include": ["test", "src/audio/jitter-buffer.ts", "src/patch/patch-decoder.ts", "src/patch/wasm-bytes.ts", "src/resize.ts", "src/windows.ts", "src/modifiers.ts", "src/surface-geometry.ts"]
 }

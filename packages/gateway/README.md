@@ -27,7 +27,7 @@ submodule built with meson as part of `yarn build`:
 
 ```bash
 git submodule update --init
-sudo apt install build-essential cmake ninja-build meson pkg-config \
+sudo apt install build-essential cmake ninja-build meson pkg-config clang lld \
   libwayland-dev wayland-protocols libpixman-1-dev libxkbcommon-dev libdrm-dev libgbm-dev libegl-dev libgles-dev \
   libopengl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
   libgraphene-1.0-dev libudev-dev libffi-dev \
@@ -36,6 +36,9 @@ sudo apt install build-essential cmake ninja-build meson pkg-config \
 yarn install
 yarn build
 ```
+
+`clang` and `lld` build the viewer's WebAssembly patch decoder (`wasm-ld`, or `wasm-ld-18`, or `$WASM_LD`; the build says
+"install lld (apt install lld)" if it is missing).
 
 The first build compiles wlroots (a few minutes); it's rebuilt when its build options change, and after changing the
 submodule's version delete `packages/compositor-proxy/build/wlroots` so it's rebuilt. Running sessions also needs the
@@ -84,7 +87,7 @@ sudo env -u DISPLAY /usr/local/bin/node /opt/greenfield/packages/gateway/dist/ma
 Options: `--cert/--key` for a real certificate (default: self-signed in /var/lib/greenfield/tls), `--hide-hostname`,
 `--allowed-origin` (behind a reverse proxy), `--insecure-plaintext` (HTTP; only on loopback/private addresses, for a
 trusted home LAN), `--encoder <auto|none|nvh264|vaapih264>` (default `auto`: a hardware video encoder if the machine has
-one, else none, which sends everything as PNG patches), `--render-device`. `--help` lists everything.
+one, else none, which sends everything as lossless patches), `--render-device`. `--help` lists everything.
 
 ## Desktop shell
 

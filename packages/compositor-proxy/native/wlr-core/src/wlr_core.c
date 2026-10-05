@@ -1560,19 +1560,39 @@ wlr_core_surface_buffer(uint32_t sid) {
     return gsurf ? gsurf->buffer : NULL;
 }
 
-static void
-finalize_pixels(napi_env env, void *finalize_data, void *finalize_hint) {
-    free(finalize_data);
+/*
+ * Whether the rectangle (buffer pixels) lies entirely in the surface's opaque region (wl_surface.set_opaque_region: the
+ * client promises its alpha is 1 there). Only decided for the plain case: the region is in surface coordinates, so the
+ * buffer must map to them by an integer scale alone (no transform, no viewport) and be the surface's current buffer.
+ * The surface cells that contain the rectangle's pixels must be inside the region.
+ */
+static bool
+rect_in_opaque_region(struct wlr_surface *surface, const struct wlr_buffer *buffer, int32_t x, int32_t y,
+                      int32_t width, int32_t height) {
+    const struct wlr_surface_state *current = &surface->current;
+    if (current->transform != WL_OUTPUT_TRANSFORM_NORMAL || current->scale < 1 || current->viewport.has_src ||
+        current->viewport.has_dst || current->buffer_width != buffer->width || current->buffer_height != buffer->height) {
+        return false;
+    }
+    int32_t scale = current->scale;
+    pixman_box32_t box = {x / scale, y / scale, (x + width + scale - 1) / scale, (y + height + scale - 1) / scale};
+    return pixman_region32_contains_rectangle(&surface->opaque_region, &box) == PIXMAN_REGION_IN;
 }
 
-// readPixels(sid, x, y, width, height) -> RGBA Buffer | undefined (a copy, the buffer may be released right after)
+/*
+ * readPixels(sid, x, y, width, height) -> { pixels: Uint8Array RGBA, opaque: boolean } | undefined
+ * A copy (the buffer may be released right after) in a plain ArrayBuffer, so it can be transferred to an encoder
+ * worker. `opaque`: all its alpha is 255, because the buffer's format has no alpha (XRGB, XBGR), or the rectangle lies
+ * in the surface's opaque region, or the copy found every alpha byte to be 255 (scanned while copying).
+ */
 static napi_value
 readPixels(napi_env env, napi_callback_info info) {
-    napi_value argv[5], result;
+    napi_value argv[5], result, array_buffer, pixels_array, opaque_value;
     if (!get_args(env, info, 5, argv)) {
         return undefined(env);
     }
-    struct wlr_buffer *buffer = wlr_core_surface_buffer(arg_u32(env, argv[0]));
+    struct gsurf *gsurf = the_core == NULL ? NULL : gsurf_from_sid(the_core, arg_u32(env, argv[0]));
+    struct wlr_buffer *buffer = gsurf ? gsurf->buffer : NULL;
     int32_t x = arg_i32(env, argv[1]), y = arg_i32(env, argv[2]);
     int32_t width = arg_i32(env, argv[3]), height = arg_i32(env, argv[4]);
     if (buffer == NULL || x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > buffer->width ||
@@ -1605,20 +1625,44 @@ readPixels(napi_env env, napi_callback_info info) {
             wlr_buffer_end_data_ptr_access(buffer);
             return undefined(env);
     }
-    uint8_t *pixels = malloc((size_t) width * height * 4);
+    bool opaque = a < 0 || (gsurf->surface != NULL && rect_in_opaque_region(gsurf->surface, buffer, x, y, width, height));
+    size_t length = (size_t) width * height * 4;
+    uint8_t *pixels;
+    if (napi_create_arraybuffer(env, length, (void **) &pixels, &array_buffer) != napi_ok) {
+        wlr_buffer_end_data_ptr_access(buffer);
+        return undefined(env);
+    }
     uint8_t *out = pixels;
+    uint8_t alpha_and = 0xff;
     for (int32_t row = y; row < y + height; row++) {
         const uint8_t *in = (const uint8_t *) data + (size_t) row * stride + (size_t) x * 4;
-        for (int32_t column = 0; column < width; column++, in += 4, out += 4) {
-            out[0] = in[r];
-            out[1] = in[g];
-            out[2] = in[b];
-            out[3] = a < 0 ? 0xff : in[a];
+        if (opaque) {
+            // no alpha to scan: the format has none, or the client promised it is 1 here (the alpha is still set to 255)
+            for (int32_t column = 0; column < width; column++, in += 4, out += 4) {
+                out[0] = in[r];
+                out[1] = in[g];
+                out[2] = in[b];
+                out[3] = 0xff;
+            }
+        } else {
+            for (int32_t column = 0; column < width; column++, in += 4, out += 4) {
+                out[0] = in[r];
+                out[1] = in[g];
+                out[2] = in[b];
+                out[3] = in[a];
+                alpha_and &= in[a];
+            }
         }
     }
     wlr_buffer_end_data_ptr_access(buffer);
-    NAPI_CALL(env, napi_create_external_buffer(env, (size_t) width * height * 4, pixels, finalize_pixels, NULL,
-                                               &result))
+    if (!opaque) {
+        opaque = alpha_and == 0xff;
+    }
+    NAPI_CALL(env, napi_create_typedarray(env, napi_uint8_array, length, array_buffer, 0, &pixels_array))
+    NAPI_CALL(env, napi_get_boolean(env, opaque, &opaque_value))
+    NAPI_CALL(env, napi_create_object(env, &result))
+    NAPI_CALL(env, napi_set_named_property(env, result, "pixels", pixels_array))
+    NAPI_CALL(env, napi_set_named_property(env, result, "opaque", opaque_value))
     return result;
 }
 

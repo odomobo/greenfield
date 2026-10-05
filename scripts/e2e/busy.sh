@@ -72,6 +72,8 @@ wait_for "() => window.__viewerTest.windows().some((w) => w.appId === 'test-busy
 busy_running() { [ "$(frames)" -gt 20 ]; }
 wait_until "the busy client to commit frames" 20 busy_running
 wait_for "() => window.__viewerTest.patches() > 0" "patches of the busy window" 10
+# (the busy client's buffers are ARGB; its pixels have alpha 255 except where it says otherwise: the patches are decoded in the viewer's worker)
+wait_for "() => Object.keys(window.__viewerTest.patchKinds()).length > 0" "decoded patch kinds" 10
 [ "$(pw_eval "() => window.__viewerTest.videoFrames().decoded")" = 0 ] || fail "video frames without a video encoder"
 # The surface is relentless: it commits on every callback, busy in its first period and backlogged in its second, so the
 # server promotes it to the streaming class at the end of the second (1.5 - 2.25 s after it started)

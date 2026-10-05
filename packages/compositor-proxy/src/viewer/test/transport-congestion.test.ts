@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
-import { decodeEnvelope, encodeAck, encodePatch, Patch } from '@gfld/scene-protocol'
+import { decodeEnvelope, encodeAck, encodePatch, Patch, PatchFormat } from '@gfld/scene-protocol'
 import { CongestionController } from '../congestion.js'
 import { Congestion, WebSocketViewerTransport } from '../ViewerTransport.js'
 
@@ -37,7 +37,9 @@ function patch(serial: number, bytes: number): Patch {
     contentSerial: serial,
     surfaceSize: { width: 100, height: 100 },
     rect: { x: 0, y: 0, width: 10, height: 1 },
-    png: new Uint8Array(bytes),
+    format: PatchFormat.QOI,
+    channels: 4,
+    data: new Uint8Array(bytes),
   }
 }
 

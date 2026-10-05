@@ -1,4 +1,5 @@
 import { EncodedFrame, Patch } from './protocol'
+import { PatchDecoderClient } from './patch/patch-worker-client'
 
 /**
  * A decoded surface frame, ready to draw. The frames stay in the decoder's (GPU) memory: whoever takes this closes
@@ -13,6 +14,9 @@ export type DecodedFrame = {
   /** the alpha stream's frame: its luma is the alpha channel of the image */
   alpha?: VideoFrame
 }
+
+/** one worker for all surfaces: patches of a surface are applied in order (SurfaceDecoder's queue) */
+const patchDecoder = new PatchDecoderClient()
 
 /** A decoded lossless update of a rectangle of a surface. */
 export type DecodedPatch = {
@@ -112,9 +116,9 @@ export class SurfaceDecoder {
     return this.enqueue(async () => {
       // the surface is on patches now, its video stream (if any) is over: the next one starts with a key frame
       this.close()
-      const blob = new Blob([patch.png], { type: 'image/png' })
-      // the exact pixels: no color space conversion, no premultiplication round trip
-      const bitmap = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+      // decoded in a Web Worker (wasm QOI + LZ4), the exact pixels as for the PNGs before: no color space conversion,
+      // no premultiplication round trip
+      const bitmap = await patchDecoder.decode(patch)
       return { surfaceSize: patch.surfaceSize, rect: patch.rect, bitmap }
     })
   }

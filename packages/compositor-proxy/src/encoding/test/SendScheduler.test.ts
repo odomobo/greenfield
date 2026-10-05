@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
-import { decodeEnvelope, Patch } from '@gfld/scene-protocol'
+import { decodeEnvelope, Patch, PatchFormat } from '@gfld/scene-protocol'
 import type { SurfaceClass } from '../policy.js'
 import { Congestion, WebSocketViewerTransport } from '../../viewer/ViewerTransport.js'
 
@@ -22,13 +22,15 @@ class FakeWebSocket extends EventEmitter {
   }
 }
 
-/** A patch whose PNG is `bytes` long, so its size on the wire is about that (plus a small header). */
+/** A patch whose data is `bytes` long, so its size on the wire is about that (plus a small header). */
 function patch(serial: number, bytes: number): Patch {
   return {
     contentSerial: serial,
     surfaceSize: { width: 100, height: 100 },
     rect: { x: 0, y: 0, width: 10, height: 1 },
-    png: new Uint8Array(bytes),
+    format: PatchFormat.QOI,
+    channels: 4,
+    data: new Uint8Array(bytes),
   }
 }
 

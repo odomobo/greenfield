@@ -383,10 +383,16 @@ export class Desktop {
   private videoFramesDecoded = 0
   private videoFramesFailed = 0
   private patchesApplied = 0
+  private readonly patchKinds: Record<string, number> = {}
 
   /** How many lossless patches were drawn, in all. For tests. */
   debugPatches(): number {
     return this.patchesApplied
+  }
+
+  /** How many patches were drawn per kind ("format/channels", e.g. "2/3" is QOI + LZ4 of an opaque patch). For tests. */
+  debugPatchKinds(): Record<string, number> {
+    return { ...this.patchKinds }
   }
 
   /** How many video frames decoded and how many failed to, in all. For tests. */
@@ -1040,6 +1046,8 @@ export class Desktop {
         (decoded) => {
           this.keyFrameRequested.delete(surface)
           this.patchesApplied++
+          const kind = `${patch.format}/${patch.channels}`
+          this.patchKinds[kind] = (this.patchKinds[kind] ?? 0) + 1
           this.viewFor(surface).drawPatch(decoded)
           this.contentChanged(surface)
         },

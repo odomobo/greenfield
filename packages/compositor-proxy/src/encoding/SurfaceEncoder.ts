@@ -1,12 +1,13 @@
 /**
  * Per-surface encoding state machine (see "Encoding policy" in ROADMAP.md). A surface is in the normal or the
- * streaming priority class (relentless surfaces, see RelentlessMeter). Its content goes out as lossless PNG patches of
+ * streaming priority class (relentless surfaces, see RelentlessMeter). Its content goes out as lossless patches of
  * the damaged areas, or, for streaming surfaces when a hardware video encoder is available, as H.264 video of the whole
  * surface. Each surface has a few slots for items (patches or video frames) between capture and the socket. Native code
  * is reached only through the injected host, sink and pool, so this runs (and is tested) without it.
  */
 import type { Patch } from '@gfld/scene-protocol'
 import { EncoderPool } from './EncoderPool.js'
+import type { EncodedPatch } from './patch-encoder.js'
 import { MAX_PATCH_PIXELS, PeriodFractions, planPatches, RelentlessMeter, SurfaceClass } from './policy.js'
 import { area, clip, intersect, Rect } from './region.js'
 
@@ -44,8 +45,12 @@ export interface EncodingSink {
 /** The surface's buffer, as the encoder sees it. */
 export interface SurfaceHost<V extends VideoEncoder> {
   currentBuffer(): BufferInfo | undefined
-  /** RGBA pixels of a rectangle of the current buffer, a synchronous copy. undefined if it can't be read. */
-  readPixels(rect: Rect): Uint8Array | undefined
+  /**
+   * RGBA pixels of a rectangle of the current buffer, a synchronous copy. `opaque`: all its alpha is 255 (the format
+   * has no alpha, or the rectangle is in the surface's opaque region, or its alpha was scanned). undefined if it can't
+   * be read.
+   */
+  readPixels(rect: Rect): { pixels: Uint8Array; opaque: boolean } | undefined
   encodeVideo(encoder: V, buffer: BufferInfo): Promise<Uint8Array>
 }
 
@@ -68,6 +73,7 @@ function isSmall(buffer: BufferInfo): boolean {
 type CapturedPatch = {
   rect: Rect
   pixels: Uint8Array
+  opaque: boolean
   surfaceSize: { width: number; height: number }
   serial: number
   epoch: number
@@ -307,8 +313,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       if (rect === undefined) {
         continue
       }
-      const pixels = this.host.readPixels(rect)
-      if (pixels === undefined) {
+      const read = this.host.readPixels(rect)
+      if (read === undefined) {
         // can't read this buffer's pixels: stream it as video if there is an encoder, else it can't be shown
         this.patchUnsupported = true
         this.queued = []
@@ -321,7 +327,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       this.slotsUsed++
       return {
         rect,
-        pixels,
+        pixels: read.pixels,
+        opaque: read.opaque,
         surfaceSize: { width: buffer.width, height: buffer.height },
         serial: buffer.contentSerial,
         epoch: this.epoch,
@@ -501,11 +508,11 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   }
 }
 
-export type PngEncode = (rgba: Uint8Array, width: number, height: number) => Promise<Uint8Array>
+export type PatchEncode = (rgba: Uint8Array, width: number, height: number, opaque: boolean) => Promise<EncodedPatch>
 
-/** The pool of low priority workers that encodes streaming surfaces' patches (StreamingPngPool). */
+/** A pool of worker threads that encodes patches (PatchWorkerPool): the low priority one is the streaming class's. */
 export interface StreamingEncodePool {
-  encode: PngEncode
+  encode: PatchEncode
   /** whether another patch may be captured for it: a worker is free, or about to be */
   readonly canAccept: boolean
   /** set by the pump: called when `canAccept` may have changed */
@@ -529,7 +536,7 @@ export class PatchPump {
 
   constructor(
     private readonly sink: EncodingSink,
-    private readonly encodeNormal: PngEncode,
+    private readonly encodeNormal: PatchEncode,
     private readonly streaming: StreamingEncodePool,
     private readonly logger: Logger,
     private readonly maxNormalEncodes = MAX_NORMAL_ENCODES,
@@ -612,30 +619,30 @@ export class PatchPump {
         surface.releaseSlot()
       }
     }
-    let encoding: Promise<Uint8Array>
+    let encoding: Promise<EncodedPatch>
     if (surfaceClass === 'normal') {
       this.normalEncodes++
-      encoding = this.encodeNormal(captured.pixels, captured.rect.width, captured.rect.height)
+      encoding = this.encodeNormal(captured.pixels, captured.rect.width, captured.rect.height, captured.opaque)
       const finished = () => {
         this.normalEncodes--
         this.pump()
       }
       encoding.then(finished, finished)
     } else {
-      encoding = this.streaming.encode(captured.pixels, captured.rect.width, captured.rect.height)
+      encoding = this.streaming.encode(captured.pixels, captured.rect.width, captured.rect.height, captured.opaque)
     }
     const previous = this.sendTails.get(surface) ?? resolved
     const tail = previous
       .then(() => encoding)
       .then(
-        (png) => {
+        (encoded) => {
           if (!surface.isCurrent(captured.epoch) || !this.sink.active) {
             done()
             return
           }
           this.sink.sendPatch(
             surface.key,
-            { contentSerial: captured.serial, surfaceSize: captured.surfaceSize, rect: captured.rect, png },
+            { contentSerial: captured.serial, surfaceSize: captured.surfaceSize, rect: captured.rect, ...encoded },
             surfaceClass,
             done,
           )
@@ -663,7 +670,7 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
   constructor(
     readonly sink: EncodingSink,
     readonly pool: EncoderPool<V>,
-    encoders: { normal: PngEncode; streaming: StreamingEncodePool },
+    encoders: { normal: PatchEncode; streaming: StreamingEncodePool },
     readonly logger: Logger,
     readonly now: () => number = () => performance.now(),
   ) {

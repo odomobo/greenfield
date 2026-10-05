@@ -6,9 +6,10 @@
   "private": true,
   "scripts": {
     "start": "yarn vite --config ./vite.config.ts",
-    "build": "yarn tsc --noEmit && yarn vite build",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build": "yarn build:wasm && yarn tsc --noEmit && yarn vite build",
     "preview": "yarn vite preview",
-    "test": "yarn tsc -p tsconfig.test.json && node --test dist-test/test/",
+    "test": "yarn build:wasm && yarn tsc -p tsconfig.test.json && node --test dist-test/test/",
     "lint": "eslint src --ext .ts,.tsx",
     "format": "prettier --write 'src/**/*.{ts,tsx}'"
   },

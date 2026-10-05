@@ -167,9 +167,11 @@ wait_for "() => { const w = window.__viewerTest.windows(); return w.length === 1
 wait_for "() => document.querySelector('#taskbar-items button[data-group=\"$TEST_APP\"]').matches('.running.active')" \
   "foot's window in its pinned taskbar button" 10
 # The gateway runs with --encoder none (lib.sh; no GPU acceleration is assumed): there is no video at all, every surface,
-# new ones included, is sent as lossless PNG patches, and the browser drew them.
+# new ones included, is sent as lossless patches, and the browser drew them.
 grep -aq 'Video encoder: none' "$WORK/gateway.log" || fail "the gateway didn't log its encoder choice"
 wait_for "() => window.__viewerTest.patches() > 0" "decoded patches of foot's window" 10
+# foot's buffers are ARGB with every alpha 255: the alpha scan in readPixels finds them opaque, the patches are RGB (3 channels), raw, QOI or QOI + LZ4 ("0/3", "1/3", "2/3")
+wait_for "() => Object.keys(window.__viewerTest.patchKinds()).some((k) => /^[012]\\/3\$/.test(k))" "opaque QOI patches of foot's window" 10
 [ "$(pw_eval "() => window.__viewerTest.videoFrames().decoded")" = 0 ] || fail "video frames without a video encoder"
 # Our foot is the one started by this test's gateway (other foots, e.g. in the user's own sessions, aren't ours).
 descends_from() {
