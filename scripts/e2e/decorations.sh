@@ -114,9 +114,7 @@ win_is() { echo "() => { const w = window.__viewerTest.windows().find((w) => w.a
 # the app's window frame element's id, a selector for its parts
 frame_of() { echo ".frame[data-frame-window=\"$(win "$1" w.id | tr -d '"')\"]"; }
 # the center of a frame part (page coordinates)
-center_of() {
-  pw_eval "() => { const r = document.querySelector('$1').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.y + r.height / 2) }" | tr -d '"'
-}
+center_of() { element_center "$1"; }
 # the shown geometry of the app's window, "x y width height" (output coordinates)
 geometry_of() { echo "$(win "$1" "[w.shownGeometry.x, w.shownGeometry.y, w.shownGeometry.width, w.shownGeometry.height].join(' ')" | tr -d '"')"; }
 moves_sent() { pw_eval "() => window.__viewerTest.movesSent()"; }
@@ -133,6 +131,8 @@ wait_for "$(win_is test-foot 'w.placed && w.hasContent && w.decorated')" "foot's
 grep -aq 'zxdg_toplevel_decoration_v1@[0-9]*\.configure(2)' "$WORK/gateway.log" || fail "foot wasn't told server side decorations"
 FOOT="$(frame_of test-foot)"
 wait_for "() => !!document.querySelector('$FOOT .frame-title')" "foot's title bar"
+# (measured once foot has finished opening: it scales in)
+wait_windows_still
 FRAME_T="$(pw_eval "() => Math.round(document.querySelector('$FOOT .frame-title').getBoundingClientRect().height)")"
 [ "$FRAME_T" -ge 44 ] && [ "$FRAME_T" -le 50 ] || fail "the title bar is $FRAME_T px high"
 # the frame is outside the content: the title bar is right above the geometry and as wide as it (plus the borders)

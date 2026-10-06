@@ -66,7 +66,10 @@ pw type "Test Tone" >/dev/null
 wait_for "() => [...document.querySelectorAll('.apps-list [data-app]')].map((e) => e.dataset.app).join(' ') === 'test-tone.desktop'" "searching"
 pw press Enter >/dev/null
 wait_for "() => { const a = $(audio); return a.packets > 20 && a.decodedFrames > 9600 && a.peak > 0.1 && a.decoderErrors === 0 }" "decoded non-silent audio" 30
-wait_for "() => { const b = $(audio).buffer; return !!b && b.state === 'playing' }" "the jitter buffer to play" 10
+# (played, not "playing" right now: on a busy machine the headless browser's audio thread is irregular, and the buffer
+# may be rebuffering at any one moment; it's a fresh page, so its count starts at 0)
+plays() { echo "() => { const b = $(audio).buffer; return !!b && b.playedFrames > 24000 }"; }
+wait_for "$(plays)" "the jitter buffer to play half a second" 10
 [ "$(pw_eval "() => $(audio).buffer.underruns" )" = 0 ] || echo "    (the jitter buffer ran dry $(pw_eval "() => $(audio).buffer.underruns") times while starting)"
 echo "    ok"
 
@@ -132,7 +135,7 @@ click_element '#audio-button'
 wait_for "() => { const a = $(audio); return !a.muted && a.sentMuted === false }" "the unmute to be sent"
 wait_until "the capture to run again" 10 capture_running
 wait_for "() => { const a = $(audio); return a.packets > 20 && a.peak > 0.1 && a.decoderErrors === 0 }" "audio after unmuting" 20
-wait_for "() => { const b = $(audio).buffer; return !!b && b.state === 'playing' }" "the jitter buffer to play again" 10
+wait_for "$(plays)" "the jitter buffer to play half a second again" 10
 echo "    ok"
 
 step "isolation: the session's own PipeWire, nothing in the user's"

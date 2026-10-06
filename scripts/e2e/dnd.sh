@@ -57,7 +57,10 @@ wait_for "() => [...document.querySelectorAll('.apps-list [data-app]')].map((e) 
 pw press Enter >/dev/null
 wait_for "() => { const w = window.__viewerTest.windows(); return w.length === 2 && w.every((w) => w.placed && w.hasContent) }" "both windows" 40
 read -r DESK_X DESK_Y < <(pw_eval "() => { const r = document.getElementById('output').getBoundingClientRect(); return Math.round(r.x) + ' ' + Math.round(r.y) }" | tr -d '"'; echo)
-pointer_at() { pw mousemove $((DESK_X + $1)) $((DESK_Y + $2)) >/dev/null; }
+pointer_at() {
+  wait_windows_still
+  pw mousemove $((DESK_X + $1)) $((DESK_Y + $2)) >/dev/null
+}
 # where a window (by title) is, on the desktop: "x y"
 window_at() { pw_eval "() => { const w = window.__viewerTest.windows().find((w) => w.title === '$1'); return Math.round(w.shownX) + ' ' + Math.round(w.shownY) }" | tr -d '"'; }
 read -r SX SY < <(window_at dnd-source; echo)

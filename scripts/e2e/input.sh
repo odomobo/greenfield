@@ -43,6 +43,7 @@ TERMINAL="$(pw_eval "() => { const w = window.__viewerTest.windows()[0]; const s
 read -r WINDOW_ID TX TY TW TH < <(echo "$TERMINAL" | tr -d '[]"' | tr ',' ' ')
 read -r DESK_X DESK_Y < <(pw_eval "() => { const r = document.getElementById('output').getBoundingClientRect(); return Math.round(r.x) + ' ' + Math.round(r.y) }" | tr -d '"'; echo)
 # click into foot: focus
+wait_windows_still
 pw mousemove $((DESK_X + TX + TW / 2)) $((DESK_Y + TY + TH / 2)) >/dev/null
 pw mousedown >/dev/null
 pw mouseup >/dev/null
@@ -68,10 +69,14 @@ axis_since "$START" | grep -aq 'axis_value120\|axis_discrete' && fail "smooth sc
 echo "    ok"
 
 step "X11 apps started from foot's shell"
-# run in the background: "&" is Shift+7 (typing it as a character doesn't hold Shift for the page)
-background_command() { pw type "$1 " >/dev/null; pw press Shift+7 >/dev/null; pw press Enter >/dev/null; }
-background_command xclock
-background_command xeyes
+# run in the background: "&" is Shift+7 (typing it as a character doesn't hold Shift for the page). Both on one command
+# line: a new window takes the keyboard focus, so a second command typed once the first app's window is up would go to
+# that window instead of the shell.
+pw type "xclock " >/dev/null
+pw press Shift+7 >/dev/null
+pw type " xeyes " >/dev/null
+pw press Shift+7 >/dev/null
+pw press Enter >/dev/null
 wait_for "() => window.__viewerTest.windows().some((w) => w.title === 'xclock') && window.__viewerTest.windows().some((w) => w.title === 'xeyes')" "the xclock and xeyes windows" 20
 # xclock and xeyes set no _NET_WM_ICON themselves: give xclock one with xprop (a 4x4 and a 6x6 icon (xprop takes at most 64 values), red and green),
 # as an app that has one would, and wait for it on the window and in the taskbar

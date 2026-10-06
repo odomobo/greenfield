@@ -164,10 +164,56 @@ wait_until() {
 visible() { echo "!document.getElementById('$1').hidden"; }
 
 # Click in the middle of an element (real pointer events). $1: a CSS selector.
+# The rectangle of the element matching the selector $1, "x y width height" (page coordinates, rounded), once it has
+# settled: it's there, it's in the same place two animation frames apart, nothing next to it is animating (a sibling
+# growing in or shrinking away moves it), and it's what is under its center (not covered by a popup). Pointer actions aim at the element only once it has
+# settled: a position read while it moves is stale by the time a busy machine (the whole suite runs in parallel)
+# delivers the click. Fails if it doesn't settle within 5 s.
+settled_rect() {
+  local rect
+  rect="$(pw_eval "async () => {
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()))
+    const deadline = performance.now() + 5000
+    let last
+    while (performance.now() < deadline) {
+      const element = document.querySelector('$1')
+      if (element) {
+        const r = element.getBoundingClientRect()
+        const rect = [r.x, r.y, r.width, r.height].map(Math.round).join(' ')
+        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
+        const around = element.parentElement ?? element
+        const moving = around.getAnimations({ subtree: true }).some((a) => a.playState === 'running')
+        if (rect === last && !moving && r.width > 0 && r.height > 0 && hit && element.contains(hit)) {
+          return rect
+        }
+        last = rect
+      } else {
+        last = undefined
+      }
+      await frame()
+      await frame()
+    }
+    return ''
+  }" | tr -d '"')"
+  [ -n "$rect" ] || fail "$1 didn't settle (not there, moving or covered)"
+  echo "$rect"
+}
+
+# The center of the element matching $1 once it has settled (see settled_rect), "x y".
+element_center() {
+  local x y width height
+  read -r x y width height <<<"$(settled_rect "$1")"
+  echo "$((x + width / 2)) $((y + height / 2))"
+}
+
+# Wait until no window is animating (opening, closing, minimizing, restoring, maximizing): pointer actions aimed at a
+# window's coordinates land beside it while it is still scaling in. (Drags may be going on.)
+wait_windows_still() {
+  wait_for "() => !Object.keys(window.__viewerTest.animations()).length" "the windows to stop animating" 5
+}
+
 click_element() {
-  local center
-  center="$(pw_eval "() => { const r = document.querySelector('$1').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.y + r.height / 2) }" | tr -d '"')"
-  read -r CX CY <<<"$center"
+  read -r CX CY <<<"$(element_center "$1")"
   pw mousemove "$CX" "$CY" >/dev/null
   pw mousedown >/dev/null
   pw mouseup >/dev/null

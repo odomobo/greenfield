@@ -237,9 +237,7 @@ step "maximizing and restoring down from the taskbar menu"
 read -r OX OY OW OH < <(pw_eval "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return [g.x, g.y, g.width, g.height].join(' ') }" | tr -d '"'; echo)
 # $1: the menu item (data-action)
 taskbar_menu() {
-  local center
-  center="$(pw_eval "() => { const r = document.querySelector('$TASKBAR_BUTTON').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.y + r.height / 2) }" | tr -d '"')"
-  read -r CX CY <<<"$center"
+  read -r CX CY <<<"$(element_center "$TASKBAR_BUTTON")"
   pw mousemove "$CX" "$CY" >/dev/null
   pw mousedown right >/dev/null
   pw mouseup right >/dev/null
@@ -473,7 +471,8 @@ shown_geometry() {
 }
 
 CANVAS_Y="$(pw_eval "() => Math.round(document.getElementById('output').getBoundingClientRect().y)")"
-# the height of our title bar (the frame is outside the window geometry)
+# the height of our title bar (the frame is outside the window geometry), once the window has finished opening
+wait_windows_still
 FRAME_T="$(pw_eval "() => Math.round(document.querySelector('.frame-title').getBoundingClientRect().height)")"
 
 # xdg_toplevel.configure events foot has received so far
@@ -619,13 +618,15 @@ read -r GX2 GY2 GW2 GH2 < <(shown_geometry; echo)
 resize_drag $((GX2 + GW2 / 2)) $((CANVAS_Y + GY2 - FRAME_T - 3)) 0 $((GH2 - ORIGH)) >/dev/null
 
 step "taskbar preview cards: the title and a close button only; right-clicking a card opens the window menu"
-read -r CARD_X CARD_Y < <(pw_eval "() => { const r = document.querySelector('$TASKBAR_BUTTON').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.bottom - 4) }" | tr -d '"'; echo)
+read -r BX BY BW BH <<<"$(settled_rect "$TASKBAR_BUTTON")"
+CARD_X=$((BX + BW / 2))
+CARD_Y=$((BY + BH - 4))
 pw mousemove "$CARD_X" "$CARD_Y" >/dev/null
 wait_for "() => !!document.querySelector('#window-preview .preview-card')" "the window preview" 10
 [ "$(pw_eval "() => [...document.querySelectorAll('#window-preview .preview-card button')].map((b) => b.dataset.action).join(',')")" = '"close"' ] ||
   fail "the preview card has controls besides close"
 # right click on a card: the window menu, with Move and Size
-read -r PX PY < <(pw_eval "() => { const r = document.querySelector('#window-preview .preview-image').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.y + r.height / 2) }" | tr -d '"'; echo)
+read -r PX PY <<<"$(element_center '#window-preview .preview-image')"
 pw mousemove "$PX" "$PY" >/dev/null
 pw mousedown right >/dev/null
 pw mouseup right >/dev/null

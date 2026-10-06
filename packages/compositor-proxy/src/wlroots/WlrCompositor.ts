@@ -1057,6 +1057,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       case 'window.close': {
         const window = this.windowOf(message.window)
         if (window) {
+          logger.info(`The viewer closes window ${message.window} (${window.title ?? ''}).`)
           this.wlr.close(window.sid)
         }
         break

@@ -56,7 +56,10 @@ grep -aq 'DISPLAY=":[0-9]*"' "$WORK/gateway.log" || fail "the session has no X11
 # window positions are on the desktop (the output), which is below the taskbar: this is where it is on the page
 read -r DESK_X DESK_Y < <(pw_eval "() => { const r = document.getElementById('output').getBoundingClientRect(); return Math.round(r.x) + ' ' + Math.round(r.y) }" | tr -d '"'; echo)
 # move the pointer to desktop coordinates
-pointer_at() { pw mousemove $((DESK_X + $1)) $((DESK_Y + $2)) >/dev/null; }
+pointer_at() {
+  wait_windows_still
+  pw mousemove $((DESK_X + $1)) $((DESK_Y + $2)) >/dev/null
+}
 
 # $1: the app's desktop entry, $2: its name (searched for: the list of all apps is longer than the menu)
 launch() {
@@ -133,9 +136,8 @@ echo "    ok"
 step "closing X11 windows from the taskbar"
 # $1: the window's taskbar group (its app's desktop entry, or window:<id> for an app without one)
 close_from_taskbar() {
-  local button="#taskbar-items button[data-group=\"$1\"]" center
-  center="$(pw_eval "() => { const r = document.querySelector('$button').getBoundingClientRect(); return Math.round(r.x + r.width / 2) + ' ' + Math.round(r.y + r.height / 2) }" | tr -d '"')"
-  read -r CX CY <<<"$center"
+  local button="#taskbar-items button[data-group=\"$1\"]"
+  read -r CX CY <<<"$(element_center "$button")"
   pw mousemove "$CX" "$CY" >/dev/null
   pw mousedown right >/dev/null
   pw mouseup right >/dev/null
@@ -144,6 +146,9 @@ close_from_taskbar() {
 }
 close_from_taskbar "window:$(json "$XEV" id)"
 wait_for "() => !window.__viewerTest.windows().some((w) => w.title === 'Event Tester')" "xev's window to close" 10
+# its taskbar button shrinks away and the next one slides into its place: aim at that one only once it's there (the
+# window list changes first, the taskbar a moment later)
+wait_for "() => !document.querySelector('#taskbar-items button[data-group=\"window:$(json "$XEV" id)\"]') && !document.querySelector('#taskbar-items .leaving')" "xev's taskbar button to go" 5
 close_from_taskbar test-xfontsel.desktop
 wait_for "() => window.__viewerTest.windows().length === 0" "xfontsel's window to close" 10
 echo "    ok"

@@ -22,6 +22,15 @@
   driven by `scripts/e2e/browser-driver.js` rather than `playwright-cli` (which waits a fixed second after every
   command). New e2e checks go into one of those scripts (or a new script added to the runner), and wait on conditions
   with `wait_for` / `wait_until` from `scripts/e2e/lib.sh`, never fixed sleeps.
+- The scripts share the machine, so a check must not depend on how fast things happen (the suite was flaky until
+  2026-10-05 from exactly this):
+  - aim pointer actions at page elements with `element_center` / `settled_rect` (lib.sh: they wait until the element
+    stops moving and isn't covered), and at window coordinates only after `wait_windows_still` (windows scale in when
+    they open);
+  - wait for the state you act on, not one that precedes it (the viewer's window list changes before the taskbar
+    re-renders; a new window takes the keyboard focus, so type a whole command line before anything opens a window);
+  - measure layout only once it's still; compare wall-clock times only with wide margins, or check a difference twice
+    before failing (a real leak shows every time, load only now and then).
 
 ## Never kill processes by name
 

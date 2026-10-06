@@ -52,6 +52,7 @@ wait_for "() => { const w = window.__viewerTest.windows(); return w.length === 1
 # the page needs focus to write the clipboard: click into foot's window
 read -r DESK_X DESK_Y < <(pw_eval "() => { const r = document.getElementById('output').getBoundingClientRect(); return Math.round(r.x) + ' ' + Math.round(r.y) }" | tr -d '"'; echo)
 read -r WX WY < <(pw_eval "() => { const w = window.__viewerTest.windows()[0]; return Math.round(w.shownX + 100) + ' ' + Math.round(w.shownY + 100) }" | tr -d '"'; echo)
+wait_windows_still
 pw mousemove $((DESK_X + WX)) $((DESK_Y + WY)) >/dev/null
 pw mousedown >/dev/null
 pw mouseup >/dev/null

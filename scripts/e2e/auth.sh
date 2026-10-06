@@ -53,14 +53,27 @@ grep -q "$(hostname)" "$WORK/login.html" || fail "hostname not shown"
 echo "    ok"
 
 step "unknown user and wrong password look the same"
-read -r STATUS_UNKNOWN TIME_UNKNOWN < <(login_attempt unknown "nosuchuser-$$" "whatever-password")
-read -r STATUS_WRONG TIME_WRONG < <(login_attempt wrong "$ME" "not-the-password")
-echo "    unknown user: $STATUS_UNKNOWN in ${TIME_UNKNOWN}s, wrong password: $STATUS_WRONG in ${TIME_WRONG}s"
-[ "$STATUS_UNKNOWN" = "$STATUS_WRONG" ] || fail "different status codes"
-cmp -s "$WORK/unknown.json" "$WORK/wrong.json" || fail "different response bodies for unknown user and wrong password"
-# both wait out the (scaled) minimum failure time of 3 s / $TIME_SCALE, and are indistinguishable by timing
-node -e "const [a,b,scale]=process.argv.slice(1).map(Number); const min=3/scale*0.9; if (a<min||b<min||Math.abs(a-b)>0.15) process.exit(1)" \
-  "$TIME_UNKNOWN" "$TIME_WRONG" "$TIME_SCALE" || fail "failure timing differs or is too fast"
+# $1: the attempt's number. Both wait out the (scaled) minimum failure time of 3 s / $TIME_SCALE (a lower bound: load
+# can't make them faster) and are indistinguishable by timing. A difference is checked twice before it counts: a real
+# leak (another code path for a real user) shows every time, a busy machine (the suite runs in parallel) only now and then.
+same_failures() {
+  read -r STATUS_UNKNOWN TIME_UNKNOWN < <(login_attempt unknown "nosuchuser-$$-$1" "whatever-password")
+  read -r STATUS_WRONG TIME_WRONG < <(login_attempt wrong "$ME" "not-the-password-$1")
+  echo "    unknown user: $STATUS_UNKNOWN in ${TIME_UNKNOWN}s, wrong password: $STATUS_WRONG in ${TIME_WRONG}s"
+  [ "$STATUS_UNKNOWN" = "$STATUS_WRONG" ] || fail "different status codes"
+  cmp -s "$WORK/unknown.json" "$WORK/wrong.json" || fail "different response bodies for unknown user and wrong password"
+  node -e "const [a,b,scale]=process.argv.slice(1).map(Number); if (a < 3/scale*0.9 || b < 3/scale*0.9) process.exit(2); if (Math.abs(a-b) > 0.15) process.exit(1)" \
+    "$TIME_UNKNOWN" "$TIME_WRONG" "$TIME_SCALE"
+}
+result=0
+same_failures 1 || result=$?
+[ "$result" != 2 ] || fail "a failed login was faster than the minimum failure time"
+if [ "$result" = 1 ]; then
+  echo "    (timing differs, once more)"
+  result=0
+  same_failures 2 || result=$?
+  [ "$result" = 0 ] || fail "failure timing differs (twice) or is too fast"
+fi
 echo "    ok"
 
 step "failed logins are throttled, for any username"

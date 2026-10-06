@@ -133,6 +133,7 @@ for _ in $(seq 1 100); do
   sleep 0.15
 done
 F0="$(frames)"
+wait_windows_still
 pw mousemove $((TX + TW / 2)) $((TY + TH / 2)) >/dev/null
 pw mousedown >/dev/null
 pw mouseup >/dev/null
