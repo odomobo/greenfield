@@ -1,22 +1,28 @@
 /**
- * The web process: everything network-facing, running unprivileged. TLS, the page, sign-in tokens, Origin checks,
- * rate limiting, the viewer's static files, and relaying authenticated viewer WebSockets to the user's session process
- * over its Unix socket.
+ * The web process: everything network-facing, running unprivileged. TLS, the page, Origin checks, failed-sign-in
+ * throttling, the viewer's static files, the sign-in conversation on the page's WebSocket, and relaying that same
+ * WebSocket to the user's session process over its Unix socket once signed in.
  *
- * It knows users only through tickets the monitor hands out on successful authentication.
+ * It knows users only through tickets the monitor hands out on successful authentication, and uses each ticket once,
+ * right away, to attach to (or start) the user's desktop.
  *
- * Signing in works like unlocking a screen: it's valid for one open page only. The page keeps its token in memory
- * (never in cookies or storage) and holds a presence WebSocket to /control; when that closes (tab closed, reloaded,
- * navigated away), the token is revoked after a short grace for network blips. A second tab has to sign in itself.
- * The desktop sessions behind it keep running regardless.
+ * Signing in works like unlocking a screen: the page's one WebSocket (`/ws`) is the sign-in. The page signs in on it
+ * (in-band, see "Sign-in" in libs/scene-protocol) and the same WebSocket then carries the desktop. There are no
+ * tokens or cookies: when the WebSocket closes (tab closed, reloaded, network gone, another sign-in took the desktop
+ * over), the page has to sign in again. The desktop behind it keeps running until the user logs out.
  */
 import { createHash, randomBytes } from 'node:crypto'
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
-import { createServer as createHTTPServer, IncomingMessage, Server, ServerResponse } from 'node:http'
+import { IncomingMessage, ServerResponse } from 'node:http'
 import { createServer as createHTTPSServer } from 'node:https'
 import { connect, Server as NetServer, Socket } from 'node:net'
 import path from 'node:path'
-import { WebSocket, WebSocketServer } from 'ws'
+import {
+  CLOSE_SIGN_IN_FAILED,
+  SIGN_IN_MAX_FRAME_BYTES,
+  SignInClientMessage,
+  SignInServerMessage,
+} from '@gfld/scene-protocol'
 import { MonitorReply, MonitorReplyEnvelope, WebRequest, WebStart } from './ipc'
 import { log } from './log'
 import { errorPage, escapeHTML } from './pages'
@@ -25,39 +31,23 @@ import { RateLimiter } from './rate-limit'
 process.title = 'gateway-web'
 
 const MIN_FAILED_LOGIN_MS = 3000
-const TOKEN_MAX_MS = 7 * 24 * 3600 * 1000
-/** a new token must get its presence connection within this time */
-const PRESENCE_ATTACH_MS = 10_000
-/** a token survives losing its presence connection this long (network blips), not longer */
-const PRESENCE_GRACE_MS = 5_000
-/** divides the three delays above in tests (--dev-time-scale, only accepted together with --dev-auth); 1 otherwise */
+/** divides the failed-sign-in delay in tests (--dev-time-scale, only accepted together with --dev-auth); 1 otherwise */
 const scaled = (ms: number) => ms / (start?.timeScale ?? 1)
-const PRESENCE_PING_MS = 15_000
-/** the first WebSocket message (the token) must arrive within this time */
-const WS_AUTH_TIMEOUT_MS = 10_000
-const MAX_BODY = 4096
+/** the page sends its `begin` right after the upgrade */
+const BEGIN_TIMEOUT_MS = 10_000
+/** a person answers each prompt (a password now, a one-time code later) within this time */
+const ANSWER_TIMEOUT_MS = 60_000
+const MAX_USERNAME = 64
+const MAX_ANSWER = 1024
+/** the prompt the password is asked with (the only one until PAM's own prompts are relayed) */
+const PASSWORD_PROMPT = 'Password: '
 const TCP_NOTSENT_LOWAT_BYTES = 32 * 1024
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
-/** WebSocket close codes the page understands */
-const CLOSE_UNAUTHORIZED = 4001
-const CLOSE_NOT_FOUND = 4004
 const staticDir = path.resolve(__dirname, '../static')
 
-type SignIn = {
-  ticket: string
-  username: string
-  createdAt: number
-  /** the page's /control WebSocket */
-  presence?: WebSocket
-  revokeTimer?: NodeJS.Timeout
-  /** viewer WebSockets relayed with this token, closed when it's revoked */
-  relays: Set<Socket>
-}
-
 let start!: WebStart
-const signIns = new Map<string, SignIn>()
-// per username: few tries; per IP: more, since many users may share an address (NAT)
-const userFailures = new RateLimiter(5)
+// per IP, generously, since many users may share an address (NAT). No per-user throttling: per-account lockout is
+// PAM's job (pam_faillock)
 const ipFailures = new RateLimiter(20)
 
 // --- monitor RPC ---
@@ -88,45 +78,8 @@ process.on('message', (message: any, handle: unknown) => {
 })
 process.on('disconnect', () => process.exit(0))
 
-// --- sign-ins ---
-
-function revoke(token: string) {
-  const signIn = signIns.get(token)
-  if (signIn === undefined) {
-    return
-  }
-  signIns.delete(token)
-  clearTimeout(signIn.revokeTimer)
-  signIn.presence?.close(CLOSE_UNAUTHORIZED, 'signed out')
-  for (const relay of signIn.relays) {
-    relay.destroy()
-  }
-  void monitor({ type: 'logout', ticket: signIn.ticket })
-}
-
-function lookup(token: string | undefined): [string, SignIn] | undefined {
-  if (token === undefined) {
-    return undefined
-  }
-  const signIn = signIns.get(token)
-  if (signIn === undefined) {
-    return undefined
-  }
-  if (Date.now() - signIn.createdAt > TOKEN_MAX_MS) {
-    revoke(token)
-    return undefined
-  }
-  return [token, signIn]
-}
-
-function bearer(request: IncomingMessage): [string, SignIn] | undefined {
-  const match = /^Bearer ([A-Za-z0-9_-]{1,128})$/.exec(request.headers.authorization ?? '')
-  return lookup(match?.[1])
-}
-
 // --- helpers ---
 
-let tls = false
 let indexHTML = ''
 
 function securityHeaders(): Record<string, string> {
@@ -136,12 +89,12 @@ function securityHeaders(): Record<string, string> {
       "worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
-    // not no-referrer: that makes browsers send "Origin: null" on same-origin POSTs, which the Origin check needs
+    // not no-referrer: that makes browsers send "Origin: null" on same-origin requests, which the Origin check needs
     'Referrer-Policy': 'same-origin',
     'Cross-Origin-Opener-Policy': 'same-origin',
     'Cross-Origin-Resource-Policy': 'same-origin',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
-    ...(tls ? { 'Strict-Transport-Security': 'max-age=31536000' } : {}),
+    'Strict-Transport-Security': 'max-age=31536000',
   }
 }
 
@@ -156,17 +109,13 @@ function send(response: ServerResponse, status: number, body: string, headers: R
     .end(body)
 }
 
-function sendJSON(response: ServerResponse, status: number, body: unknown) {
-  send(response, status, JSON.stringify(body), { 'Content-Type': 'application/json' })
-}
-
 function redirect(response: ServerResponse, location: string) {
   response.writeHead(303, { ...securityHeaders(), Location: location, 'Cache-Control': 'no-store' }).end()
 }
 
 /**
- * Same-origin check for state-changing requests and WebSockets: the browser-supplied Origin must match the host the
- * request was sent to (or an explicitly allowed origin). Requests without Origin are refused.
+ * Same-origin check for the WebSocket: the browser-supplied Origin must match the host the request was sent to (or
+ * an explicitly allowed origin). Requests without Origin are refused.
  */
 function originAllowed(request: IncomingMessage): boolean {
   const origin = request.headers.origin
@@ -174,42 +123,16 @@ function originAllowed(request: IncomingMessage): boolean {
   if (origin === undefined || host === undefined) {
     return false
   }
-  if (origin === `${tls ? 'https' : 'http'}://${host}`) {
+  if (origin === `https://${host}`) {
     return true
   }
   return start.allowedOrigins.includes(origin)
 }
 
-function readJSONBody(request: IncomingMessage): Promise<any> {
-  return new Promise((resolve, reject) => {
-    if (!(request.headers['content-type'] ?? '').startsWith('application/json')) {
-      reject(new Error('not json'))
-      return
-    }
-    let size = 0
-    const chunks: Buffer[] = []
-    request.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > MAX_BODY) {
-        reject(new Error('body too large'))
-        request.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-    request.on('end', () => {
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'))
-      } catch (e) {
-        reject(e)
-      }
-    })
-    request.on('error', reject)
-  })
-}
-
-function clientIP(request: IncomingMessage): string {
-  return request.socket.remoteAddress ?? 'unknown'
+/** The client's address as text, IPv4 without the IPv6 mapping prefix. */
+function clientIP(socket: Socket): string {
+  const address = socket.remoteAddress ?? ''
+  return address.startsWith('::ffff:') && address.includes('.') ? address.slice('::ffff:'.length) : address
 }
 
 const contentTypes: Record<string, string> = {
@@ -241,108 +164,7 @@ function serveFile(response: ServerResponse, root: string, relative: string) {
 
 // --- routes ---
 
-/** POST /api/login, body { username, password } -> { token, username } */
-async function handleLogin(request: IncomingMessage, response: ServerResponse) {
-  // a monotonic clock: wall clock adjustments mustn't shorten the minimum failure time
-  const startedAt = performance.now()
-  const respondFailure = async (message: string) => {
-    // failures take the same minimum time whatever the reason
-    const wait = scaled(MIN_FAILED_LOGIN_MS) - (performance.now() - startedAt)
-    if (wait > 0) {
-      await new Promise((resolve) => setTimeout(resolve, wait))
-    }
-    sendJSON(response, 401, { error: message })
-  }
-
-  let body: any
-  try {
-    body = await readJSONBody(request)
-  } catch {
-    sendJSON(response, 400, { error: 'bad request' })
-    return
-  }
-  const username = (typeof body?.username === 'string' ? body.username : '').trim().slice(0, 64)
-  const password = typeof body?.password === 'string' ? body.password : ''
-
-  if (!originAllowed(request)) {
-    await respondFailure('The sign-in request was refused. Please try again.')
-    return
-  }
-
-  const ip = clientIP(request)
-  const userKey = username.toLowerCase()
-  if (ipFailures.blocked(ip) || userFailures.blocked(userKey)) {
-    await respondFailure('Too many failed attempts. Try again in a few minutes.')
-    return
-  }
-
-  const reply =
-    username.length > 0 && password.length > 0 && password.length <= 1024
-      ? await monitor({ type: 'auth', username, password })
-      : ({ ok: false, error: 'auth-failed' } as const)
-
-  if (!reply.ok || reply.type !== 'auth') {
-    ipFailures.fail(ip)
-    userFailures.fail(userKey)
-    log.info(`Failed login from ${ip}.`)
-    await respondFailure('The username or password is incorrect.')
-    return
-  }
-
-  userFailures.succeed(userKey)
-  const token = randomBytes(32).toString('base64url')
-  signIns.set(token, {
-    ticket: reply.ticket,
-    username: reply.username,
-    createdAt: Date.now(),
-    relays: new Set(),
-    revokeTimer: setTimeout(() => revoke(token), scaled(PRESENCE_ATTACH_MS)),
-  })
-  sendJSON(response, 200, { token, username: reply.username })
-}
-
-async function handlePost(request: IncomingMessage, response: ServerResponse, url: URL) {
-  if (url.pathname === '/api/login') {
-    await handleLogin(request, response)
-    return
-  }
-
-  const current = bearer(request)
-  if (current === undefined) {
-    sendJSON(response, 401, { error: 'unauthenticated' })
-    return
-  }
-  // the bearer header already can't come from another site; this is defense in depth
-  if (!originAllowed(request)) {
-    sendJSON(response, 403, { error: 'forbidden' })
-    return
-  }
-  const [token, signIn] = current
-
-  if (url.pathname === '/api/logout') {
-    revoke(token)
-    sendJSON(response, 200, { ok: true })
-    return
-  }
-  if (url.pathname === '/api/desktop') {
-    // attach or create: the user's desktop is started if it isn't running
-    const reply = await monitor({ type: 'desktop', ticket: signIn.ticket })
-    if (reply.ok) {
-      sendJSON(response, 200, { ok: true })
-    } else {
-      sendJSON(response, 500, { error: 'The desktop could not be started.' })
-    }
-    return
-  }
-  if (url.pathname === '/api/desktop/end') {
-    const reply = await monitor({ type: 'endDesktop', ticket: signIn.ticket })
-    sendJSON(response, reply.ok ? 200 : 404, reply.ok ? { ok: true } : { error: 'not found' })
-    return
-  }
-  sendJSON(response, 404, { error: 'not found' })
-}
-
-async function handleGet(request: IncomingMessage, response: ServerResponse, url: URL) {
+function handleGet(response: ServerResponse, url: URL) {
   if (url.pathname.startsWith('/static/')) {
     serveFile(response, staticDir, url.pathname.slice('/static/'.length))
     return
@@ -361,162 +183,168 @@ async function handleGet(request: IncomingMessage, response: ServerResponse, url
     redirect(response, '/')
     return
   }
-
-  if (!url.pathname.startsWith('/api/')) {
-    send(response, 404, errorPage(404))
-    return
-  }
-  const current = bearer(request)
-  if (current === undefined) {
-    sendJSON(response, 401, { error: 'unauthenticated' })
-    return
-  }
-  const [, signIn] = current
-
-  if (url.pathname === '/api/me') {
-    sendJSON(response, 200, { username: signIn.username })
-    return
-  }
-  sendJSON(response, 404, { error: 'not found' })
+  send(response, 404, errorPage(404))
 }
 
-// --- WebSockets ---
+// --- the WebSocket: sign-in, then the relay to the desktop ---
 
 function rejectUpgrade(socket: Socket, status: number) {
   const text = status === 400 ? 'Bad Request' : status === 403 ? 'Forbidden' : 'Not Found'
   socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
 }
 
-const presenceServer = new WebSocketServer({ noServer: true, maxPayload: 1024, perMessageDeflate: false })
-
 /**
- * The page's presence: the first message is its token. The token stays valid while this connection is open (and
- * for a short grace after it closes).
+ * One client frame from the start of `buffer`: the payload of a masked, unfragmented text frame of at most
+ * SIGN_IN_MAX_FRAME_BYTES and the frame's size; 'incomplete' if more bytes are needed; undefined if it's anything else.
  */
-function handlePresence(ws: WebSocket) {
-  let token: string | undefined
-  let alive = true
-  const authTimer = setTimeout(() => ws.close(CLOSE_UNAUTHORIZED, 'unauthorized'), WS_AUTH_TIMEOUT_MS)
-  const pingTimer = setInterval(() => {
-    if (!alive) {
-      ws.terminate()
-      return
+function parseTextFrame(buffer: Buffer): { payload: string; size: number } | 'incomplete' | undefined {
+  if (buffer.length < 2) {
+    return 'incomplete'
+  }
+  const fin = buffer[0] & 0x80
+  const reserved = buffer[0] & 0x70
+  const opcode = buffer[0] & 0x0f
+  const masked = buffer[1] & 0x80
+  let length = buffer[1] & 0x7f
+  let offset = 2
+  if (!fin || reserved || opcode !== 1 || !masked || length === 127) {
+    return undefined
+  }
+  if (length === 126) {
+    if (buffer.length < 4) {
+      return 'incomplete'
     }
-    alive = false
-    ws.ping()
-  }, PRESENCE_PING_MS)
-  ws.on('pong', () => (alive = true))
-  ws.on('message', (data) => {
-    if (token !== undefined) {
-      return
-    }
-    clearTimeout(authTimer)
-    const current = lookup(data.toString())
-    if (current === undefined) {
-      ws.close(CLOSE_UNAUTHORIZED, 'unauthorized')
-      return
-    }
-    const [currentToken, signIn] = current
-    token = currentToken
-    const previous = signIn.presence
-    signIn.presence = ws
-    clearTimeout(signIn.revokeTimer)
-    signIn.revokeTimer = undefined
-    // a reconnect after a blip; the old connection may not have noticed yet
-    previous?.terminate()
-    ws.send(JSON.stringify({ type: 'ok' }))
-  })
-  ws.on('close', () => {
-    clearTimeout(authTimer)
-    clearInterval(pingTimer)
-    const signIn = token === undefined ? undefined : signIns.get(token)
-    if (signIn?.presence === ws) {
-      signIn.presence = undefined
-      const closedToken = token!
-      signIn.revokeTimer = setTimeout(() => revoke(closedToken), scaled(PRESENCE_GRACE_MS))
-    }
-  })
-  ws.on('error', () => ws.terminate())
+    length = buffer.readUInt16BE(2)
+    offset = 4
+  }
+  if (length > SIGN_IN_MAX_FRAME_BYTES) {
+    return undefined
+  }
+  if (buffer.length < offset + 4 + length) {
+    return 'incomplete'
+  }
+  const mask = buffer.subarray(offset, offset + 4)
+  const payload = Buffer.alloc(length)
+  for (let i = 0; i < length; i++) {
+    payload[i] = buffer[offset + 4 + i] ^ mask[i % 4]
+  }
+  return { payload: payload.toString('utf8'), size: offset + 4 + length }
 }
 
 /**
- * Reads the client's first WebSocket frame (masked, unfragmented text, at most 1 KiB) from the socket. Resolves
- * with its payload and whatever bytes followed it, with the socket paused; undefined if the client sent something
- * else, went away or took too long.
+ * Reads the page's sign-in frames from the socket (we did the WebSocket handshake ourselves: the bytes after the
+ * sign-in are relayed as they are). Once the sign-in is over, `detach` stops reading and returns what came after.
  */
-function readFirstFrame(socket: Socket, head: Buffer): Promise<{ payload: string; rest: Buffer } | undefined> {
-  return new Promise((resolve) => {
-    let buffer = head
-    const finish = (result: { payload: string; rest: Buffer } | undefined) => {
-      clearTimeout(timer)
-      socket.pause()
-      socket.off('data', onData)
-      socket.off('close', onClose)
-      resolve(result)
+class SignInReader {
+  private buffer: Buffer
+  private broken = false
+  private waiting?: (payload: string | undefined) => void
+
+  constructor(
+    private readonly socket: Socket,
+    head: Buffer,
+  ) {
+    this.buffer = head
+    socket.on('data', this.onData)
+    socket.on('close', this.onClose)
+  }
+
+  /** The next frame's payload; undefined if the page sent something else, went away or took longer than timeoutMs. */
+  next(timeoutMs: number): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => finish(undefined), timeoutMs)
+      const finish = (payload: string | undefined) => {
+        clearTimeout(timer)
+        this.waiting = undefined
+        resolve(payload)
+      }
+      this.waiting = finish
+      this.parse()
+    })
+  }
+
+  /** Stop reading (the socket stays paused): the bytes received after the last frame. */
+  detach(): Buffer {
+    this.socket.pause()
+    this.socket.off('data', this.onData)
+    this.socket.off('close', this.onClose)
+    return this.buffer
+  }
+
+  private readonly onData = (chunk: Buffer) => {
+    this.buffer = Buffer.concat([this.buffer, chunk])
+    // a frame and a bit: the page sends one frame and waits for the answer
+    if (this.buffer.length > 2 * SIGN_IN_MAX_FRAME_BYTES) {
+      this.broken = true
     }
-    const tryParse = () => {
-      if (buffer.length < 2) {
-        return
-      }
-      const fin = buffer[0] & 0x80
-      const reserved = buffer[0] & 0x70
-      const opcode = buffer[0] & 0x0f
-      const masked = buffer[1] & 0x80
-      let length = buffer[1] & 0x7f
-      let offset = 2
-      if (!fin || reserved || opcode !== 1 || !masked || length === 127) {
-        finish(undefined)
-        return
-      }
-      if (length === 126) {
-        if (buffer.length < 4) {
-          return
-        }
-        length = buffer.readUInt16BE(2)
-        offset = 4
-      }
-      if (length > 1024) {
-        finish(undefined)
-        return
-      }
-      if (buffer.length < offset + 4 + length) {
-        return
-      }
-      const mask = buffer.subarray(offset, offset + 4)
-      const payload = Buffer.alloc(length)
-      for (let i = 0; i < length; i++) {
-        payload[i] = buffer[offset + 4 + i] ^ mask[i % 4]
-      }
-      finish({ payload: payload.toString('utf8'), rest: buffer.subarray(offset + 4 + length) })
+    this.parse()
+  }
+
+  private readonly onClose = () => {
+    this.broken = true
+    this.parse()
+  }
+
+  private parse() {
+    if (this.waiting === undefined) {
+      return
     }
-    const onData = (chunk: Buffer) => {
-      buffer = Buffer.concat([buffer, chunk])
-      if (buffer.length > 4096) {
-        finish(undefined)
-        return
-      }
-      tryParse()
+    const frame = this.broken ? undefined : parseTextFrame(this.buffer)
+    if (frame === 'incomplete') {
+      return
     }
-    const onClose = () => finish(undefined)
-    const timer = setTimeout(() => finish(undefined), WS_AUTH_TIMEOUT_MS)
-    socket.on('data', onData)
-    socket.on('close', onClose)
-    tryParse()
-  })
+    if (frame === undefined) {
+      this.broken = true
+      this.waiting(undefined)
+      return
+    }
+    this.buffer = this.buffer.subarray(frame.size)
+    this.waiting(frame.payload)
+  }
 }
 
-/** Close a WebSocket we did the handshake for (server frames are unmasked). */
+/** The page's sign-in message in a frame, if it is one. */
+function parseSignInMessage(payload: string | undefined): SignInClientMessage | undefined {
+  if (payload === undefined) {
+    return undefined
+  }
+  let message: any
+  try {
+    message = JSON.parse(payload)
+  } catch {
+    return undefined
+  }
+  if (message?.type === 'begin' && typeof message.username === 'string') {
+    return { type: 'begin', username: message.username }
+  }
+  if (message?.type === 'answer' && typeof message.text === 'string') {
+    return { type: 'answer', text: message.text }
+  }
+  return undefined
+}
+
+/** Send a text frame (server frames are unmasked). */
+function sendFrame(socket: Socket, message: SignInServerMessage) {
+  const payload = Buffer.from(JSON.stringify(message))
+  const header =
+    payload.length < 126
+      ? Buffer.from([0x81, payload.length])
+      : Buffer.from([0x81, 126, payload.length >> 8, payload.length & 0xff])
+  socket.write(Buffer.concat([header, payload]))
+}
+
+/** Close a WebSocket we did the handshake for. */
 function closeWebSocket(socket: Socket, code: number, reason: string) {
   const text = Buffer.from(reason)
   socket.end(Buffer.concat([Buffer.from([0x88, 2 + text.length, code >> 8, code & 0xff]), text]))
 }
 
 /**
- * Viewer WebSocket: complete the handshake, take the token from the first message, find the user's desktop, then relay bytes
- * to its Unix socket (with a handshake of our own there). TLS ends here, so its key
- * never leaves this process. The token isn't in the URL, so it doesn't end up in logs or history.
+ * The page's WebSocket: complete the handshake, run the sign-in on it (prompts and answers, see "Sign-in" in
+ * libs/scene-protocol), attach to or start the user's desktop, then relay the bytes to its Unix socket (with a
+ * handshake of our own there). TLS ends here, so its key never leaves this process.
  */
-async function handleViewer(request: IncomingMessage, socket: Socket, head: Buffer) {
+async function handleWebSocket(request: IncomingMessage, socket: Socket, head: Buffer) {
   const key = request.headers['sec-websocket-key']
   if (
     typeof key !== 'string' ||
@@ -533,39 +361,92 @@ async function handleViewer(request: IncomingMessage, socket: Socket, head: Buff
         .update(key + WS_GUID)
         .digest('base64')}\r\n\r\n`,
   )
+  const ip = clientIP(socket)
+  const reader = new SignInReader(socket, head)
+  const refuse = () => closeWebSocket(socket, CLOSE_SIGN_IN_FAILED, 'sign-in failed')
 
-  const first = await readFirstFrame(socket, head)
-  const current = lookup(first?.payload)
-  if (first === undefined || current === undefined) {
-    closeWebSocket(socket, CLOSE_UNAUTHORIZED, 'unauthorized')
+  const begin = parseSignInMessage(await reader.next(BEGIN_TIMEOUT_MS))
+  if (begin?.type !== 'begin') {
+    refuse()
     return
   }
-  const [, signIn] = current
-  const reply = await monitor({ type: 'desktopSocket', ticket: signIn.ticket })
-  if (!reply.ok || reply.type !== 'socket') {
-    closeWebSocket(socket, CLOSE_NOT_FOUND, 'not found')
-    return
-  }
-  if (socket.destroyed || !signIns.has(current[0])) {
-    socket.destroy()
+  // (an unusable name is asked for its password like any other, and fails like a wrong password)
+  const username = begin.username.trim()
+  sendFrame(socket, { type: 'prompt', text: PASSWORD_PROMPT, echo: false })
+  const answer = parseSignInMessage(await reader.next(ANSWER_TIMEOUT_MS))
+  if (answer?.type !== 'answer') {
+    refuse()
     return
   }
 
-  signIn.relays.add(socket)
-  const upstream = connect(reply.path)
+  // a monotonic clock: wall clock adjustments mustn't shorten the minimum failure time
+  const startedAt = performance.now()
+  const fail = async (message: string) => {
+    // failures take the same minimum time whatever the reason
+    const wait = scaled(MIN_FAILED_LOGIN_MS) - (performance.now() - startedAt)
+    if (wait > 0) {
+      await new Promise((resolve) => setTimeout(resolve, wait))
+    }
+    sendFrame(socket, { type: 'result', ok: false, message })
+    refuse()
+  }
+  if (ipFailures.blocked(ip)) {
+    await fail('Too many failed attempts. Try again in a few minutes.')
+    return
+  }
+  const password = answer.text
+  const reply =
+    username.length > 0 && username.length <= MAX_USERNAME && password.length > 0 && password.length <= MAX_ANSWER
+      ? await monitor({ type: 'auth', username, password, ip })
+      : ({ ok: false, error: 'auth-failed' } as const)
+  if (!reply.ok || reply.type !== 'auth') {
+    ipFailures.fail(ip)
+    log.info(`Failed sign-in from ${ip}.`)
+    await fail('The username or password is incorrect.')
+    return
+  }
+  if (socket.destroyed) {
+    return
+  }
+
+  // attach or create
+  const desktop = await monitor({ type: 'desktop', ticket: reply.ticket })
+  if (!desktop.ok || desktop.type !== 'socket') {
+    sendFrame(socket, { type: 'result', ok: false, message: 'The desktop could not be started.' })
+    refuse()
+    return
+  }
+  if (socket.destroyed) {
+    return
+  }
+  relay(socket, reader, desktop.path, ip, reply.username)
+}
+
+/**
+ * Connect the signed-in page to its desktop: a WebSocket handshake with the session (telling it the client's IP, for
+ * the takeover message of the page it replaces), then the result frame, then bytes both ways.
+ */
+function relay(socket: Socket, reader: SignInReader, socketPath: string, ip: string, username: string) {
+  const upstream = connect(socketPath)
   const destroyBoth = () => {
-    signIn.relays.delete(socket)
     socket.destroy()
     upstream.destroy()
   }
-  upstream.on('error', destroyBoth)
+  const unavailable = () => {
+    if (!socket.destroyed) {
+      sendFrame(socket, { type: 'result', ok: false, message: 'The desktop could not be reached.' })
+      closeWebSocket(socket, CLOSE_SIGN_IN_FAILED, 'sign-in failed')
+    }
+    upstream.destroy()
+  }
+  upstream.on('error', unavailable)
   socket.on('error', destroyBoth)
-  upstream.on('close', destroyBoth)
   socket.on('close', destroyBoth)
   upstream.once('connect', () => {
     upstream.write(
       'GET /viewer HTTP/1.1\r\nHost: session\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
-        `Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\n\r\n`,
+        `Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\n` +
+        `X-Client-IP: ${ip}\r\n\r\n`,
     )
     let response = Buffer.alloc(0)
     const onResponse = (chunk: Buffer) => {
@@ -573,22 +454,27 @@ async function handleViewer(request: IncomingMessage, socket: Socket, head: Buff
       const end = response.indexOf('\r\n\r\n')
       if (end < 0) {
         if (response.length > 8192) {
-          destroyBoth()
+          unavailable()
         }
         return
       }
       upstream.off('data', onResponse)
       if (!response.subarray(0, end).toString('latin1').startsWith('HTTP/1.1 101')) {
-        closeWebSocket(socket, 1011, 'session unavailable')
-        upstream.destroy()
+        unavailable()
         return
       }
+      upstream.off('error', unavailable)
+      upstream.on('error', destroyBoth)
+      upstream.on('close', destroyBoth)
+      const rest = reader.detach()
+      log.info(`Signed in: ${username} from ${ip}.`)
+      sendFrame(socket, { type: 'result', ok: true, username })
       const upstreamRest = response.subarray(end + 4)
       if (upstreamRest.length > 0) {
         socket.write(upstreamRest)
       }
-      if (first.rest.length > 0) {
-        upstream.write(first.rest)
+      if (rest.length > 0) {
+        upstream.write(rest)
       }
       socket.pipe(upstream)
       upstream.pipe(socket)
@@ -599,8 +485,8 @@ async function handleViewer(request: IncomingMessage, socket: Socket, head: Buff
 
 function handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer) {
   socket.on('error', () => socket.destroy())
-  const url = new URL(request.url ?? '/', 'http://gateway')
-  if (url.pathname !== '/ws' && url.pathname !== '/control') {
+  const url = new URL(request.url ?? '/', 'https://gateway')
+  if (url.pathname !== '/ws') {
     rejectUpgrade(socket, 404)
     return
   }
@@ -608,11 +494,10 @@ function handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer) {
     rejectUpgrade(socket, 403)
     return
   }
-  if (url.pathname === '/control') {
-    presenceServer.handleUpgrade(request, socket, head, handlePresence)
-  } else {
-    handleViewer(request, socket, head).catch(() => socket.destroy())
-  }
+  handleWebSocket(request, socket, head).catch((e) => {
+    log.error(`Sign-in failed: ${e.message}`)
+    socket.destroy()
+  })
 }
 
 function tuneSocket(socket: Socket) {
@@ -633,34 +518,30 @@ function tuneSocket(socket: Socket) {
 }
 
 function serve(listener: NetServer) {
-  tls = start.tls !== undefined
   // the host name is shown on the sign-in form without needing scripts or a request
   indexHTML = readFileSync(path.join(start.viewerDir, 'index.html'), 'utf8').replace(
     '<!--hostname-->',
     start.hostname ? escapeHTML(start.hostname) : '&nbsp;',
   )
 
-  const server: Server = tls
-    ? createHTTPSServer({ cert: start.tls!.cert, key: start.tls!.key, minVersion: 'TLSv1.2' })
-    : createHTTPServer()
+  const server = createHTTPSServer({ cert: start.tls.cert, key: start.tls.key, minVersion: 'TLSv1.2' })
   server.headersTimeout = 20_000
   server.requestTimeout = 30_000
 
   server.on('connection', (socket: Socket) => tuneSocket(socket))
   server.on('request', (request: IncomingMessage, response: ServerResponse) => {
-    const url = new URL(request.url ?? '/', 'http://gateway')
-    const handler =
-      request.method === 'GET' || request.method === 'HEAD'
-        ? handleGet(request, response, url)
-        : request.method === 'POST'
-          ? handlePost(request, response, url)
-          : Promise.resolve(send(response, 405, errorPage(405), { Allow: 'GET, POST' }))
-    handler.catch((e) => {
+    try {
+      if (request.method === 'GET' || request.method === 'HEAD') {
+        handleGet(response, new URL(request.url ?? '/', 'https://gateway'))
+      } else {
+        send(response, 405, errorPage(405), { Allow: 'GET' })
+      }
+    } catch (e: any) {
       log.error(`Request failed: ${e.message}`)
       if (!response.headersSent) {
         send(response, 500, errorPage(500))
       }
-    })
+    }
   })
   server.on('upgrade', handleUpgrade)
   server.on('clientError', (_error, socket) => socket.destroy())
@@ -668,12 +549,7 @@ function serve(listener: NetServer) {
   server.listen(listener, () => {
     const address = listener.address()
     const where = typeof address === 'object' && address ? `${address.address}:${address.port}` : `${address}`
-    log.info(`Listening on ${tls ? 'https' : 'http'}://${where}`)
-    if (!tls) {
-      log.warn(
-        '!!! PLAINTEXT MODE: passwords and sessions travel unencrypted. Only use this on a trusted home LAN. !!!',
-      )
-    }
+    log.info(`Listening on https://${where}`)
     if (start.devMode) {
       log.warn('!!! DEV AUTH MODE: no PAM, sessions run as the current user. Never use this outside development. !!!')
     }

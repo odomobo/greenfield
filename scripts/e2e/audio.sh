@@ -161,7 +161,8 @@ fi
 echo "    ok"
 
 step "logging out stops the session's PipeWire and capture and removes its directory"
-pw_eval "async () => (await fetch('/api/desktop/end', { method: 'POST', headers: { Authorization: 'Bearer ' + window.__viewerTest.token() } })).status" >/dev/null
+session_menu logout
+wait_for "() => $(visible login-view)" "the sign-in form after logging out" 10
 no_audio_processes() { [ -z "$(audio_pids)" ]; }
 wait_until "the session's audio processes to end" 15 no_audio_processes
 wait_until "the audio directory to be removed" 10 test ! -e "$APP_RUNTIME_DIR"

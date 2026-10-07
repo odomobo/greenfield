@@ -2,7 +2,7 @@ import { WebSocket } from 'ws'
 import { createLogger } from '../Logger.js'
 import { onViewerFeedback, setViewerAttached } from '../FramePacing.js'
 import type { EncodingSink } from '../encoding/SurfaceEncoder.js'
-import { AudioPacket, CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
+import { AudioPacket, CLOSE_LOGGED_OUT, CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
 import { ControlMessage, SimulatedLink, ViewerTransport, WebSocketViewerTransport } from './ViewerTransport.js'
 
 const logger = createLogger('viewer-host')
@@ -72,6 +72,11 @@ export class ViewerHost {
   private transport?: ViewerTransport
   private shellEndpoint?: ShellEndpoint
   private audioEndpoint?: AudioEndpoint
+  /**
+   * The viewer asked to log out (`session.logout`). The session stops taking connections and ends; it calls `done`
+   * once a new sign-in can no longer reach it, and the viewer is closed with CLOSE_LOGGED_OUT then.
+   */
+  onLogout?: (done: () => void) => void
 
   constructor(
     private readonly scene: WindowSceneEndpoint,
@@ -134,18 +139,12 @@ export class ViewerHost {
     )
   }
 
-  attach(ws: WebSocket): void {
-    const previous = this.transport
-    if (previous) {
-      logger.info('New viewer, taking over from the previous one.')
-      this.transport = undefined
-      previous.onClose = () => {
-        /* noop, already detached */
-      }
-      previous.close(CLOSE_TAKEN_OVER, 'Session taken over by another viewer.')
-      this.scene.detach()
-      this.shellEndpoint?.detach()
-      this.audioEndpoint?.detach()
+  /** A new viewer, at the client address `clientIP` (text, '' if unknown): it takes over from the previous one. */
+  attach(ws: WebSocket, clientIP = ''): void {
+    if (this.transport) {
+      logger.info(`New viewer from ${clientIP || 'an unknown address'}, taking over from the previous one.`)
+      // the close reason is the new viewer's address (a close reason is at most 123 bytes; an address is shorter)
+      this.detachViewer(CLOSE_TAKEN_OVER, clientIP.slice(0, 64))
     }
 
     const transport = new WebSocketViewerTransport(ws, {
@@ -183,8 +182,37 @@ export class ViewerHost {
     this.content.requestKeyFramesForAllSurfaces()
   }
 
+  /** Close the current viewer's connection with this code and reason. */
+  private detachViewer(code: number, reason: string) {
+    const previous = this.transport
+    if (previous === undefined) {
+      return
+    }
+    this.transport = undefined
+    previous.onClose = () => {
+      /* noop, already detached */
+    }
+    previous.close(code, reason)
+    setViewerAttached(false)
+    this.scene.detach()
+    this.shellEndpoint?.detach()
+    this.audioEndpoint?.detach()
+  }
+
   private onMessage(transport: ViewerTransport, message: ControlMessage) {
     switch (message.type) {
+      case 'session.logout':
+        logger.info('The viewer logs out.')
+        if (this.onLogout === undefined) {
+          this.detachViewer(CLOSE_LOGGED_OUT, 'logged out')
+        } else {
+          this.onLogout(() => {
+            if (this.transport === transport) {
+              this.detachViewer(CLOSE_LOGGED_OUT, 'logged out')
+            }
+          })
+        }
+        break
       case 'feedback':
         onViewerFeedback(Number(message.refreshInterval) || 0)
         break

@@ -15,8 +15,9 @@ export type SessionController = {
 }
 
 /**
- * WebSocket endpoints of a session process. The gateway already authenticated the request and checked that the
- * session belongs to the user.
+ * WebSocket endpoints of a session process. The gateway already signed the user in and checked that the session
+ * belongs to them; its handshake carries the client's IP address in `X-Client-IP` (for the takeover message the
+ * previous viewer gets).
  */
 export function createSessionController(viewerHost: ViewerHost): SessionController {
   const wss = new WebSocketServer({ perMessageDeflate: false, noServer: true })
@@ -26,7 +27,8 @@ export function createSessionController(viewerHost: ViewerHost): SessionControll
       wss.handleUpgrade(request as IncomingMessage, socket, head ?? Buffer.from([]), (ws) => {
         const url = new URL(request.url ?? '', `http://${request.headers.host}`)
         if (url.pathname === '/viewer') {
-          viewerHost.attach(ws)
+          const ip = request.headers['x-client-ip']
+          viewerHost.attach(ws, typeof ip === 'string' ? ip : '')
         } else {
           logger.info(`Unknown WebSocket endpoint: ${url.pathname}`)
           ws.close(4404, 'Not found')

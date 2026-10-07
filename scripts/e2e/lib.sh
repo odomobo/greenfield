@@ -10,8 +10,8 @@ BASE="https://127.0.0.1:$PORT"
 PASSWORD="test-password-$$"
 ME="$(id -un)"
 WORK="$(mktemp -d)"
-# The gateway runs with --dev-time-scale: its failed-sign-in delay (3 s) and presence timeouts (10 s to attach, 5 s
-# grace) are divided by this. Everything the tests wait for is derived from it.
+# The gateway runs with --dev-time-scale: its failed-sign-in delay (3 s) is divided by this (and so is the time the
+# sessions give their apps to quit at logout, 5 s). Everything the tests wait for is derived from it.
 TIME_SCALE=3
 GATEWAY_PID=""
 DBUS_PID=""
@@ -79,9 +79,8 @@ start_gateway() {
   # the test's own cache directory (file drops land there) would make GStreamer rebuild its plugin registry in every
   # session, which delays the video encoder by seconds: keep using the user's registry
   local GST_REGISTRY="${GST_REGISTRY:-${XDG_CACHE_HOME:-$HOME/.cache}/gstreamer-1.0/registry.$(uname -m).bin}"
-  local port="$1" log="$2" scheme=https
+  local port="$1" log="$2"
   shift 2
-  [[ " $* " == *" --insecure-plaintext "* ]] && scheme=http
   (exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" XDG_DATA_HOME="$WORK/data" XDG_CONFIG_HOME="$WORK/config" XDG_CACHE_HOME="$WORK/cache" \
     GST_REGISTRY="$GST_REGISTRY" \
     node "$REPO/packages/gateway/dist/main.js" --dev-auth --dev-time-scale "$TIME_SCALE" --encoder "${E2E_ENCODER:-none}" --bind-ip 127.0.0.1 \
@@ -90,20 +89,19 @@ start_gateway() {
   EXTRA_PIDS+=("$STARTED_PID")
   local i
   for i in $(seq 1 200); do
-    curl -sk -o /dev/null "$scheme://127.0.0.1:$port/" && return 0
+    curl -sk -o /dev/null "https://127.0.0.1:$port/" && return 0
     kill -0 "$STARTED_PID" 2>/dev/null || break
     sleep 0.1
   done
   fail "gateway didn't start on :$port"
 }
 
-# POST a login; prints "<status> <seconds>" and stores the body in $WORK/$1.json
-login_attempt() {
-  local name="$1" user="$2" pass="$3"
-  curl -sk -o "$WORK/$name.json" -w '%{http_code} %{time_total}' -H "Origin: $BASE" -H 'Content-Type: application/json' \
-    --data "$(node -e 'console.log(JSON.stringify({ username: process.argv[1], password: process.argv[2] }))' "$user" "$pass")" \
-    "$BASE/api/login"
-  echo
+# The sign-in probes (scripts/e2e/probe.js): the in-band sign-in on the page's WebSocket, without a browser.
+probe() { NODE_NO_WARNINGS=1 WS_MODULE="$REPO/packages/gateway/node_modules/ws" node "$E2E_DIR/probe.js" "$@"; }
+
+# Sign in on a WebSocket of its own: prints "<ok|fail|closed> <seconds> <close code> <message>" (see probe.js).
+signin_attempt() {
+  probe signin "wss://127.0.0.1:$PORT/ws" "$BASE" "$1" "$2"
 }
 
 # --- the browser ---
@@ -219,11 +217,21 @@ click_element() {
   pw mouseup >/dev/null
 }
 
-# Signing in with a real click: the page needs user activation for its history guard and leave confirmation.
+# Signing in with a real click: the page needs user activation for its history guard and leave confirmation. The page
+# opens its WebSocket and answers the password prompt from the form.
 browser_login() {
   wait_for "() => $(visible login-view) && !!document.querySelector('#password')" "the sign-in form"
   pw_eval "() => { document.querySelector('#username').value = '$ME'; document.querySelector('#password').value = '$PASSWORD'; return true }" >/dev/null
   click_element '#login-submit'
   # signing in attaches to the user's desktop (starting it if needed)
-  wait_for "() => $(visible desktop-view)" "the desktop"
+  wait_for "() => $(visible desktop-view)" "the desktop" 40
+}
+
+# the session menu in the Apps menu. $1: disconnect or logout
+session_menu() {
+  click_element '#apps-button'
+  wait_for "() => $(visible apps-menu)" "the Apps menu" 5
+  click_element '#session-menu-button'
+  wait_for "() => !!document.querySelector('#session-menu button[data-action=$1]')" "the session menu" 5
+  click_element "#session-menu button[data-action=$1]"
 }

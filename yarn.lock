@@ -871,6 +871,7 @@ __metadata:
   resolution: "@gfld/gateway@workspace:packages/gateway"
   dependencies:
     "@gfld/compositor-proxy": "workspace:^"
+    "@gfld/scene-protocol": "workspace:^"
     "@tsconfig/node18": "npm:^18.2.4"
     "@types/node": "npm:^20.14.8"
     "@types/ws": "npm:^8.5.10"

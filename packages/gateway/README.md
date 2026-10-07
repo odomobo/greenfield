@@ -6,18 +6,21 @@ The front door: a login page and the per-user desktop sessions behind it (one de
 
 ```
 gateway (monitor)          root in PAM mode. Not network-facing. Authenticates users through native/pam-helper,
-│                          issues login tickets, keeps the session registry, spawns sessions.
-├── gateway-web            unprivileged (--web-user, default "greenfield"). TLS, the page, sign-in tokens, Origin
-│                          checks, login throttling, viewer files; relays authenticated viewer WebSockets to the
-│                          user's session socket. Gets the listening socket and TLS key from the
-│                          monitor; asks the monitor (IPC) for everything user-related, by ticket.
+│                          issues one-use login tickets, keeps the session registry, spawns sessions.
+├── gateway-web            unprivileged (--web-user, default "greenfield"). TLS, the page, Origin checks, failed
+│                          sign-in throttling, viewer files; runs the sign-in on the page's WebSocket and then relays
+│                          that WebSocket to the user's session socket. Gets the listening socket and TLS key from the
+│                          monitor; asks the monitor (IPC) to authenticate, and to attach to or start the desktop
+│                          with the ticket it got.
 └── pam-helper session     root, tiny C. pam_open_session (pam_systemd → logind session, XDG_RUNTIME_DIR, user bus),
     └── session-process    then drops to the user: the server compositor (wlroots), the desktop shell's server side
                            and the user's apps. Listens on /run/greenfield/sessions/<id>/viewer.sock (dir
                            uid:webgroup 2750, socket 0660).
 ```
 
-TLS ends in the web process, so users' sessions never have access to the key. A user's desktop dies when they log out or when the gateway stops; closing the browser doesn't affect it.
+TLS ends in the web process, so users' sessions never have access to the key. There is no plain-HTTP mode: without
+`--cert`/`--key` the gateway generates a self-signed certificate. A user's desktop dies when they log out or when the
+gateway stops; closing the browser doesn't affect it.
 
 ## Building
 
@@ -60,9 +63,9 @@ Open https://127.0.0.1:8443/ (self-signed certificate; the fingerprint is printe
 own user with that password. `--dev-auth` skips PAM and privilege separation: sessions run as you. It refuses to
 start on non-loopback addresses, as root, or without a password of at least 8 characters.
 
-End-to-end test: `scripts/test-gateway.sh` (runs `scripts/e2e/auth.sh`, `desktop.sh` and `x11.sh` in parallel; they
-start the gateway with `--dev-auth --dev-time-scale 3`, a test-only flag that divides the failed-sign-in delay and the
-presence timeouts, and is refused without `--dev-auth`).
+End-to-end test: `scripts/test-gateway.sh` (runs the scripts in `scripts/e2e/` in parallel; they start the gateway
+with `--dev-auth --dev-time-scale 3`, a test-only flag that divides the failed-sign-in delay, and is refused without
+`--dev-auth`).
 
 ## Real mode (PAM, multi-user)
 
@@ -84,8 +87,7 @@ sudo env -u DISPLAY /usr/local/bin/node /opt/greenfield/packages/gateway/dist/ma
 ```
 
 Options: `--cert/--key` for a real certificate (default: self-signed in /var/lib/greenfield/tls), `--hide-hostname`,
-`--allowed-origin` (behind a reverse proxy), `--insecure-plaintext` (HTTP; only on loopback/private addresses, for a
-trusted home LAN), `--help` lists everything.
+`--allowed-origin` (behind a reverse proxy), `--help` lists everything.
 
 Site settings (the video encoder and the GPU render node) are in a root-owned file, `/etc/nebula/nebula.conf` (another
 path with `--site-config`); a missing file means the defaults. Format (see `src/site-settings.ts`):
@@ -119,18 +121,19 @@ state lives in the session process (src/shell), so it survives the browser going
 
 ## Security properties
 
-- The login page shows only a username/password form and the host name. Unknown user and wrong password produce the
-  same page, and every failure takes at least 3 s. No sessions, users or product/version names before login.
-- Failed logins are throttled per username (5 free) and per IP (20 free), with doubling lockouts up to 15 min; the
-  same rules apply to any username string.
-- Signing in works like unlocking a screen: it lasts as long as that one page. The sign-in form and
-  desktop are a single page; signing in returns a random token that the page keeps only in memory (no cookies, no
-  local/session storage). API calls carry it as `Authorization: Bearer`, WebSockets as their first message (never in
-  a URL). The page holds a presence WebSocket (`/control`); when it closes, the token is revoked after a 5 s grace
-  for network blips (and a token that never gets a presence expires after 10 s). So another tab, a reload, or
-  closing and reopening the browser all ask for the password again, and revoking also cuts the page's desktop
-  connection. The desktop sessions themselves keep running. Tokens also end after 7 days.
-- Every POST and WebSocket must carry a matching `Origin`. Strict CSP, no inline scripts, `frame-ancestors 'none'`,
-  `form-action 'none'`, `Cache-Control: no-store` on the page and API, HSTS with TLS.
-- A ticket only reaches its own user's sessions; session ids are random.
+- The sign-in page shows only a username/password form and the host name. Unknown user and wrong password produce
+  the same result, and every failure takes at least 3 s. No sessions, users or product/version names before signing in.
+- Failed sign-ins are throttled per IP (20 free), with doubling lockouts up to 15 min. There is no per-user throttling
+  here: per-account lockout is PAM's job (`pam_faillock`).
+- Signing in works like unlocking a screen: the page's one WebSocket (`/ws`) is the sign-in. The page signs in on it
+  (in-band: the server's prompts and the page's answers, see "Sign-in" in `libs/scene-protocol/src/index.ts`) and the
+  same WebSocket then carries the desktop. No tokens, no cookies, no API: when the WebSocket closes (tab closed,
+  reloaded, network gone, a new sign-in of the same user taking the desktop over), the page shows the sign-in form
+  again. The desktop itself keeps running until the user logs out (an in-band message to the desktop).
+- One desktop and one connection per user: a new sign-in takes the desktop over, and the old page is told so,
+  with the new connection's IP address.
+- The WebSocket must carry a matching `Origin`. Strict CSP, no inline scripts, `frame-ancestors 'none'`,
+  `form-action 'none'`, `Cache-Control: no-store` on the page, HSTS.
+- A ticket only reaches its own user's desktop, is used once, right after the sign-in, and expires after a minute;
+  session ids are random.
 - No root sessions.

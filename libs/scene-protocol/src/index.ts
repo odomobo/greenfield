@@ -3,7 +3,8 @@
  * This library is the single source of truth; packages/viewer/src/protocol.ts and
  * packages/compositor-proxy/src/viewer/protocol.ts re-export it.
  *
- * One WebSocket per session: ws(s)://<server>/viewer?session=<id>. Every message is a binary envelope:
+ * The page opens one WebSocket, wss://<server>/ws, and signs in on it first (see "Sign-in" below: text frames). Once
+ * signed in, the same WebSocket is the connection to the user's desktop, and every message is a binary envelope:
  *   u8 protocol version, u8 kind, payload
  * CONTROL payload: UTF-8 JSON object with a `type` field (both directions).
  * FRAME payload (server -> viewer): u16le surface key length, surface key, encoded frame blob as produced by the
@@ -132,10 +133,62 @@ export type ViewerAck = {
   largestPendingBytes: number
 }
 
-/** The session was taken over by another viewer. Don't reconnect automatically. */
+/**
+ * The desktop was taken over by another viewer (a new sign-in of the same user). The close reason is the new
+ * connection's client IP address as text (e.g. `203.0.113.7` or `2001:db8::1`), empty if unknown.
+ */
 export const CLOSE_TAKEN_OVER = 4100
+/** The desktop ended because the viewer asked for it (`session.logout`). */
+export const CLOSE_LOGGED_OUT = 4101
 /** Close code sent to a viewer that speaks an unsupported protocol version or sends garbage. */
 export const CLOSE_PROTOCOL_ERROR = 4400
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Sign-in (before the desktop)
+//
+// The page opens wss://<server>/ws (same origin: the server refuses an upgrade whose Origin doesn't match with HTTP
+// 403) and signs in on it. The sign-in is a PAM-style conversation of JSON text frames (UTF-8, one object per frame,
+// at most SIGN_IN_MAX_FRAME_BYTES each); binary frames are not allowed until it succeeded:
+//
+//   page -> server  { "type": "begin", "username": <string> }          first frame, within 10 s of the upgrade
+//   server -> page  { "type": "prompt", "text": <string>, "echo": <boolean> }
+//                   a question (PAM_PROMPT_ECHO_OFF / _ON): the page shows `text` with an input, hidden unless `echo`,
+//                   and answers it before anything else; for now the only prompt is the password ("Password: ")
+//   page -> server  { "type": "answer", "text": <string> }             answers the last prompt (at most 1024 chars)
+//   server -> page  { "type": "info", "text": <string> }               PAM_TEXT_INFO: show it, no answer
+//   server -> page  { "type": "error", "text": <string> }              PAM_ERROR_MSG: show it, no answer; the sign-in
+//                                                                      goes on (only a result ends it)
+//   server -> page  { "type": "result", "ok": true, "username": <string> }
+//                   signed in (as `username`, which PAM may have canonicalized). The next frame is the desktop's
+//                   first envelope: from here on the WebSocket is the desktop connection (binary envelopes, above)
+//   server -> page  { "type": "result", "ok": false, "message": <string> }
+//                   failed (the message is for the user); the server closes with CLOSE_SIGN_IN_FAILED right after
+//
+// The server sends any number of prompts, infos and errors, in any order, before the result; the page answers each
+// prompt once, in order. Everything about which prompts come is the server's (PAM's): two-factor codes or a
+// password change are more prompts, not a different protocol. One attempt per connection: after a failure the page
+// opens a new WebSocket. A failed sign-in takes at least 3 s from the last answer, whatever the reason, and unknown
+// users fail exactly like wrong passwords. A frame that breaks these rules, or a prompt not answered within a minute,
+// closes the connection (CLOSE_SIGN_IN_FAILED, or a plain close).
+//
+// There is no other sign-in state: no token, no cookie. Closing the WebSocket (a dropped connection, a reload, another
+// tab taking the desktop over) ends the sign-in and the page has to sign in again; the desktop keeps running until
+// `session.logout`.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The longest sign-in frame either side may send, in bytes. */
+export const SIGN_IN_MAX_FRAME_BYTES = 4096
+/** The sign-in failed, timed out or broke the rules; the page shows the sign-in form again. */
+export const CLOSE_SIGN_IN_FAILED = 4001
+
+export type SignInClientMessage = { type: 'begin'; username: string } | { type: 'answer'; text: string }
+
+export type SignInServerMessage =
+  | { type: 'prompt'; text: string; echo: boolean }
+  | { type: 'info'; text: string }
+  | { type: 'error'; text: string }
+  | { type: 'result'; ok: true; username: string }
+  | { type: 'result'; ok: false; message: string }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // server -> viewer
@@ -400,6 +453,11 @@ export type ViewerMessage =
    * sends its state first thing after connecting), and stops capturing and encoding while it's muted.
    */
   | { type: 'audio.mute'; muted: boolean }
+  /**
+   * Log out: end the desktop (its apps are asked to quit, then killed). The session closes this connection with
+   * CLOSE_LOGGED_OUT once it stopped taking new connections, so a sign-in after that close starts a new desktop.
+   */
+  | { type: 'session.logout' }
 
 /**
  * A loose control message, as the server side still parses it. New code should prefer the typed `ViewerMessage` /

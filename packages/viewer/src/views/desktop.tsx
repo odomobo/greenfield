@@ -9,35 +9,19 @@ import { NotificationsPanel, Toasts } from '../shell/notifications'
 
 /**
  * The desktop: the taskbar at the top, the session output below it (the output of the remote compositor, see
- * desktop.ts) and the reconnect overlay. The core (connection, window manager, shell controller) is
+ * desktop.ts). Losing the connection shows the sign-in form instead (app.tsx). The core (connection, window manager, shell controller) is
  * mounted once behind the output ref (see app.tsx) and provided to the shell components through its context.
  */
 export function DesktopView({
   core,
   outputRef,
   appsMenuActions,
-  onReconnect,
-  onRestart,
 }: {
   core: Core | null
   outputRef: RefObject<HTMLDivElement>
   appsMenuActions: AppsMenuActions
-  onReconnect: () => void
-  onRestart: () => void
 }) {
   const view = useStore(appStore)
-  const connection = view.connection
-  // the overlay covers the output whenever the session is unreachable; reconnecting shows its own message
-  const overlayHidden =
-    connection.kind === 'connected' || connection.kind === 'connecting' || connection.kind === 'signed-out'
-  const overlayMessage =
-    connection.kind === 'reconnecting'
-      ? `Connection lost. Reconnecting in ${connection.inSeconds}s…`
-      : connection.kind === 'taken-over'
-        ? 'This desktop was opened somewhere else.'
-        : connection.kind === 'ended'
-          ? 'This desktop has ended.'
-          : ''
   return (
     <CoreContext.Provider value={core}>
       <div id="desktop-view" hidden={view.view !== 'desktop'}>
@@ -46,19 +30,6 @@ export function DesktopView({
         {/* the output is always there: the core is mounted behind it (app.tsx). Its content (the window elements) belongs to desktop.ts, not to React. */}
         <main id="output-container">
           <div id="output" tabIndex={0} ref={outputRef} />
-          <div id="overlay" hidden={overlayHidden}>
-            <div id="overlay-message">{overlayMessage}</div>
-            {connection.kind === 'taken-over' && (
-              <button type="button" id="overlay-reconnect" onClick={onReconnect}>
-                Reconnect
-              </button>
-            )}
-            {connection.kind === 'ended' && (
-              <button type="button" id="overlay-restart" onClick={onRestart}>
-                Start a new desktop
-              </button>
-            )}
-          </div>
         </main>
         {core !== null && (
           <>

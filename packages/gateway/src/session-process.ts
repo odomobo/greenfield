@@ -5,7 +5,7 @@
  * desktop shell's server side (apps, launching, pinned apps, notifications) talks to the viewer over that WebSocket too
  * (shell/service.ts).
  *
- * Lives until it's ended explicitly or the gateway stops; viewers come and go.
+ * Lives until the user logs out (`session.logout` from the viewer) or the gateway stops; viewers come and go.
  */
 import {
   Apps,
@@ -16,10 +16,11 @@ import {
   startWlrootsCompositor,
 } from '@gfld/compositor-proxy'
 import { existsSync, unlinkSync } from 'node:fs'
-import { createServer, IncomingMessage } from 'node:http'
+import { createServer, IncomingMessage, Server } from 'node:http'
 import { Socket } from 'node:net'
 import { AudioService } from './audio/service'
 import { resolveEncoder } from './encoder'
+import { SessionMessage } from './ipc'
 import { DEFAULT_SITE_SETTINGS_PATH, DevFlags, readSessionConfig } from './session-config'
 import { readSiteSettings } from './site-settings'
 import { scrubEnvironment, setupSessionEnvironment } from './session-environment'
@@ -81,8 +82,24 @@ async function start(socketPath: string, siteSettingsPath: string, { timeScale, 
   process.on('SIGTERM', terminate)
   process.on('SIGINT', terminate)
 
-  await listen(socketPath, controller)
-  process.send?.({ type: 'ready' })
+  const server = await listen(socketPath, controller)
+  // Log out: stop taking connections and tell the starter first (a sign-in from now on starts a new desktop), then
+  // close the viewer and end
+  viewerHost.onLogout = (done) => {
+    server.close()
+    const ending: SessionMessage = { type: 'ending' }
+    const end = () => {
+      done()
+      terminate()
+    }
+    if (process.send === undefined || !process.connected) {
+      end()
+    } else {
+      process.send(ending, undefined, {}, end)
+    }
+  }
+  const ready: SessionMessage = { type: 'ready' }
+  process.send?.(ready)
   logger.info('Session ready.')
 }
 
@@ -100,7 +117,7 @@ async function endSession(apps: Apps, audio: AudioService, killAfterMs: number) 
   setTimeout(() => process.exit(), 500)
 }
 
-function listen(socketPath: string, controller: SessionController): Promise<void> {
+function listen(socketPath: string, controller: SessionController): Promise<Server> {
   // everything goes through the viewer WebSocket (window scene and desktop shell)
   const server = createServer((_request, response) => response.writeHead(404).end())
   server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
@@ -120,7 +137,7 @@ function listen(socketPath: string, controller: SessionController): Promise<void
     server.once('error', reject)
     server.listen(socketPath, () => {
       process.umask(previousUmask)
-      resolve()
+      resolve(server)
     })
   })
 }

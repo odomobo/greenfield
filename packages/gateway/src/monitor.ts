@@ -11,7 +11,7 @@ import { Writable } from 'node:stream'
 import { userInfo } from 'node:os'
 import path from 'node:path'
 import { GatewayConfig } from './config'
-import { MonitorReply, MonitorReplyEnvelope, WebRequest, WebRequestEnvelope, WebStart } from './ipc'
+import { MonitorReply, MonitorReplyEnvelope, SessionMessage, WebRequest, WebRequestEnvelope, WebStart } from './ipc'
 import { SessionConfig } from './session-config'
 import { formatSiteSettings, SiteSettings, DEFAULT_SITE_SETTINGS } from './site-settings'
 import { loadTLS } from './tls'
@@ -35,7 +35,8 @@ type SessionEntry = {
   ending: boolean
 }
 
-const TICKET_LIFETIME_MS = 7 * 24 * 3600 * 1000
+/** a ticket is used right after the sign-in it came from, to attach to or start the desktop */
+const TICKET_LIFETIME_MS = 60_000
 const MAX_CONCURRENT_AUTH = 4
 const SESSION_START_TIMEOUT_MS = 20_000
 /** How long a stopping gateway waits for its sessions: they give their apps 5 s to quit (Apps.ts), then kill them. */
@@ -79,7 +80,7 @@ export class Monitor {
     this.prepareRuntimeDir()
     this.prepareSiteSettings()
 
-    const tls = config.tls ? await loadTLS(config) : undefined
+    const tls = await loadTLS(config)
     const listener = await this.listen()
 
     // the web process runs unprivileged; in dev mode everything already runs as the current user
@@ -211,7 +212,7 @@ export class Monitor {
       }
       const ticket = randomBytes(32).toString('base64url')
       this.tickets.set(ticket, { ...user, expiresAt: Date.now() + TICKET_LIFETIME_MS })
-      log.info(`Login: ${user.username}`)
+      log.info(`Login: ${user.username} from ${request.ip}`)
       return { ok: true, type: 'auth', ticket, username: user.username }
     }
 
@@ -219,34 +220,11 @@ export class Monitor {
     if (user === undefined) {
       return { ok: false, error: 'forbidden' }
     }
-
-    switch (request.type) {
-      case 'logout':
-        this.tickets.delete(request.ticket)
-        return { ok: true, type: 'done' }
-      case 'desktop':
-        // attach or create: a user has at most one desktop
-        await (this.userDesktop(user)?.ready ?? this.createSession(user))
-        return { ok: true, type: 'done' }
-      case 'endDesktop': {
-        const session = this.userDesktop(user)
-        if (session === undefined) {
-          return { ok: false, error: 'not-found' }
-        }
-        log.info(`Ending session ${session.id} of ${session.username}.`)
-        session.ending = true
-        session.process.kill('SIGTERM')
-        return { ok: true, type: 'done' }
-      }
-      case 'desktopSocket': {
-        const session = this.userDesktop(user)
-        if (session === undefined) {
-          return { ok: false, error: 'not-found' }
-        }
-        await session.ready
-        return { ok: true, type: 'socket', path: session.socketPath }
-      }
-    }
+    this.tickets.delete(request.ticket)
+    // attach or create: a user has at most one desktop
+    const session = this.userDesktop(user) ?? (await this.createSession(user))
+    await session.ready
+    return { ok: true, type: 'socket', path: session.socketPath }
   }
 
   private async authenticate(username: string, password: string): Promise<User | undefined> {
@@ -341,10 +319,14 @@ export class Monitor {
       /* reported to whoever awaits it */
     })
     const timeout = setTimeout(() => readyReject(new Error('session did not start in time')), SESSION_START_TIMEOUT_MS)
-    child.on('message', (message: any) => {
+    child.on('message', (message: SessionMessage) => {
       if (message?.type === 'ready') {
         clearTimeout(timeout)
         readyResolve()
+      } else if (message?.type === 'ending') {
+        // logged out: the next sign-in starts a new desktop, even while this one is still ending its apps
+        log.info(`Session ${id} of ${user.username} is ending (logged out).`)
+        entry.ending = true
       }
     })
 

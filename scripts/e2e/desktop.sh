@@ -7,8 +7,8 @@
 #      menu, pins foot (kept in the config dir), minimizes and restores it from the taskbar,
 #      maximizes and restores it down, shows a notification (notify-send) as a toast and in the history, types a
 #      command; history.back() and the mouse's back button over the desktop don't leave the page (foot gets
-#      BTN_SIDE); reloading asks to confirm first (dismiss keeps the page), then asks to sign in again and the old
-#      token stops working; closes the browser, signs in again and checks that it reattaches to the same desktop:
+#      BTN_SIDE); reloading asks to confirm first (dismiss keeps the page), then asks to sign in again (the reloaded
+#      page's connection is gone); closes the browser, signs in again and checks that it reattaches to the same desktop:
 #      the same window comes back with the earlier output, with foot still running, still pinned, and
 #      the notification still in the history;
 #   2. window management in the viewer: the taskbar's preview cards (title and close only, right-click opens the window
@@ -17,9 +17,10 @@
 #      resizing from the left/top edge keeps the right/bottom edge in place, and shrinking the viewport moves a window
 #      back into view;
 #   3. one desktop per user: Disconnect (in the Apps menu's session menu) signs out and keeps the desktop, signing in
-#      again reattaches to the same window; a second sign-in in another tab takes the same desktop over (the first tab
-#      is told and can take it back); Log out (session menu) ends the desktop, killing an app that ignores SIGTERM
-#      once its time is up, and signing in again starts a new, empty one.
+#      again reattaches to the same window; a wrong password in the browser shows the error and keeps the form; a
+#      second sign-in in another tab takes the same desktop over (the first tab shows the sign-in form, saying so and
+#      from which IP, and can sign in to take it back); Log out (session menu) ends the desktop, killing an app that
+#      ignores SIGTERM once its time is up, and signing in again starts a new, empty one.
 #
 # The gateway gets its own D-Bus session bus (for notifications), config dir (pinned apps) and a test app
 # (a .desktop file for foot with WAYLAND_DEBUG) in its own data dir. It runs with --dev-time-scale (see auth.sh).
@@ -298,16 +299,11 @@ echo "    BTN_SIDE events received by foot: $((SIDE_AFTER - SIDE_BEFORE)) (expec
 echo "    ok"
 
 step "reloading asks first, then asks to sign in again"
-BROWSER_TOKEN="$(pw_eval "() => window.__viewerTest.token()" | tr -d '"')"
-[ -n "$BROWSER_TOKEN" ] || fail "no token in the page"
 reload_with_dialog dialog-dismiss
 [ "$(pw_eval "() => new Promise((resolve) => setTimeout(() => resolve(window.__notReloaded === true && window.__viewerTest.connected()), 300))")" = true ] ||
   fail "dismissing the confirmation didn't keep the page"
 reload_with_dialog dialog-accept
 wait_for "() => document.readyState === 'complete' && $(visible login-view)" "the sign-in form after reloading" 10
-# the reloaded page's old sign-in is revoked soon after its presence connection closed
-token_revoked() { [ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $BROWSER_TOKEN" "$BASE/api/me")" = 401 ]; }
-wait_until "the token of the reloaded page to stop working" $((5 / TIME_SCALE + 8)) token_revoked
 echo "    ok"
 
 step "closing the browser"
@@ -735,15 +731,6 @@ pw resize 1280 800 >/dev/null
 
 # --- one desktop per user: disconnect, signing in again, taking over, logging out ---
 
-# the session menu in the Apps menu. $1: disconnect or logout
-session_menu() {
-  click_element '#apps-button'
-  wait_for "() => $(visible apps-menu)" "the Apps menu" 5
-  click_element '#session-menu-button'
-  wait_for "() => !!document.querySelector('#session-menu button[data-action=$1]')" "the session menu" 5
-  click_element "#session-menu button[data-action=$1]"
-}
-
 # the foot window is on the desktop again: the same window as before (so the same desktop, not a new one)
 same_window_back() {
   wait_for "() => { const w = window.__viewerTest.windows(); return w.length === 1 && w[0].hasContent && w[0].id === '$WINDOW_ID' }" "the same foot window"
@@ -760,19 +747,32 @@ wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "vie
 same_window_back
 echo "    ok"
 
-step "a second sign-in (another tab) takes over the same desktop"
+step "a wrong password in the browser shows the error and keeps the form"
+session_menu disconnect
+wait_for "() => $(visible login-view)" "the sign-in form"
+pw_eval "() => { document.querySelector('#username').value = '$ME'; document.querySelector('#password').value = 'not-the-password'; return true }" >/dev/null
+click_element '#login-submit'
+wait_for "() => $(visible login-view) && document.querySelector('#login-view .error').textContent.includes('incorrect') && !document.querySelector('#login-submit').disabled" "the sign-in error" 10
+[ "$(pw_eval "() => $(visible desktop-view) || document.querySelector('#password').value !== ''")" = false ] ||
+  fail "the desktop shows, or the password stayed in the form"
+browser_login
+wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection"
+same_window_back
+echo "    ok"
+
+step "a second sign-in (another tab) takes over the same desktop, the first tab is told from where"
 pw tab-new >/dev/null
 pw goto "$BASE/?test=1" >/dev/null
 browser_login
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection in the second tab"
 same_window_back
 pw tab-select 0 >/dev/null
-wait_for "() => !document.getElementById('overlay').hidden && document.getElementById('overlay-message').textContent.includes('opened somewhere else')" "the first tab to be told it was taken over" 10
+wait_for "() => $(visible login-view) && document.querySelector('#login-view .error').textContent.includes('opened somewhere else (from 127.0.0.1)')" "the first tab to be told it was taken over, and from where" 10
 [ "$(pw_eval "() => window.__viewerTest.connected()")" = false ] || fail "the first tab is still connected"
 pw tab-select 1 >/dev/null
 pw tab-close >/dev/null
 pw tab-select 0 >/dev/null
-click_element '#overlay-reconnect'
+browser_login
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "the first tab to take the desktop back"
 same_window_back
 echo "    ok"
@@ -791,6 +791,7 @@ STUBBORN_PID="$(cat "$WORK/stubborn.pid")"
 EXTRA_PIDS+=("$STUBBORN_PID")
 session_menu logout
 wait_for "() => $(visible login-view)" "the sign-in form"
+[ "$(pw_eval "() => document.querySelector('#login-view .error').hidden")" = true ] || fail "logging out shows an error"
 foot_gone() { ! kill -0 "$FOOT_PID" 2>/dev/null; }
 wait_until "foot to end after logging out" 15 foot_gone
 stubborn_gone() { ! kill -0 "$STUBBORN_PID" 2>/dev/null; }

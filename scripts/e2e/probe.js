@@ -1,53 +1,72 @@
-// WebSocket and sign-in probes for auth.sh. Usage:
-//   probe.js ws <url> <origin> <first message>   prints the close code (or "open" if the socket stays up)
-//   probe.js presence <base> <user> <password>   prints /api/me statuses: past the attach deadline with a presence,
-//                                                after a reconnect blip, after the presence closed for good
-// The gateway's timeouts (10 s to attach, 5 s grace) are divided by $TIME_SCALE (its --dev-time-scale).
+// WebSocket sign-in probes for the e2e scripts (the in-band sign-in on /ws, see "Sign-in" in libs/scene-protocol).
+// Usage:
+//   probe.js signin <wss-url> <origin> <user> <password>
+//       signs in; prints "<ok|fail|closed> <seconds> <close code> <message>": the outcome, the time from the answer to
+//       the result, the close code (0 while open) and the result's message (the username when signed in). A
+//       successful sign-in closes again right away (the desktop keeps running).
+//   probe.js failures <wss-url> <origin> <user> <count>
+//       that many sign-ins with wrong passwords side by side; prints their messages, one per line
+//   probe.js raw <wss-url> <origin> <first frame>
+//       sends the frame as the first message (text; "--binary" sends a binary one) and prints the close code, or "open"
+//       if the socket stays up for 5 s
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 const WebSocket = require(process.env.WS_MODULE)
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-const scale = Number(process.env.TIME_SCALE || 1)
-const attachMs = 10_000 / scale
-const graceMs = 5_000 / scale
-const [mode, a, b, c] = process.argv.slice(2)
+const [mode, url, origin, a, b] = process.argv.slice(2)
 
-function open(url, origin, first) {
+function open() {
   const ws = new WebSocket(url, { origin, rejectUnauthorized: false })
-  ws.on('open', () => ws.send(first))
   ws.on('error', () => {})
   return ws
 }
 
-async function main() {
-  if (mode === 'ws') {
-    const ws = open(a, b, c)
-    console.log(await Promise.race([new Promise((resolve) => ws.on('close', resolve)), sleep(5000).then(() => 'open')]))
-    process.exit(0)
-  }
-  const login = await fetch(`${a}/api/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: a },
-    body: JSON.stringify({ username: b, password: c }),
+/** One sign-in attempt: { outcome, seconds, code, message }. */
+function signIn(username, password) {
+  return new Promise((resolve) => {
+    const ws = open()
+    let answeredAt
+    let result
+    const timer = setTimeout(() => ws.terminate(), 30_000)
+    ws.on('open', () => ws.send(JSON.stringify({ type: 'begin', username })))
+    ws.on('message', (data, binary) => {
+      if (binary) {
+        return
+      }
+      const message = JSON.parse(data.toString())
+      if (message.type === 'prompt') {
+        answeredAt = performance.now()
+        ws.send(JSON.stringify({ type: 'answer', text: password }))
+      } else if (message.type === 'result') {
+        const seconds = ((performance.now() - answeredAt) / 1000).toFixed(3)
+        result = { outcome: message.ok ? 'ok' : 'fail', seconds, message: message.ok ? message.username : message.message }
+        if (message.ok) {
+          clearTimeout(timer)
+          ws.close()
+          resolve({ ...result, code: 0 })
+        }
+      }
+    })
+    ws.on('close', (code) => {
+      clearTimeout(timer)
+      resolve({ ...(result ?? { outcome: 'closed', seconds: '0', message: '' }), code })
+    })
   })
-  const { token } = await login.json()
-  const me = async () => (await fetch(`${a}/api/me`, { headers: { Authorization: `Bearer ${token}` } })).status
-  const control = a.replace(/^http/, 'ws') + '/control'
-  let presence = open(control, a, token)
-  await new Promise((resolve) => presence.once('message', resolve))
-  // past the attach deadline, still signed in because the presence connection is there
-  await sleep(attachMs + 1000)
-  const withPresence = await me()
-  // a blip well inside the grace period
-  presence.terminate()
-  await sleep(graceMs / 5)
-  presence = open(control, a, token)
-  await new Promise((resolve) => presence.once('message', resolve))
-  // outlive the grace period the blip started: still signed in, because the presence is back
-  await sleep(graceMs + 500)
-  const afterBlip = await me()
-  presence.close()
-  await sleep(graceMs + 1000)
-  console.log(withPresence, afterBlip, await me())
+}
+
+async function main() {
+  if (mode === 'signin') {
+    const { outcome, seconds, code, message } = await signIn(a, b)
+    console.log(outcome, seconds, code, message)
+  } else if (mode === 'failures') {
+    const attempts = Array.from({ length: Number(b) }, (_, i) => signIn(a, `wrong-password-${i}`))
+    for (const { message } of await Promise.all(attempts)) {
+      console.log(message)
+    }
+  } else if (mode === 'raw') {
+    const ws = open()
+    ws.on('open', () => (a === '--binary' ? ws.send(Buffer.from([1, 2, 3])) : ws.send(a)))
+    console.log(await Promise.race([new Promise((resolve) => ws.on('close', resolve)), sleep(5000).then(() => 'open')]))
+  }
   process.exit(0)
 }
 main()

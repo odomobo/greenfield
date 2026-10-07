@@ -7,12 +7,17 @@ import { createStore } from './store'
 export type ViewName = 'login' | 'desktop'
 
 /**
- * The state of the two views: which one is shown and the sign-in form. Signing in lasts only for
- * the open page, so views switch without leaving it. Owned by app.tsx.
+ * The state of the two views: which one is shown and the sign-in form. Signing in lasts only as long as the page's
+ * WebSocket, so views switch without leaving it. Owned by app.tsx.
  */
 export type AppState = {
   view: ViewName
+  /** shown above the form: why it's shown (a failed sign-in, a lost connection, ...) or the server's error message */
   loginError: string | undefined
+  /** an info message of the server's during the sign-in */
+  loginInfo: string | undefined
+  /** a further question of the server's during the sign-in (the password is answered from the form) */
+  loginPrompt: { text: string; echo: boolean } | undefined
   /** the submit button is disabled while signing in */
   loginBusy: boolean
   /** bumped by every showLogin, so the sign-in form re-applies its focus rule (see LoginView) */
@@ -24,10 +29,12 @@ export type AppState = {
 export const appStore = createStore<AppState>({
   view: 'login',
   loginError: undefined,
+  loginInfo: undefined,
+  loginPrompt: undefined,
   loginBusy: false,
   loginFocusNonce: 0,
   username: '',
-  connection: { kind: 'connecting' },
+  connection: { kind: 'closed' },
 })
 
 /**

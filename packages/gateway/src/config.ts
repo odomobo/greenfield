@@ -9,8 +9,6 @@ export type AuthMode = 'pam' | 'dev'
 export type GatewayConfig = {
   bindIP: string
   bindPort: number
-  /** TLS unless --insecure-plaintext */
-  tls: boolean
   certFile?: string
   keyFile?: string
   stateDir: string
@@ -46,7 +44,6 @@ const usage = `Usage: gateway [options]
   --bind-ip <ip>             address to listen on (default 0.0.0.0)
   --bind-port <port>         port to listen on (default 8443)
   --cert <file> --key <file> TLS certificate and key (default: generate a self-signed one in the state dir)
-  --insecure-plaintext       serve plain HTTP. Only allowed on loopback/private addresses. For home LANs.
   --state-dir <dir>          where generated certificates are kept
                              (default /var/lib/greenfield, or ~/.local/state/greenfield-dev with --dev-auth)
   --web-user <name>          unprivileged user for the web process (default greenfield)
@@ -61,7 +58,7 @@ const usage = `Usage: gateway [options]
   --render-device <path>     GPU render node, overriding the site settings file (default /dev/dri/renderD128)
   --dev-auth                 DEVELOPMENT ONLY: no PAM, no privilege separation. Sessions run as the current user,
                              who logs in with the password from $GREENFIELD_DEV_PASSWORD. Loopback only.
-  --dev-time-scale <n>       with --dev-auth only: divide the failed-sign-in delay and the presence timeouts by n (tests)
+  --dev-time-scale <n>       with --dev-auth only: divide the failed-sign-in delay by n (tests)
   --dev-link-kbps <n>        with --dev-auth only: sessions send to their viewer through a simulated link of n kbit/s
                              (a FIFO that drains at that rate), to try the encoding on a slow link (tests)
   --dev-patch-order <order>  with --dev-auth only: oldest (default) or random, the order a window's queued patches
@@ -73,21 +70,6 @@ const usage = `Usage: gateway [options]
 function fail(message: string): never {
   console.error(`gateway: ${message}\n\n${usage}`)
   process.exit(2)
-}
-
-/** Loopback, RFC 1918, link-local and IPv6 unique-local addresses. */
-export function isPrivateAddress(ip: string): boolean {
-  if (isIP(ip) === 4) {
-    const [a, b] = ip.split('.').map(Number)
-    return (
-      a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
-    )
-  }
-  if (isIP(ip) === 6) {
-    const lower = ip.toLowerCase()
-    return lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80:')
-  }
-  return false
 }
 
 export function isLoopbackAddress(ip: string): boolean {
@@ -110,7 +92,6 @@ export function parseConfig(argv: string[]): GatewayConfig {
         'bind-port': { type: 'string', default: '8443' },
         cert: { type: 'string' },
         key: { type: 'string' },
-        'insecure-plaintext': { type: 'boolean', default: false },
         'state-dir': { type: 'string' },
         'web-user': { type: 'string', default: 'greenfield' },
         'hide-hostname': { type: 'boolean', default: false },
@@ -142,10 +123,6 @@ export function parseConfig(argv: string[]): GatewayConfig {
     fail('--bind-ip must be an IP address')
   }
 
-  const tls = !values['insecure-plaintext']
-  if (!tls && !isPrivateAddress(bindIP)) {
-    fail('--insecure-plaintext is only allowed when binding to a loopback or private address (not 0.0.0.0)')
-  }
   if ((values.cert === undefined) !== (values.key === undefined)) {
     fail('--cert and --key must be given together')
   }
@@ -214,7 +191,6 @@ export function parseConfig(argv: string[]): GatewayConfig {
   return {
     bindIP,
     bindPort,
-    tls,
     certFile: values.cert,
     keyFile: values.key,
     stateDir,

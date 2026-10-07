@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@gfld/compositor-proxy": "workspace:^",
+    "@gfld/scene-protocol": "workspace:^",
     "dbus-next": "^0.10.2",
     "ws": "^8.17.1"
   },

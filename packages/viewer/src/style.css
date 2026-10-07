@@ -1046,22 +1046,3 @@
   top: 0;
   transform-origin: 0 0;
 }
-
-#overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  background: var(--surface-passive);
-  -webkit-backdrop-filter: var(--surface-blur);
-  backdrop-filter: var(--surface-blur);
-  font-size: 16px;
-}
-
-#overlay[hidden] {
-  display: none;
-}

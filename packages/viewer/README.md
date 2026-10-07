@@ -8,12 +8,11 @@ can disconnect and reattach at any time without the apps noticing.
 ## Running
 
 The viewer is the gateway's one page (`packages/gateway`, served at `/`): the sign-in form and the desktop (signing
-in attaches to the user's one desktop, starting it if needed). Signing in lasts only as long as the page (see
-the gateway README and [src/auth.ts](src/auth.ts)), so it never navigates away. It talks to the gateway same-origin
-with a bearer token: `POST /api/login`, `/api/logout`, `/api/me`, `POST /api/desktop` (attach or
-create) and `POST /api/desktop/end`, WebSockets `/control` (presence) and `/ws` (the desktop),
-each sending the token as its first message. Build it with `yarn build`; see the gateway README for running
-everything.
+in attaches to the user's one desktop, starting it if needed), so it never navigates away. It opens one WebSocket,
+`/ws` (same origin), signs in on it (the server's prompts answered in-band, see "Sign-in" in
+`libs/scene-protocol`) and then uses it for the desktop ([src/connection.ts](src/connection.ts)). There is no token:
+when the WebSocket closes (a lost connection, another sign-in taking the desktop over, Log out) the page shows the
+sign-in form again, saying why. Build it with `yarn build`; see the gateway README for running everything.
 
 Query parameters:
 
@@ -28,9 +27,9 @@ Query parameters:
   notification bell. Clicking an app with one window activates it, or minimizes it if it's active; with several
   windows it opens their previews. Hovering a running app shows previews (the windows' last images, also when
   minimized) with minimize, maximize and close buttons. Right-click for New window, Pin/Unpin and window actions.
-- Apps menu: you and the session (click the name to rename it, same field as in the session list) with the session
-  menu (Disconnect goes back to the session list and the session keeps running; Log out ends the session and signs
-  out), search, pinned apps and all apps (the pin button on a row pins or unpins).
+- Apps menu: you with the session menu (Disconnect closes the connection and goes back to the sign-in form, the
+  desktop keeps running; Log out ends the desktop), search, pinned apps and all apps (the pin button on a row pins or
+  unpins).
 - Notifications: toasts top right, and a history behind the bell. Kept by the session, so they're still there after
   reconnecting.
 - Minimize, maximize and restore are animated (300 ms, scaling the window's current image, nothing is resized for

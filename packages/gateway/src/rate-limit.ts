@@ -1,9 +1,9 @@
 /**
- * Failed-login throttling per key (an IP or a username). The same rules apply to every username string, existing
- * or not, so throttling reveals nothing about which accounts exist.
+ * Failed sign-in throttling per key (the web process uses client IPs; per-account lockout is PAM's job). Usernames
+ * play no part, so throttling reveals nothing about which accounts exist.
  *
  * After `freeFailures` failures inside WINDOW_MS, a key is blocked for a time that doubles with each further
- * failure, up to MAX_BLOCK_MS. A successful login clears the key.
+ * failure, up to MAX_BLOCK_MS. `succeed` clears a key (the web process doesn't, for IPs: many users may share one).
  */
 const WINDOW_MS = 15 * 60 * 1000
 const BASE_BLOCK_MS = 30 * 1000

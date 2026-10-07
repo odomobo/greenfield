@@ -4,10 +4,11 @@
 # first) and the whole run. The whole run must stay under a minute (see CLAUDE.md): over that, it says so, and the suite
 # needs an optimization pass (start with the slowest scripts).
 #
-#   scripts/e2e/auth.sh      login and isolation: no leaks, failed-login timing and throttling, access control,
-#                            per-page sign-ins, plaintext mode (curl and WebSocket probes, no browser);
+#   scripts/e2e/auth.sh      sign-in and isolation: no leaks, failed sign-in timing and throttling, access control, TLS
+#                            only (curl and WebSocket sign-in probes, no browser);
 #   scripts/e2e/desktop.sh   the desktop in a headless browser: sign-in, Apps menu, taskbar, notifications, window
-#                            management, surviving the browser and reattaching, session list, logging out;
+#                            management, surviving the browser and reattaching, a wrong password, takeover (with the
+#                            new connection's IP), logging out;
 #   scripts/e2e/clipboard.sh the clipboard between the browser and a remote app (foot), both ways;
 #   scripts/e2e/dnd.sh       drag and drop between remote apps (a small test client built with gcc);
 #   scripts/e2e/x11.sh       X11 apps (XWayland) in a headless browser: their windows, input, menus, closing;
@@ -34,7 +35,7 @@
 # node, and the built packages (yarn build).
 #
 #   scripts/test-gateway.sh
-# The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it and the next one, desktop
+# The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it, desktop
 # and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen, decorations eighteen, x11-move twenty, audio twenty-two, lossy twenty-four).
 set -uo pipefail
 
@@ -87,6 +88,6 @@ if [ "$seconds" -gt $((LIMIT_SECONDS * 100)) ]; then
   echo "SLOW: the suite took over $LIMIT_SECONDS s: it needs an optimization pass (start with the slowest scripts above)" >&2
 fi
 if [ "$status" = 0 ]; then
-  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, reattaching, takeover, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, lossy encoding on a slow link, the video path and audio"
+  echo "PASS: sign-in, isolation checks, session survival, desktop shell, window management, reattaching, takeover, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, lossy encoding on a slow link, the video path and audio"
 fi
 exit "$status"

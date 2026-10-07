@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1 and 2 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–3 are implemented; the rest is not.
 
 ## Why
 
@@ -149,6 +149,29 @@ without changing how the pieces connect.
 - A dropped connection shows the sign-in form.
 - Remove `--insecure-plaintext` (config, README, its check in `auth.sh`, the `http` case in `lib.sh`).
 - Rewrite the e2e sign-in helper in `scripts/e2e/lib.sh` (and `probe.js`, `auth.sh`, `desktop.sh`, `audio.sh`).
+- As built:
+  - **The in-band messages** are specified in one place, "Sign-in" in `libs/scene-protocol/src/index.ts` (types
+    `SignInClientMessage` / `SignInServerMessage`): JSON text frames `begin {username}`, then any number of
+    `prompt {text, echo}` (answered by `answer {text}`, in order), `info {text}` and `error {text}`, ended by
+    `result {ok, username | message}`; after `result ok` the same WebSocket is the desktop connection. These map
+    one to one onto PAM's conversation (`PAM_PROMPT_ECHO_OFF`/`_ON`, `PAM_TEXT_INFO`, `PAM_ERROR_MSG`), so step 4's
+    web process only translates them to and from the `login.sock` records. Frames are at most 4 KiB, one attempt
+    per WebSocket (a failure closes it with 4001), `begin` within 10 s, each answer within 60 s, and the 3 s
+    failure minimum counts from the last answer. The page answers the first hidden prompt with the form's password
+    and shows any further prompt in a field of its own (`#prompt-form`), so 2FA needs no page change either.
+  - The web process (`handleWebSocket` in `web.ts`) sends one `Password: ` prompt, calls the monitor's `auth`, then
+    its `desktop` (attach or create, returns the socket path, uses up the ticket; tickets live 60 s). The monitor's
+    `logout`, `endDesktop` and `desktopSocket` requests are gone.
+  - **Takeover IP**: the web process tells the session the client's IP in its relay handshake (`X-Client-IP`
+    header on `GET /viewer`); the session closes the previous viewer with 4100 and the IP as the close reason, and
+    the old page shows the sign-in form saying "opened somewhere else (from <ip>)". In step 4 the IP comes in the
+    fixed-format record that hands the connection over instead of the header.
+  - **Log out** is the viewer message `session.logout`, handled by the session: it closes its listening socket,
+    tells its starter (`{type: 'ending'}` on the IPC channel, so the monitor starts a new desktop on the next
+    sign-in), closes the viewer with 4101 (`CLOSE_LOGGED_OUT`) and ends its apps. With the helper (step 4) the closed
+    listening socket alone is the signal: the next sign-in can't connect, so it creates.
+  - Every close shows the sign-in form (the overlay, the reconnect loop and "Start a new desktop" are gone).
+  - Throttling: the per-IP `RateLimiter` (20 free failures) stays in `web.ts` until step 10; the per-user one is gone.
 
 ### 4. The login protocol and the dev helper
 

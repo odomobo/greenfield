@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, currentToken, login, setSignedOutHandler, SignedOut, signOut } from './auth'
-import { Connection } from './connection'
+import { flushSync } from 'react-dom'
+import { Connection, ConnectionEnd } from './connection'
 import { Core } from './core'
 import { Desktop } from './desktop'
 import { PatchFormat } from './protocol'
@@ -16,7 +16,7 @@ import { LoginView } from './views/login'
 
 // --- staying on the page ---
 //
-// Leaving the page signs out, so going back by accident (a mouse's back button, Alt+Left) would be costly. Three
+// Leaving the page signs out (its WebSocket is the sign-in), so going back by accident (a mouse's back button, Alt+Left) would be costly. Three
 // layers: the desktop gives those to the remote app (desktop.ts), a guard history entry absorbs a back navigation,
 // and while signed in the browser asks before leaving.
 
@@ -31,16 +31,33 @@ function onGuardEntry(): boolean {
  * going back.
  */
 function armHistoryGuard() {
-  if (currentToken() !== undefined && !onGuardEntry()) {
+  if (signedIn() && !onGuardEntry()) {
     // same URL; pushing truncates any forward entries, so guard entries don't pile up
     history.pushState({ [GUARD]: true }, '')
   }
 }
 
+/** Signed in: the page's WebSocket is open to the desktop. */
+function signedIn(): boolean {
+  return appStore.get().connection.kind === 'connected'
+}
+
+/** What the sign-in form says after the connection to the desktop closed. */
+function closedMessage(end: ConnectionEnd): string | undefined {
+  switch (end.kind) {
+    case 'taken-over':
+      return `This desktop was opened somewhere else${end.ip ? ` (from ${end.ip})` : ''}.`
+    case 'logged-out':
+      return undefined
+    case 'lost':
+      return 'The connection to the desktop was lost.'
+  }
+}
+
 /**
- * The whole app, served by the gateway at /: the sign-in form and the desktop. Signing in lasts
- * as long as this page (see auth.ts), so switching between them never leaves the page. Signing in attaches to the user's desktop,
- * starting it if it isn't running; there is one per user.
+ * The whole app, served by the gateway at /: the sign-in form and the desktop. Signing in happens on the page's one
+ * WebSocket and lasts as long as it is open (see connection.ts), so switching between them never leaves the page.
+ * Signing in attaches to the user's desktop, starting it if it isn't running; there is one per user.
  *
  * React renders the views and the shell; the connection and the window manager (desktop.ts, which owns the window
  * elements and their canvases) are imperative and mounted once behind the output ref.
@@ -50,79 +67,80 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
   const usernameRef = useRef<HTMLInputElement>(null)
   const passwordRef = useRef<HTMLInputElement>(null)
   const coreRef = useRef<Core | null>(null)
-  const userRef = useRef('')
   const [core, setCore] = useState<Core | null>(null)
+
+  /** resolves the server's pending further prompt (see LoginView) */
+  const answerRef = useRef<((answer: string) => void) | undefined>(undefined)
 
   const showLogin = useCallback((message?: string) => {
     const current = coreRef.current
     current?.shell.stop()
     current?.connection.stop()
     current?.desktop.clear()
+    answerRef.current = undefined
     if (passwordRef.current !== null) {
       passwordRef.current.value = ''
     }
     appStore.update({
       view: 'login',
       loginError: message,
+      loginInfo: undefined,
+      loginPrompt: undefined,
       loginBusy: false,
       loginFocusNonce: appStore.get().loginFocusNonce + 1,
     })
     document.title = 'Sign in'
   }, [])
 
-  /** Attach to the user's desktop, starting it if needed. */
-  const openDesktop = useCallback(async () => {
-    const token = currentToken()
-    const current = coreRef.current
-    if (current === null || token === undefined) {
-      showLogin()
-      return
-    }
-    appStore.update({ connection: { kind: 'connecting' }, view: 'desktop' })
-    document.title = 'Nebula'
-    current.shell.start(userRef.current)
-    const response = await api('/api/desktop', { method: 'POST' })
-    if (!response.ok) {
-      signOut()
-      showLogin('The desktop could not be started.')
-      return
-    }
-    current.connection.attach(token)
-    current.desktop.focus()
-  }, [showLogin])
+  /** Log out: the desktop ends; the sign-in form shows once it did (the connection closes). */
+  const logout = useCallback(() => {
+    coreRef.current?.connection.logout()
+  }, [])
 
-  /** Log out: end the desktop and sign out. */
-  const logout = useCallback(async () => {
-    await api('/api/desktop/end', { method: 'POST' }).catch(() => undefined)
-    signOut()
-    showLogin()
-  }, [showLogin])
+  /** Disconnect: close the connection, the desktop keeps running (signing in again reattaches). */
+  const disconnect = useCallback(() => showLogin(), [showLogin])
 
-  /** Disconnect: sign out, the desktop keeps running (signing in again reattaches). */
-  const disconnect = useCallback(() => {
-    signOut()
-    showLogin()
-  }, [showLogin])
-
+  /** Sign in on a new WebSocket; on success it is connected to the user's desktop (started if it wasn't running). */
   const handleLogin = useCallback(
     async (username: string, password: string) => {
-      appStore.update({ loginBusy: true, loginError: undefined })
-      try {
-        const result = await login(username, password)
-        if (!result.ok) {
-          showLogin(result.error)
-          return
-        }
-        userRef.current = result.username
-        // still within the activation of the submit
-        armHistoryGuard()
-        await openDesktop()
-      } catch {
-        showLogin('The server could not be reached.')
+      const current = coreRef.current
+      if (current === null) {
+        return
       }
+      appStore.update({ loginBusy: true, loginError: undefined, loginInfo: undefined, loginPrompt: undefined })
+      let passwordUsed = false
+      const result = await current.connection.signIn(username, {
+        prompt: (text, echo) => {
+          // the form's password answers the first hidden prompt
+          if (!echo && !passwordUsed) {
+            passwordUsed = true
+            return Promise.resolve(password)
+          }
+          return new Promise((resolve) => {
+            answerRef.current = resolve
+            appStore.update({ loginPrompt: { text, echo }, loginBusy: false })
+          })
+        },
+        message: (kind, text) => appStore.update(kind === 'info' ? { loginInfo: text } : { loginError: text }),
+      })
+      if (!result.ok) {
+        // (an empty message: stopped on purpose, e.g. the page is going away)
+        showLogin(result.message || undefined)
+        return
+      }
+      // the desktop shows already (connection.onOpen); still within the activation of the submit
+      armHistoryGuard()
+      current.desktop.focus()
     },
-    [showLogin, openDesktop],
+    [showLogin],
   )
+
+  const handleAnswer = useCallback((answer: string) => {
+    const resolve = answerRef.current
+    answerRef.current = undefined
+    appStore.update({ loginPrompt: undefined, loginBusy: true })
+    resolve?.(answer)
+  }, [])
 
   // --- the imperative core, mounted once behind the output element ---
 
@@ -188,10 +206,17 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
       })
     }
 
-    connection.onOpen = () => {
+    connection.onOpen = (username) => {
+      // signed in: show the desktop right away, its output is measured for the session's hello (desktop.reset)
+      flushSync(() =>
+        appStore.update({ view: 'desktop', loginPrompt: undefined, loginInfo: undefined, loginBusy: false }),
+      )
+      document.title = 'Nebula'
+      shell.start(username)
       desktop.reset()
       audio.onOpen()
     }
+    connection.onClosed = (end) => showLogin(closedMessage(end))
     connection.onEnvelope = (envelope, applied) => {
       if (envelope.kind === 'control') {
         if (envelope.message.type.startsWith('shell.')) {
@@ -209,18 +234,11 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
         desktop.handlePatch(envelope.surface, envelope.patch, applied)
       }
     }
-    connection.onStateChange = (state) => {
-      appStore.update({ connection: state })
-      if (state.kind === 'signed-out') {
-        showLogin()
-      }
-    }
-
-    setSignedOutHandler(() => showLogin())
+    connection.onStateChange = (state) => appStore.update({ connection: state })
 
     const onUserInput = () => armHistoryGuard()
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (currentToken() !== undefined) {
+      if (signedIn()) {
         event.preventDefault()
         // older browsers need returnValue set
         event.returnValue = ''
@@ -228,28 +246,19 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
     }
     // Leaving the page locks it, also when the browser keeps it in its back/forward cache.
     const onPageHide = () => {
-      if (currentToken() !== undefined) {
-        signOut()
+      if (appStore.get().connection.kind !== 'closed') {
         showLogin()
-      }
-    }
-    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
-      // the signed-out handler already showed the sign-in form
-      if (event.reason instanceof SignedOut) {
-        event.preventDefault()
       }
     }
     window.addEventListener('pointerdown', onUserInput, { capture: true })
     window.addEventListener('keydown', onUserInput, { capture: true })
     window.addEventListener('beforeunload', onBeforeUnload)
     window.addEventListener('pagehide', onPageHide)
-    window.addEventListener('unhandledrejection', onUnhandledRejection)
 
     if (testMode) {
       // hooks for automated tests (see scripts/test-gateway.sh)
       ;(window as unknown as Record<string, unknown>).__viewerTest = {
         connected: () => connection.open,
-        token: () => currentToken(),
         windows: () => desktop.debugWindows(),
         output: () => desktop.debugOutput(),
         interaction: () => desktop.debugInteraction(),
@@ -273,7 +282,11 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
         // feeds a video frame (a FRAME envelope's payload, base64) to a surface as if the server had sent it
         injectFrame: (surface: string, base64: string) =>
           new Promise<void>((resolve) =>
-            desktop.handleFrame(surface, Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)), resolve),
+            desktop.handleFrame(
+              surface,
+              Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)),
+              resolve,
+            ),
           ),
         // the same for a patch: the pixels of the rectangle (base64; by default raw RGBA, a RAW patch: it goes through
         // the patch decoder worker like any other) and the size of the whole surface
@@ -308,7 +321,6 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
       window.removeEventListener('keydown', onUserInput, { capture: true })
       window.removeEventListener('beforeunload', onBeforeUnload)
       window.removeEventListener('pagehide', onPageHide)
-      window.removeEventListener('unhandledrejection', onUnhandledRejection)
     }
   }, [showLogin, testMode])
 
@@ -317,28 +329,19 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
     togglePin: (app) => coreRef.current?.shell.togglePin(app),
     isPinned: (app) => shellStore.get().pinned.includes(app),
     disconnect,
-    logout: () => {
-      void logout()
-    },
+    logout,
   }
 
   return (
     <>
       <LoginView
         hostname={hostname}
-        onSubmit={handleLogin}
+        onSubmit={(username, password) => void handleLogin(username, password)}
+        onAnswer={handleAnswer}
         usernameRef={usernameRef}
         passwordRef={passwordRef}
       />
-      <DesktopView
-        core={core}
-        outputRef={outputRef}
-        appsMenuActions={appsMenuActions}
-        onReconnect={() => coreRef.current?.connection.connect()}
-        onRestart={() => {
-          void openDesktop().catch(() => showLogin('The server could not be reached.'))
-        }}
-      />
+      <DesktopView core={core} outputRef={outputRef} appsMenuActions={appsMenuActions} />
     </>
   )
 }

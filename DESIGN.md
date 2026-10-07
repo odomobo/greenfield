@@ -12,7 +12,7 @@ and the order of work; this file covers how things look and move. Values live in
   (`packages/gateway/static/background.jpg`, a 3840 px wide copy of the original, ~1.2 MB), covering the viewport.
 - **Two glass surfaces** for everything drawn on the picture:
   - **Passive**: `blur(24px)` and black at 60%. The taskbar, the Apps menu, the notification panel and toasts, context
-    menus, the sign-in and session cards, the connection overlay, and the title bars of inactive windows.
+    menus, the sign-in card and the title bars of inactive windows.
   - **Active**: the same blur, tinted nebula blue (`rgba(24, 56, 128, 0.65)`). Only the active window's title bar.
   - No extra saturation on the blur: it made the surfaces pop too much.
   - The active tint is 65% (not lower) so the title stays readable over a bright window behind it.
@@ -60,8 +60,8 @@ desktops of the same user never see any of it. All of it comes from `packages/ga
 - **Tray**: the mute toggle, then the notification bell with the clock.
   - Icons are simple solid shapes: a solid speaker with bold sound waves (a bold ✕ when muted, still white; grey
     only when audio is unavailable), a solid bell, a solid user silhouette, a bold power symbol.
-  - **No connection indicator.** It only showed connected/not connected, which the overlay over the desktop already
-    says when the connection drops. Showing link saturation was considered and rejected: by the time the server could
+  - **No connection indicator.** It only showed connected/not connected, and a dropped connection shows the sign-in
+    form (saying why) anyway. Showing link saturation was considered and rejected: by the time the server could
     report it, it's too late to be useful.
   - **System tray** icons are planned (ROADMAP Lower priority 5c).
 - **Apps menu header**: a three-column grid. The user (avatar and name) on the left, the session name centered on the

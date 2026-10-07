@@ -1,6 +1,7 @@
 import { AckTracker } from './acks'
 import {
   ChunkAssembler,
+  CLOSE_LOGGED_OUT,
   CLOSE_TAKEN_OVER,
   decodeChunk,
   decodeEnvelope,
@@ -10,28 +11,38 @@ import {
   encodeFileChunk,
   isChunkEnvelope,
   isDataEnvelope,
+  SignInClientMessage,
+  SignInServerMessage,
   ViewerMessage,
 } from './protocol'
 
 export type ConnectionState =
-  | { kind: 'connecting' }
-  | { kind: 'connected' }
-  | { kind: 'reconnecting'; inSeconds: number }
-  | { kind: 'taken-over' }
-  /** the gateway no longer accepts our sign-in */
-  | { kind: 'signed-out' }
-  /** the desktop doesn't exist (anymore) */
-  | { kind: 'ended' }
+  /** no connection: the sign-in form */
+  { kind: 'closed' } | { kind: 'signing-in' } | { kind: 'connected' }
 
-/** close codes of the gateway */
-const CLOSE_UNAUTHORIZED = 4001
-const CLOSE_NOT_FOUND = 4004
+/** How a sign-in ended. */
+export type SignInResult = { ok: true; username: string } | { ok: false; message: string }
+
+/** Why the connection to the desktop closed (not after `stop()`). */
+export type ConnectionEnd =
+  /** another sign-in took the desktop over, from this client address ('' if unknown) */
+  | { kind: 'taken-over'; ip: string }
+  /** our `logout()` ended the desktop */
+  | { kind: 'logged-out' }
+  | { kind: 'lost' }
+
+/** The page's side of the sign-in conversation (see "Sign-in" in the scene protocol). */
+export type SignInConversation = {
+  /** a question from the server (PAM's): resolves with the answer */
+  prompt(text: string, echo: boolean): Promise<string>
+  /** a message from the server to show (PAM's info and error messages); the sign-in goes on */
+  message(kind: 'info' | 'error', text: string): void
+}
 
 /**
- * The viewer's single WebSocket to a session. Reconnects with backoff, except when another viewer took the session
- * over (then the user decides), the session ended or we're signed out.
- *
- * The first message on the socket is the sign-in token (not the URL, so it doesn't end up in logs).
+ * The page's single WebSocket: the sign-in, then the connection to the user's desktop. Signing in happens on the
+ * socket itself (in-band, see "Sign-in" in the scene protocol), there is no token: once it closes, for whatever
+ * reason, the page has to sign in again. So it never reconnects by itself.
  *
  * Data envelopes (frames, patches, chunks) are acknowledged the moment they arrive, before decoding (see acks.ts);
  * whoever handles one calls its `applied` once it's drawn, decoded or dropped. Chunks are joined into the envelope
@@ -41,8 +52,12 @@ export class Connection {
   onEnvelope: (envelope: DecodedEnvelope, applied: () => void) => void = () => {
     /* noop */
   }
-  /** a (new) WebSocket is open, the server will send a full snapshot */
-  onOpen: () => void = () => {
+  /** signed in: the server sends a full snapshot next. Called before any envelope of the desktop is handled. */
+  onOpen: (username: string) => void = () => {
+    /* noop */
+  }
+  /** the connection to the desktop closed (not after stop()) */
+  onClosed: (end: ConnectionEnd) => void = () => {
     /* noop */
   }
   onStateChange: (state: ConnectionState) => void = () => {
@@ -50,6 +65,8 @@ export class Connection {
   }
 
   private ws?: WebSocket
+  /** ends a sign-in in progress (with a failure), when stopped */
+  private abortSignIn?: () => void
   private readonly acks = new AckTracker((ack) => {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(encodeAck(ack))
@@ -58,77 +75,126 @@ export class Connection {
   private readonly chunks = new ChunkAssembler()
   /** the ack tokens of the chunks of each item still being joined */
   private readonly chunkTokens = new Map<number, number[]>()
-  private retryDelay = 500
-  private retryTimer?: number
-  private target?: { url: string; token: string }
 
-  /** connect to the user's desktop (and stay connected) */
-  attach(token: string): void {
+  /** Open the WebSocket and sign in on it as `username`. Once signed in, it is the connection to the user's desktop. */
+  signIn(username: string, conversation: SignInConversation): Promise<SignInResult> {
     this.stop()
-    const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
-    this.target = { url, token }
-    this.retryDelay = 500
-    this.connect()
+    return new Promise((resolve) => {
+      const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
+      ws.binaryType = 'arraybuffer'
+      this.ws = ws
+      this.onStateChange({ kind: 'signing-in' })
+      let signedIn = false
+      let settled = false
+      const settle = (result: SignInResult) => {
+        if (!settled) {
+          settled = true
+          this.abortSignIn = undefined
+          resolve(result)
+        }
+      }
+      this.abortSignIn = () => settle({ ok: false, message: '' })
+      // prompts are answered one after the other, in order
+      let answered = Promise.resolve()
+      const send = (message: SignInClientMessage) => {
+        if (this.ws === ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(message))
+        }
+      }
+      ws.onopen = () => send({ type: 'begin', username })
+      ws.onmessage = (event) => {
+        if (this.ws !== ws) {
+          return
+        }
+        if (typeof event.data === 'string') {
+          // the sign-in conversation; the desktop sends binary envelopes only
+          if (!signedIn) {
+            this.onSignInMessage(event.data, conversation, {
+              answer: (prompt) => {
+                answered = answered.then(async () => send({ type: 'answer', text: await prompt }))
+              },
+              signedIn: (name) => {
+                signedIn = true
+                // the server counts data envelopes (and numbers chunked items) per connection
+                this.acks.reset()
+                this.chunks.reset()
+                this.chunkTokens.clear()
+                this.onStateChange({ kind: 'connected' })
+                this.onOpen(name)
+                settle({ ok: true, username: name })
+              },
+              failed: (message) => settle({ ok: false, message }),
+            })
+          }
+          return
+        }
+        if (!signedIn || !(event.data instanceof ArrayBuffer)) {
+          return
+        }
+        const head = new Uint8Array(event.data, 0, Math.min(2, event.data.byteLength))
+        if (isChunkEnvelope(head)) {
+          this.onChunk(event.data)
+          return
+        }
+        // acknowledge data first thing, so the server's round-trip times measure the network, not our decoding
+        const token = isDataEnvelope(head) ? this.acks.arrived(event.data.byteLength) : undefined
+        const applied = token === undefined ? noop : () => this.acks.applied(token)
+        this.handle(event.data, applied)
+      }
+      ws.onclose = (event) => {
+        if (this.ws !== ws) {
+          return
+        }
+        this.ws = undefined
+        this.onStateChange({ kind: 'closed' })
+        if (!signedIn) {
+          settle({ ok: false, message: 'The server could not be reached.' })
+          return
+        }
+        this.onClosed(
+          event.code === CLOSE_TAKEN_OVER
+            ? { kind: 'taken-over', ip: event.reason }
+            : event.code === CLOSE_LOGGED_OUT
+              ? { kind: 'logged-out' }
+              : { kind: 'lost' },
+        )
+      }
+    })
   }
 
-  /** connect again to the last attached session */
-  connect(): void {
-    clearTimeout(this.retryTimer)
-    if (this.target === undefined) {
+  private onSignInMessage(
+    data: string,
+    conversation: SignInConversation,
+    on: { answer(prompt: Promise<string>): void; signedIn(username: string): void; failed(message: string): void },
+  ) {
+    let message: SignInServerMessage
+    try {
+      message = JSON.parse(data)
+    } catch {
+      console.error('Invalid sign-in message from server')
       return
     }
-    const { url, token } = this.target
-    this.onStateChange({ kind: 'connecting' })
-    const ws = new WebSocket(url)
-    ws.binaryType = 'arraybuffer'
-    this.ws = ws
-    // the server counts data envelopes (and numbers chunked items) per connection
-    this.acks.reset()
-    this.chunks.reset()
-    this.chunkTokens.clear()
-    ws.onopen = () => {
-      ws.send(token)
-      this.retryDelay = 500
-      this.onStateChange({ kind: 'connected' })
-      this.onOpen()
+    switch (message.type) {
+      case 'prompt':
+        on.answer(conversation.prompt(String(message.text), message.echo === true))
+        break
+      case 'info':
+      case 'error':
+        conversation.message(message.type, String(message.text))
+        break
+      case 'result':
+        if (message.ok) {
+          on.signedIn(String(message.username))
+        } else {
+          on.failed(String(message.message))
+        }
+        break
     }
-    ws.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer) || this.ws !== ws) {
-        return
-      }
-      const head = new Uint8Array(event.data, 0, Math.min(2, event.data.byteLength))
-      if (isChunkEnvelope(head)) {
-        this.onChunk(event.data)
-        return
-      }
-      // acknowledge data first thing, so the server's round-trip times measure the network, not our decoding
-      const token = isDataEnvelope(head) ? this.acks.arrived(event.data.byteLength) : undefined
-      const applied = token === undefined ? noop : () => this.acks.applied(token)
-      this.handle(event.data, applied)
-    }
-    ws.onclose = (event) => {
-      if (this.ws !== ws) {
-        return
-      }
-      this.ws = undefined
-      if (event.code === CLOSE_TAKEN_OVER) {
-        this.onStateChange({ kind: 'taken-over' })
-        return
-      }
-      if (event.code === CLOSE_UNAUTHORIZED) {
-        this.target = undefined
-        this.onStateChange({ kind: 'signed-out' })
-        return
-      }
-      if (event.code === CLOSE_NOT_FOUND) {
-        this.onStateChange({ kind: 'ended' })
-        return
-      }
-      const delay = this.retryDelay
-      this.retryDelay = Math.min(this.retryDelay * 2, 10000)
-      this.onStateChange({ kind: 'reconnecting', inSeconds: Math.ceil(delay / 1000) })
-      this.retryTimer = window.setTimeout(() => this.connect(), delay)
-    }
+  }
+
+  /** Log out: the desktop ends (its apps are asked to quit). onClosed tells when it did. */
+  logout(): void {
+    this.send({ type: 'session.logout' })
   }
 
   /** A chunk arrived: acknowledged at once like any data envelope; its item is handled once it's whole. */
@@ -181,12 +247,13 @@ export class Connection {
     this.onEnvelope(envelope, applied)
   }
 
-  /** disconnect and stop reconnecting */
+  /** Close the connection (a sign-in in progress fails with an empty message). onClosed isn't called. */
   stop(): void {
-    clearTimeout(this.retryTimer)
     const ws = this.ws
     this.ws = undefined
     ws?.close()
+    this.abortSignIn?.()
+    this.onStateChange({ kind: 'closed' })
   }
 
   get open(): boolean {
