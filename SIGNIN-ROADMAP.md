@@ -88,6 +88,10 @@ Things no design fixes:
 
 ## Steps
 
+Nebula is not production-ready until this roadmap is complete. The security goals apply to the end state only: an
+intermediate step may be insecure (root parsing more than it will in the end, dev and production code side by side)
+as long as it works and moves toward the target.
+
 Each step leaves a working application: unit tests and `scripts/test-gateway.sh` pass after every step. Steps 1–6
 reach the target shape with the languages already in the repo (Node, C). Later steps harden or port one piece at a
 time without changing how the pieces connect.
@@ -131,14 +135,18 @@ time without changing how the pieces connect.
 - **New project: the dev login helper.** It implements the protocol with `GREENFIELD_DEV_PASSWORD`, loopback-only
   client IPs, no PAM and no setuid, fills `devFlags` from its command line, owns the dev time scale, and starts the
   desktop as the current user.
-- The web process uses `login.sock` in dev mode. Production still uses the monitor.
+- The dev helper is the dev entry point, started the same way as the production one: it binds the port and starts
+  the web process with the listening socket (as in step 5). The `--dev-*` options move to it, the web process no
+  longer takes any, and the e2e scripts start the dev helper instead of `main.js`.
+- The web process uses `login.sock` when started by the dev helper. Production still uses the monitor.
 - Still works because the e2e suite (always dev mode) now exercises the new path end to end, and production is
   untouched. Temporary duplication until step 5: two backends in the web process, two connection styles in the session.
 
 ### 5. The production login helper replaces the monitor
 
 - `packages/gateway/native/pam-helper.c` grows into the `nebula-login` daemon, speaking the same protocol as the dev helper:
-  - accept loop on `login.sock`, peer uid check, global cap on attempts, one fork per attempt;
+  - accept loop on `login.sock`, peer uid check, global cap on attempts, a timeout on each prompt, one fork per attempt
+    (the implementer picks the cap and timeout values);
   - one PAM handle per attempt, prompts relayed to the page, `PAM_RHOST` and `PAM_TTY` set, a fixed 3 s minimum on
     failures, refusal of uid 0;
   - attach-or-create under a per-user lock; when creating, open the PAM session, start the desktop and stay as its
@@ -146,7 +154,8 @@ time without changing how the pieces connect.
 - It becomes the service entry point: it binds the port and starts the web process as `nebula-web` with the
   listening socket.
 - Delete `monitor.ts`, `ipc.ts`, the web process's monitor backend and the session's `viewer.sock`.
-- Manual check with real PAM as root (e2e can't run as root). The rest is already covered by step 4.
+- Manual check with real PAM as root (e2e can't run as root): deferred to the end (see "Manual checks"). The rest is
+  already covered by step 4.
 
 ### 6. Listener and per-connection workers
 
@@ -163,8 +172,9 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 
 - `nebula-login` in Rust with only std, libc and libpam. Same protocol, same behaviour. Parsing code uses
   `#![forbid(unsafe_code)]`.
-- Decide here what happens if a PAM parent is killed (leave the desktop running, or have it exit via
-  `PR_SET_PDEATHSIG`).
+- The same manual root check as step 5, deferred to the end.
+- A killed PAM parent ends its desktop: the desktop is started with `PR_SET_PDEATHSIG`. Otherwise a desktop could
+  outlive its PAM session, which would then never be closed.
 
 ### 8. Port the listener and worker to Rust
 
@@ -177,13 +187,13 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 - `no_new_privs`, a seccomp allowlist (read, write, sendmsg/recvmsg, poll, close, timers, exit), rlimits, no
   filesystem access, timeouts at every stage. The worker never opens anything itself: the listener passes it the
   helper channel.
-- Optional: a separate uid per worker from a reserved pool, started by the helper.
+- Not planned: a separate uid per worker from a reserved pool. Non-dumpable workers (step 6) and the seccomp
+  allowlist already keep workers apart, and a uid pool would need root to start every worker.
 
 ### 10. Keep the TLS key in the listener
 
 - Workers ask the listener to sign their handshake through rustls's signing-key interface. The listener signs only
   the exact TLS 1.3 CertificateVerify layout, once per worker. An exploited worker can't copy the key.
-- Open decision: whether this is worth its code, or each worker holds the key.
 
 ### 11. Per-IP failure backoff
 
@@ -205,7 +215,7 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 - Socket activation for the listener (so nothing has to bind port 443 as root), unit hardening (`ProtectSystem`,
   `NoNewPrivileges` on the front, an empty capability set, `RestrictAddressFamilies`), a unit for the helper.
 - systemd stays optional: without it, the helper binds the port as in step 5.
-- Stopping the service may end running desktops (see "Why this shape").
+- Stopping the service ends the running desktops (see "Why this shape"); nothing extra is built for it.
 - Ties in with the install script item in ROADMAP.md.
 
 ## Order and parallelism
@@ -231,9 +241,21 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 - **Security-critical steps** (5, 7, 9, 10, 11, 12) each touch root code or a trust boundary. Review each one on
   its own rather than batching them.
 
-## Open decisions
+## Manual checks
 
-- Remote key signing vs each worker holding the key (step 10).
-- Default account policy (step 12).
-- A killed PAM parent: leave the desktop running, or `PR_SET_PDEATHSIG` (step 7).
-- Optional built-in ACME for real certificates, in the listener (after step 8).
+An agent works through all the steps on its own. Checks that need root are left to the user and done once, after the
+last step. Steps 5 and 7 count as complete without them: implement the root code carefully, make it build, and cover
+everything a non-root test can reach.
+
+Once everything is done, the user checks with sudo and real PAM:
+
+- signing in, a wrong password, and refusal of uid 0;
+- reattaching to a running desktop, and takeover;
+- Log out closing the PAM session (`pam_close_session` runs, `pam_mount` unmounts);
+- `PAM_RHOST` showing the client IP in the auth log;
+- a killed PAM parent ending its desktop.
+
+## Not planned
+
+- Built-in ACME for real certificates. Admins bring their own certificate (`--cert` / `--key`) or use the generated
+  self-signed one.
