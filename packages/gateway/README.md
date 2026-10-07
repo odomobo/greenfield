@@ -1,6 +1,6 @@
 # Gateway
 
-The front door: a login page, a per-user session list, and the per-user desktop sessions behind it.
+The front door: a login page and the per-user desktop sessions behind it (one desktop per user).
 
 ## Processes
 
@@ -17,8 +17,7 @@ gateway (monitor)          root in PAM mode. Not network-facing. Authenticates u
                            uid:webgroup 2750, socket 0660).
 ```
 
-TLS ends in the web process, so users' sessions never have access to the key. A session dies when it's ended from
-the session list or when the gateway stops; closing the browser doesn't affect it.
+TLS ends in the web process, so users' sessions never have access to the key. A user's desktop dies when they log out or when the gateway stops; closing the browser doesn't affect it.
 
 ## Building
 
@@ -107,7 +106,7 @@ state lives in the session process (src/shell), so it survives the browser going
   same page, and every failure takes at least 3 s. No sessions, users or product/version names before login.
 - Failed logins are throttled per username (5 free) and per IP (20 free), with doubling lockouts up to 15 min; the
   same rules apply to any username string.
-- Signing in works like unlocking a screen: it lasts as long as that one page. The sign-in form, session list and
+- Signing in works like unlocking a screen: it lasts as long as that one page. The sign-in form and
   desktop are a single page; signing in returns a random token that the page keeps only in memory (no cookies, no
   local/session storage). API calls carry it as `Authorization: Bearer`, WebSockets as their first message (never in
   a URL). The page holds a presence WebSocket (`/control`); when it closes, the token is revoked after a 5 s grace

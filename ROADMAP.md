@@ -7,7 +7,7 @@ This document records the design decisions made so far and the order of the rema
 
 ## Vision
 
-- Open the server's URL in a browser → a sign-in page → a list of your sessions (attach to one or start a new one) → a
+- Open the server's URL in a browser → a sign-in page → your desktop (attached, or started if it isn't running) → a
   full Linux desktop of the server's apps, in the browser.
 - **Session state lives on the server; compositing happens in the browser.** The server is the authoritative Wayland
   compositor. The browser draws each window from its own image stream and acts as window manager and desktop shell.
@@ -56,10 +56,10 @@ This document records the design decisions made so far and the order of the rema
 
 ## Sessions
 
-- Default name "Nebula N" (lowest free number). Rename by clicking the name itself, in the session list and in the
-  Apps menu. Both use the same click-to-edit component, which shows it is editable on hover (outline, pencil icon).
-- **Disconnect** returns to the session list; the session keeps running. **Log out** ends the session and returns to
-  the sign-in page.
+- One desktop per user, without a name. Signing in attaches to it, starting it if it isn't running. A second sign-in
+  takes it over (the first page is told).
+- **Disconnect** signs out and returns to the sign-in page; the desktop keeps running. **Log out** ends the desktop and
+  returns to the sign-in page.
 - Sessions do **not** survive a gateway restart (or a reboot). Decided not worth the complexity.
 - Background services a desktop session needs (D-Bus session bus, xdg-desktop-portal, keyring) start automatically.
   No configuration needed.
@@ -134,7 +134,7 @@ Drawn by the browser in HTML/CSS. The visual design (theme, window frames, anima
   - Right-click menus (New window, Pin/Unpin, window actions) are a convenience only; everything in them is also
     reachable from the Apps menu or previews.
 - **Apps menu** (not "Start"), top to bottom:
-  1. Header row: user, session name (click to rename), session menu (Disconnect, Log out).
+  1. Header row: user, session menu (Disconnect, Log out).
   2. Search.
   3. Pinned apps and all apps from the user's and the system's `.desktop` files.
 - Apps come only from installed `.desktop` files (launched from their `Exec` line in the session's environment). The
@@ -723,7 +723,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
 
 - Server-side compositor and window scene protocol with reattach, takeover and frame pacing.
 - GPU (dmabuf) buffer sizes fixed (untested on real GPU hardware).
-- Sign-in gateway with privilege separation, per-user sessions, per-page sign-in, session list with rename.
+- Sign-in gateway with privilege separation, per-user sessions, per-page sign-in, one desktop per user.
 - Instant resizing, left/top anchoring, windows kept on screen.
 - Back-navigation protection.
 - Desktop shell: top taskbar, Apps menu, hover previews, pinned apps, notifications, window animations.

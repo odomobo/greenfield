@@ -1,14 +1,13 @@
-import { SessionInfo } from './session-name'
 import { ShellWindow } from './desktop'
 import { ConnectionState } from './connection'
 import { ShellApp, ShellNotification } from './protocol'
 import { createStore } from './store'
 
 /** The views of the app, one shown at a time (see app.tsx). */
-export type ViewName = 'login' | 'sessions' | 'desktop'
+export type ViewName = 'login' | 'desktop'
 
 /**
- * The state of the three views: which one is shown, the sign-in form and the session list. Signing in lasts only for
+ * The state of the two views: which one is shown and the sign-in form. Signing in lasts only for
  * the open page, so views switch without leaving it. Owned by app.tsx.
  */
 export type AppState = {
@@ -19,12 +18,6 @@ export type AppState = {
   /** bumped by every showLogin, so the sign-in form re-applies its focus rule (see LoginView) */
   loginFocusNonce: number
   username: string
-  sessions: SessionInfo[]
-  sessionsError: string | undefined
-  /** the "Start new session" button is disabled while a session is being started */
-  creatingSession: boolean
-  /** the session shown on the desktop */
-  session: SessionInfo | undefined
   connection: ConnectionState
 }
 
@@ -34,10 +27,6 @@ export const appStore = createStore<AppState>({
   loginBusy: false,
   loginFocusNonce: 0,
   username: '',
-  sessions: [],
-  sessionsError: undefined,
-  creatingSession: false,
-  session: undefined,
   connection: { kind: 'connecting' },
 })
 
@@ -48,7 +37,6 @@ export const appStore = createStore<AppState>({
  */
 export type ShellState = {
   username: string
-  session: SessionInfo | undefined
   apps: ShellApp[]
   /** desktop file IDs of the pinned apps, in order */
   pinned: string[]
@@ -65,7 +53,6 @@ export type ShellState = {
 
 export const shellStore = createStore<ShellState>({
   username: '',
-  session: undefined,
   apps: [],
   pinned: [],
   windows: [],

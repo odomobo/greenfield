@@ -224,5 +224,6 @@ browser_login() {
   wait_for "() => $(visible login-view) && !!document.querySelector('#password')" "the sign-in form"
   pw_eval "() => { document.querySelector('#username').value = '$ME'; document.querySelector('#password').value = '$PASSWORD'; return true }" >/dev/null
   click_element '#login-submit'
-  wait_for "() => $(visible sessions-view)" "the session list"
+  # signing in attaches to the user's desktop (starting it if needed)
+  wait_for "() => $(visible desktop-view)" "the desktop"
 }

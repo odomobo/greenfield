@@ -339,10 +339,10 @@
   }
 }
 
-/* the user on the left, the session's name centered, the session menu on the right */
+/* the user on the left, the session menu on the right */
 .apps-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr);
+  display: flex;
+  justify-content: space-between;
   align-items: center;
   gap: 8px;
 }
@@ -376,45 +376,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.apps-session {
-  min-width: 0;
-  max-width: 300px;
-}
-
-/*
- * The name's field is as wide as its text (hovered, focused or not), so it stays centered while it's edited: the field
- * and a hidden copy of the text (the label's data-value, kept up to date by session-name.tsx) share one grid cell,
- * and the copy sets the width. Padding on both sides alike (the pencil sits in the right one) keeps the text centered.
- */
-.apps-session .session-name {
-  display: grid;
-  margin: 0;
-}
-
-.apps-session .session-name::after {
-  content: attr(data-value) ' ';
-  grid-area: 1 / 1;
-  height: 0;
-  overflow: hidden;
-  visibility: hidden;
-  white-space: pre;
-  padding: 0 28px;
-  border: 1px solid transparent;
-  font-weight: 600;
-}
-
-.apps-session .session-name input[type='text'] {
-  grid-area: 1 / 1;
-  width: 100%;
-  min-width: 0;
-  padding: 0 28px;
-  text-align: center;
-}
-
-#apps-menu .error {
-  margin: 0;
 }
 
 .apps-search {

@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Nothing here is implemented yet.
+Decided 2026-10-07. Step 1 is implemented.
 
 ## Why
 
@@ -120,6 +120,10 @@ without changing how the pieces connect.
   then attach or create.
 - Still works because the processes and the relay are unchanged.
 - Adjust the e2e scripts that create several sessions.
+- As built: monitor requests `desktop` (attach or create), `endDesktop`, `desktopSocket`; web routes `POST /api/desktop`,
+  `POST /api/desktop/end` and `/ws` without a session parameter (4004 when no desktop is running). The viewer calls
+  `/api/desktop` after sign-in, then opens `/ws`. Disconnect is sign out (desktop kept); a desktop that ended shows
+  "Start a new desktop". The monitor still names its session directories by a random id (internal only).
 
 ### 2. Session config on fd 3
 

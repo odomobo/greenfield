@@ -83,7 +83,6 @@ start_driver
 step "signing in and starting a session"
 pw open "$BASE/?test=1" >/dev/null
 browser_login
-pw_eval "() => { document.querySelector('#new-session').click(); return true }" >/dev/null
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection" 40
 grep -aq 'simulated link of 8000 kbit/s' "$WORK/gateway.log" || fail "the session didn't log its simulated link"
 

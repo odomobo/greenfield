@@ -103,7 +103,7 @@ body {
   color: var(--color-text);
 }
 
-/* a full-viewport screen with a centered card: the sign-in form, the session list, error pages */
+/* a full-viewport screen with a centered card: the sign-in form, error pages */
 .page {
   min-height: 100vh;
   display: flex;
@@ -122,10 +122,6 @@ body {
   box-shadow: var(--shadow-surface);
   -webkit-backdrop-filter: var(--surface-blur);
   backdrop-filter: var(--surface-blur);
-}
-
-.card.wide {
-  max-width: calc(var(--card-width) * 1.5);
 }
 
 .logo {
@@ -235,115 +231,6 @@ button:focus-visible,
   background: var(--color-error-background);
   border-radius: var(--radius-control);
   font-size: var(--font-size-small);
-}
-
-.sessions {
-  list-style: none;
-  margin: 0 0 calc(var(--spacing) * 1.5);
-  padding: 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-surface);
-  overflow: hidden;
-}
-
-.sessions li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-}
-
-.sessions li + li {
-  border-top: 1px solid var(--color-border);
-}
-
-.sessions li {
-  cursor: pointer;
-}
-
-.sessions li:hover {
-  background: var(--color-surface-hover);
-}
-
-.sessions .name {
-  flex: 1;
-  min-width: 0;
-}
-
-/*
- * The session name is a title that can be edited in place: it looks like text until hovered or focused, then shows
- * a field outline and a pencil.
- */
-.session-name {
-  position: relative;
-  display: block;
-  margin-left: -6px;
-}
-
-.session-name input[type='text'] {
-  height: 28px;
-  margin: 0;
-  padding: 0 28px 0 5px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  background: transparent;
-  border-color: transparent;
-  cursor: text;
-}
-
-.session-name:hover input[type='text'] {
-  background: var(--color-input-background);
-  border-color: var(--color-input-border);
-  border-bottom-color: var(--color-input-underline);
-}
-
-.session-name input[type='text']:focus {
-  background: var(--color-input-background);
-  border-color: var(--color-input-border);
-  border-bottom: 2px solid var(--color-accent);
-  padding-bottom: 1px;
-  text-overflow: clip;
-}
-
-.session-name svg {
-  position: absolute;
-  top: 7px;
-  right: 8px;
-  color: var(--color-text-secondary);
-  pointer-events: none;
-  opacity: 0;
-}
-
-.session-name:hover svg,
-.session-name input:focus + svg {
-  opacity: 1;
-}
-
-@media (hover: none) {
-  /* no hover on touch screens: always show that the name can be edited */
-  .session-name svg {
-    opacity: 1;
-  }
-}
-
-.sessions .when {
-  display: block;
-  font-size: var(--font-size-small);
-  color: var(--color-text-secondary);
-}
-
-.empty {
-  margin: 0 0 calc(var(--spacing) * 1.5);
-  color: var(--color-text-secondary);
-  text-align: center;
-}
-
-.row {
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  align-items: center;
 }
 
 form.inline {

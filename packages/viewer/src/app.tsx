@@ -4,7 +4,6 @@ import { Connection } from './connection'
 import { Core } from './core'
 import { Desktop } from './desktop'
 import { PatchFormat } from './protocol'
-import { SessionInfo } from './session-name'
 import { AudioPlayer } from './audio/player'
 import { ShellController } from './shell/shell'
 import { AppsMenuActions } from './shell/apps-menu'
@@ -14,7 +13,6 @@ import { openPopup } from './popups'
 import { appStore, shellStore } from './state'
 import { DesktopView } from './views/desktop'
 import { LoginView } from './views/login'
-import { SessionsView } from './views/sessions'
 
 // --- staying on the page ---
 //
@@ -40,8 +38,9 @@ function armHistoryGuard() {
 }
 
 /**
- * The whole app, served by the gateway at /: the sign-in form, the session list and the desktop. Signing in lasts
- * as long as this page (see auth.ts), so switching between them never leaves the page.
+ * The whole app, served by the gateway at /: the sign-in form and the desktop. Signing in lasts
+ * as long as this page (see auth.ts), so switching between them never leaves the page. Signing in attaches to the user's desktop,
+ * starting it if it isn't running; there is one per user.
  *
  * React renders the views and the shell; the connection and the window manager (desktop.ts, which owns the window
  * elements and their canvases) are imperative and mounted once behind the output ref.
@@ -52,8 +51,6 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
   const passwordRef = useRef<HTMLInputElement>(null)
   const coreRef = useRef<Core | null>(null)
   const userRef = useRef('')
-  /** the session shown on the desktop, for the test hooks and Log out */
-  const sessionRef = useRef<string | undefined>(undefined)
   const [core, setCore] = useState<Core | null>(null)
 
   const showLogin = useCallback((message?: string) => {
@@ -61,7 +58,6 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
     current?.shell.stop()
     current?.connection.stop()
     current?.desktop.clear()
-    sessionRef.current = undefined
     if (passwordRef.current !== null) {
       passwordRef.current.value = ''
     }
@@ -74,48 +70,36 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
     document.title = 'Sign in'
   }, [])
 
-  const showSessions = useCallback(async (error?: string) => {
+  /** Attach to the user's desktop, starting it if needed. */
+  const openDesktop = useCallback(async () => {
+    const token = currentToken()
     const current = coreRef.current
-    current?.shell.stop()
-    current?.connection.stop()
-    current?.desktop.clear()
-    sessionRef.current = undefined
-    const response = await api('/api/sessions')
-    const sessions: SessionInfo[] = await response.json()
-    appStore.update({
-      sessions,
-      sessionsError: error,
-      creatingSession: false,
-      username: userRef.current,
-      view: 'sessions',
-    })
-    document.title = 'Sessions'
-  }, [])
-
-  const openSession = useCallback(
-    (session: SessionInfo) => {
-      const current = coreRef.current
-      const token = currentToken()
-      if (current === null || token === undefined) {
-        showLogin()
-        return
-      }
-      sessionRef.current = session.id
-      appStore.update({ session, connection: { kind: 'connecting' }, view: 'desktop' })
-      document.title = session.name
-      current.shell.start(userRef.current, session)
-      current.connection.attach(session.id, token)
-      current.desktop.focus()
-    },
-    [showLogin],
-  )
-
-  /** End the session and sign out. */
-  const logout = useCallback(async () => {
-    const current = sessionRef.current
-    if (current !== undefined) {
-      await api(`/api/sessions/${encodeURIComponent(current)}/end`, { method: 'POST' }).catch(() => undefined)
+    if (current === null || token === undefined) {
+      showLogin()
+      return
     }
+    appStore.update({ connection: { kind: 'connecting' }, view: 'desktop' })
+    document.title = 'Nebula'
+    current.shell.start(userRef.current)
+    const response = await api('/api/desktop', { method: 'POST' })
+    if (!response.ok) {
+      signOut()
+      showLogin('The desktop could not be started.')
+      return
+    }
+    current.connection.attach(token)
+    current.desktop.focus()
+  }, [showLogin])
+
+  /** Log out: end the desktop and sign out. */
+  const logout = useCallback(async () => {
+    await api('/api/desktop/end', { method: 'POST' }).catch(() => undefined)
+    signOut()
+    showLogin()
+  }, [showLogin])
+
+  /** Disconnect: sign out, the desktop keeps running (signing in again reattaches). */
+  const disconnect = useCallback(() => {
     signOut()
     showLogin()
   }, [showLogin])
@@ -132,24 +116,13 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
         userRef.current = result.username
         // still within the activation of the submit
         armHistoryGuard()
-        await showSessions()
+        await openDesktop()
       } catch {
         showLogin('The server could not be reached.')
       }
     },
-    [showLogin, showSessions],
+    [showLogin, openDesktop],
   )
-
-  const newSession = useCallback(async () => {
-    appStore.update({ creatingSession: true })
-    const response = await api('/api/sessions', { method: 'POST' })
-    if (!response.ok) {
-      await showSessions('The session could not be started.')
-      return
-    }
-    const session: SessionInfo = await response.json()
-    openSession(session)
-  }, [showSessions, openSession])
 
   // --- the imperative core, mounted once behind the output element ---
 
@@ -276,7 +249,6 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
       // hooks for automated tests (see scripts/test-gateway.sh)
       ;(window as unknown as Record<string, unknown>).__viewerTest = {
         connected: () => connection.open,
-        session: () => sessionRef.current,
         token: () => currentToken(),
         windows: () => desktop.debugWindows(),
         output: () => desktop.debugOutput(),
@@ -340,21 +312,11 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
     }
   }, [showLogin, testMode])
 
-  const endSession = useCallback(
-    async (session: SessionInfo) => {
-      await api(`/api/sessions/${encodeURIComponent(session.id)}/end`, { method: 'POST' })
-      await showSessions()
-    },
-    [showSessions],
-  )
-
   const appsMenuActions: AppsMenuActions = {
     launch: (app) => coreRef.current?.shell.launch(app),
     togglePin: (app) => coreRef.current?.shell.togglePin(app),
     isPinned: (app) => shellStore.get().pinned.includes(app),
-    disconnect: () => {
-      void showSessions()
-    },
+    disconnect,
     logout: () => {
       void logout()
     },
@@ -368,25 +330,13 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
         usernameRef={usernameRef}
         passwordRef={passwordRef}
       />
-      <SessionsView
-        hostname={hostname}
-        onOpen={openSession}
-        onEnd={endSession}
-        onNewSession={() => {
-          void newSession()
-        }}
-        onSignOut={() => {
-          signOut()
-          showLogin()
-        }}
-      />
       <DesktopView
         core={core}
         outputRef={outputRef}
         appsMenuActions={appsMenuActions}
         onReconnect={() => coreRef.current?.connection.connect()}
-        onBackToSessions={() => {
-          void showSessions()
+        onRestart={() => {
+          void openDesktop().catch(() => showLogin('The server could not be reached.'))
         }}
       />
     </>

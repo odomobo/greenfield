@@ -8,7 +8,7 @@ and the order of work; this file covers how things look and move. Values live in
 
 - **Dark only.** No light theme, no `prefers-color-scheme` switch. The page declares `color-scheme: dark`, so the
   browser's own scrollbars and form controls match.
-- **One background picture behind every page**: sign-in, session list and desktop all sit on the Carina nebula
+- **One background picture behind every page**: sign-in and desktop both sit on the Carina nebula
   (`packages/gateway/static/background.jpg`, a 3840 px wide copy of the original, ~1.2 MB), covering the viewport.
 - **Two glass surfaces** for everything drawn on the picture:
   - **Passive**: `blur(24px)` and black at 60%. The taskbar, the Apps menu, the notification panel and toasts, context
@@ -74,8 +74,8 @@ desktops of the same user never see any of it. All of it comes from `packages/ga
 
 Everything that appears or disappears animates, snappily: about 100–160 ms. Things coming in start fast and ease out
 (`--ease-out`, `cubic-bezier(0, 0, 0.3, 1)`); things going away accelerate out (`--ease-in`,
-`cubic-bezier(0.7, 0, 1, 1)`). Going away is a little quicker than coming in. The sign-in page and the session list
-are not animated (for now). `prefers-reduced-motion` turns the animations off.
+`cubic-bezier(0.7, 0, 1, 1)`). Going away is a little quicker than coming in. The sign-in page
+is not animated (for now). `prefers-reduced-motion` turns the animations off.
 
 | What | In | Out |
 |---|---|---|

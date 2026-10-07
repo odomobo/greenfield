@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end test of the session's audio: starts the gateway in dev-auth mode on $GATEWAY_PORT, signs in in a headless
-# browser, starts a session and launches an app that plays a tone through the session's own PipeWire (PulseAudio
+# browser (which starts the user's desktop) and launches an app that plays a tone through the session's own PipeWire (PulseAudio
 # protocol, like most apps). Checks, in the page:
 #   1. the session has audio (the server said so) and the page's audio context runs (the sign-in click was the user
 #      gesture);
@@ -53,7 +53,6 @@ start_driver
 step "signing in and starting a session; the session has audio and the page's audio context runs"
 pw open "$BASE/?test=1" >/dev/null
 browser_login
-pw_eval "() => { document.querySelector('#new-session').click(); return true }" >/dev/null
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection" 40
 audio() { echo "window.__viewerTest.audio()"; }
 wait_for "() => { const a = $(audio); return a.available && a.contextState === 'running' && a.sentMuted === false }" "audio to be available and the audio context to run" 30
@@ -123,8 +122,6 @@ wait_until "the confirmation before leaving the signed-in page" 5 dialog_pending
 pw dialog-accept >/dev/null
 wait_for "() => document.readyState === 'complete' && $(visible login-view)" "the sign-in form after reloading" 10
 browser_login
-wait_for "() => document.querySelectorAll('.sessions li').length === 1" "the session list"
-pw_eval "() => { document.querySelector('.sessions button[data-action=open]').click(); return true }" >/dev/null
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection" 30
 wait_for "() => { const a = $(audio); return a.muted && a.available && a.sentMuted === true }" "the muted state after reloading" 20
 capture_running && fail "the capture runs for a muted viewer after a reload"
@@ -164,8 +161,7 @@ fi
 echo "    ok"
 
 step "logging out stops the session's PipeWire and capture and removes its directory"
-SESSION_ID="$(pw_eval "() => window.__viewerTest.session()" | tr -d '"')"
-pw_eval "async () => (await fetch('/api/sessions/$SESSION_ID/end', { method: 'POST', headers: { Authorization: 'Bearer ' + window.__viewerTest.token() } })).status" >/dev/null
+pw_eval "async () => (await fetch('/api/desktop/end', { method: 'POST', headers: { Authorization: 'Bearer ' + window.__viewerTest.token() } })).status" >/dev/null
 no_audio_processes() { [ -z "$(audio_pids)" ]; }
 wait_until "the session's audio processes to end" 15 no_audio_processes
 wait_until "the audio directory to be removed" 10 test ! -e "$APP_RUNTIME_DIR"
