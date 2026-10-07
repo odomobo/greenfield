@@ -1,4 +1,4 @@
-import { AckTracker } from './acks'
+import { AckTracker } from './acks.js'
 import {
   ChunkAssembler,
   CLOSE_LOGGED_OUT,
@@ -14,7 +14,7 @@ import {
   SignInClientMessage,
   SignInServerMessage,
   ViewerMessage,
-} from './protocol'
+} from './protocol.js'
 
 export type ConnectionState =
   /** no connection: the sign-in form */
@@ -65,11 +65,17 @@ export class Connection {
   }
 
   private ws?: WebSocket
+  /**
+   * `ws` once signed in. Everything but the sign-in conversation (control messages, acks, file chunks) goes out on
+   * this only: the desktop and the audio player send whenever they like (e.g. frame pacing feedback every 500 ms), and
+   * a binary frame before the sign-in ended would break it.
+   */
+  private desktop?: WebSocket
   /** ends a sign-in in progress (with a failure), when stopped */
   private abortSignIn?: () => void
   private readonly acks = new AckTracker((ack) => {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(encodeAck(ack))
+    if (this.desktop?.readyState === WebSocket.OPEN) {
+      this.desktop.send(encodeAck(ack))
     }
   })
   private readonly chunks = new ChunkAssembler()
@@ -115,6 +121,7 @@ export class Connection {
               },
               signedIn: (name) => {
                 signedIn = true
+                this.desktop = ws
                 // the server counts data envelopes (and numbers chunked items) per connection
                 this.acks.reset()
                 this.chunks.reset()
@@ -146,6 +153,7 @@ export class Connection {
           return
         }
         this.ws = undefined
+        this.desktop = undefined
         this.onStateChange({ kind: 'closed' })
         if (!signedIn) {
           settle({ ok: false, message: 'The server could not be reached.' })
@@ -251,30 +259,31 @@ export class Connection {
   stop(): void {
     const ws = this.ws
     this.ws = undefined
+    this.desktop = undefined
     ws?.close()
     this.abortSignIn?.()
     this.onStateChange({ kind: 'closed' })
   }
 
   get open(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN
+    return this.desktop?.readyState === WebSocket.OPEN
   }
 
   /** bytes handed to the socket and not sent yet (uploads wait for this to go down) */
   get buffered(): number {
-    return this.ws?.bufferedAmount ?? 0
+    return this.desktop?.bufferedAmount ?? 0
   }
 
   /** The next bytes of a file being uploaded (see the protocol's `file-drop`). */
   sendFileChunk(id: number, bytes: Uint8Array): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(encodeFileChunk(id, bytes))
+    if (this.desktop?.readyState === WebSocket.OPEN) {
+      this.desktop.send(encodeFileChunk(id, bytes))
     }
   }
 
   send(message: ViewerMessage): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(encodeControl(message))
+    if (this.desktop?.readyState === WebSocket.OPEN) {
+      this.desktop.send(encodeControl(message))
     }
   }
 }
