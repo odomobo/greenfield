@@ -125,7 +125,13 @@ time without changing how the pieces connect.
 
 - Add a small native addon for passing fds over Unix sockets and reading `SO_PEERCRED` (next to the existing
   `socket-options` code in compositor-proxy).
-- The session accepts handed-over connections on `/run/nebula/users/<uid>/desktop.sock` from uid 0 or the
+- Each helper has a runtime directory holding `login.sock` and the per-user `<runtime>/users/<uid>/desktop.sock`.
+  Production uses `/run/nebula`. The dev helper takes a runtime-directory option, defaulting to a directory under
+  `$XDG_RUNTIME_DIR`; each e2e instance passes its own, so parallel scripts running as the same OS user don't share
+  or take over each other's desktops ("one desktop per user" holds per helper instance). Nothing hardcodes these
+  paths: the helper tells the web process where `login.sock` is when it starts it, and the desktop gets its
+  `desktop.sock` path in its config on fd 3.
+- The session accepts handed-over connections on its `desktop.sock` from uid 0 or the
   session's own uid, next to its old `viewer.sock`. This is the same check in both modes: the production helper is
   root, the dev helper runs as the user. Accepting the own uid grants nothing, since that user controls the desktop
   anyway.
