@@ -24,9 +24,12 @@ export type GatewayConfig = {
   hostname?: string
   /** extra origins allowed besides the request's own host (e.g. behind a reverse proxy) */
   allowedOrigins: string[]
-  /** the `--encoder` option as given (`auto` is resolved by the monitor at start) */
-  encoder: EncoderOption
-  renderDevice: string
+  /** the `--encoder` option as given, if any: overrides the site settings file (`auto` is resolved by the session) */
+  encoder?: EncoderOption
+  /** the `--render-device` option as given, if any */
+  renderDevice?: string
+  /** the site settings file sessions read (--site-config); undefined: they use their default path */
+  siteConfig?: string
   viewerDir: string
   /** dev auth only: divides the sign-in delays so tests run fast (1 = production timing) */
   timeScale: number
@@ -49,10 +52,13 @@ const usage = `Usage: gateway [options]
   --web-user <name>          unprivileged user for the web process (default greenfield)
   --hide-hostname            don't show the host name on the login page
   --allowed-origin <origin>  additionally accepted Origin (repeatable), e.g. https://desktop.example.com
+  --site-config <file>       site settings file the sessions read (default /etc/nebula/nebula.conf; see
+                             src/site-settings.ts for its format)
   --encoder <auto|none|nvh264|vaapih264>
-                             video encoder for busy windows (default auto: vaapih264 or nvh264 if the machine has
-                             GPU acceleration, else none). With none everything is sent as patches.
-  --render-device <path>     (default /dev/dri/renderD128)
+                             video encoder for busy windows, overriding the site settings file (default there: auto,
+                             vaapih264 or nvh264 if the machine has GPU acceleration, else none). With none everything
+                             is sent as patches.
+  --render-device <path>     GPU render node, overriding the site settings file (default /dev/dri/renderD128)
   --dev-auth                 DEVELOPMENT ONLY: no PAM, no privilege separation. Sessions run as the current user,
                              who logs in with the password from $GREENFIELD_DEV_PASSWORD. Loopback only.
   --dev-time-scale <n>       with --dev-auth only: divide the failed-sign-in delay and the presence timeouts by n (tests)
@@ -109,8 +115,9 @@ export function parseConfig(argv: string[]): GatewayConfig {
         'web-user': { type: 'string', default: 'greenfield' },
         'hide-hostname': { type: 'boolean', default: false },
         'allowed-origin': { type: 'string', multiple: true, default: [] },
-        encoder: { type: 'string', default: 'auto' },
-        'render-device': { type: 'string', default: '/dev/dri/renderD128' },
+        'site-config': { type: 'string' },
+        encoder: { type: 'string' },
+        'render-device': { type: 'string' },
         'dev-auth': { type: 'boolean', default: false },
         'dev-time-scale': { type: 'string', default: '1' },
         'dev-link-kbps': { type: 'string', default: '0' },
@@ -199,8 +206,8 @@ export function parseConfig(argv: string[]): GatewayConfig {
   const runtimeDir =
     authMode === 'dev' ? `${process.env.XDG_RUNTIME_DIR ?? '/tmp'}/greenfield-dev-${bindPort}` : '/run/greenfield'
 
-  const encoder = values.encoder as EncoderOption
-  if (!ENCODER_OPTIONS.includes(encoder)) {
+  const encoder = values.encoder as EncoderOption | undefined
+  if (encoder !== undefined && !ENCODER_OPTIONS.includes(encoder)) {
     fail('invalid --encoder (use auto, none, nvh264 or vaapih264)')
   }
 
@@ -223,7 +230,8 @@ export function parseConfig(argv: string[]): GatewayConfig {
     hostname: values['hide-hostname'] ? undefined : hostname(),
     allowedOrigins: values['allowed-origin'] as string[],
     encoder,
-    renderDevice: values['render-device']!,
+    renderDevice: values['render-device'],
+    siteConfig: values['site-config'] === undefined ? undefined : resolve(values['site-config']),
     viewerDir: resolve(__dirname, '../../viewer/dist'),
   }
 }

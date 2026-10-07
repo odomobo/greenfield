@@ -1,5 +1,3 @@
-import type { SessionEncoder } from './encoder'
-
 /**
  * Messages between the monitor (privileged in PAM mode) and the web process (unprivileged).
  *
@@ -68,21 +66,5 @@ export type WebStart = {
   timeScale: number
 }
 
-/** Sent by a session process to the monitor once its socket is listening. */
+/** Sent by a session process to the monitor once its socket is listening. (Its start-up input is the SessionConfig on fd 3, see session-config.ts.) */
 export type SessionReady = { type: 'ready' }
-
-export type SessionStart = {
-  type: 'start'
-  sessionId: string
-  socketPath: string
-  encoder: SessionEncoder
-  renderDevice: string
-  /** test only (see --dev-time-scale): divides how long apps get to quit when the session ends; 1 in production */
-  timeScale: number
-  /** test only (see --dev-link-kbps): the simulated link to the viewer in kbit/s; 0 in production */
-  linkKbps: number
-  /** test only (see --dev-patch-order): 'oldest' in production */
-  patchOrder: 'oldest' | 'random'
-  /** test only (see --dev-patch-shape): 'bands' in production */
-  patchShape: 'bands' | 'tiles'
-}

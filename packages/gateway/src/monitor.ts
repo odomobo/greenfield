@@ -5,8 +5,9 @@
  */
 import { ChildProcess, execFile, execFileSync, fork, spawn } from 'node:child_process'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { chmodSync, chownSync, existsSync, mkdirSync, rmSync } from 'node:fs'
+import { chmodSync, chownSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, Server } from 'node:net'
+import { Writable } from 'node:stream'
 import { userInfo } from 'node:os'
 import path from 'node:path'
 import { GatewayConfig } from './config'
@@ -15,12 +16,12 @@ import {
   MonitorReplyEnvelope,
   normalizeSessionName,
   SessionInfo,
-  SessionStart,
   WebRequest,
   WebRequestEnvelope,
   WebStart,
 } from './ipc'
-import { resolveEncoder, SessionEncoder } from './encoder'
+import { SessionConfig } from './session-config'
+import { formatSiteSettings, SiteSettings, DEFAULT_SITE_SETTINGS } from './site-settings'
 import { loadTLS } from './tls'
 import { log } from './log'
 
@@ -49,6 +50,13 @@ function sessionInfo({ id, name, createdAt }: SessionEntry): SessionInfo {
   return { id, name, createdAt }
 }
 
+/**
+ * A session's stdio: fd 3 is the pipe for its SessionConfig (see session-config.ts); the pam helper execs the session
+ * with its fds intact. The IPC channel (ready signal, and the session ends when it closes) is fd 4 until the login
+ * helper replaces the monitor.
+ */
+const SESSION_STDIO: ['ignore', 'inherit', 'inherit', 'pipe', 'ipc'] = ['ignore', 'inherit', 'inherit', 'pipe', 'ipc']
+
 const pamHelperPath = path.resolve(__dirname, 'pam-helper')
 const sessionProcessPath = path.resolve(__dirname, 'session-process.js')
 
@@ -59,8 +67,8 @@ export class Monitor {
   private webGid?: number
   private activeAuths = 0
 
-  /** what sessions get, resolved from `--encoder` when the monitor starts */
-  private encoder: SessionEncoder = 'none'
+  /** the site settings file sessions read: --site-config, or one generated from --encoder / --render-device, or undefined (their default) */
+  private siteSettingsPath?: string
 
   constructor(private readonly config: GatewayConfig) {}
 
@@ -75,11 +83,10 @@ export class Monitor {
       }
     }
 
-    this.encoder = resolveEncoder(config.encoder, (message) => log.info(message))
-
     const web = this.lookupWebUser()
     this.webGid = web?.gid
     this.prepareRuntimeDir()
+    this.prepareSiteSettings()
 
     const tls = config.tls ? await loadTLS(config) : undefined
     const listener = await this.listen()
@@ -157,6 +164,26 @@ export class Monitor {
     } else {
       chmodSync(this.config.runtimeDir, 0o700)
     }
+  }
+
+  /**
+   * Sessions read the site settings (encoder, render device) themselves. --encoder and --render-device override the
+   * file, so for them the monitor writes a settings file of its own for the sessions to read.
+   */
+  private prepareSiteSettings() {
+    const { config } = this
+    this.siteSettingsPath = config.siteConfig
+    if (config.encoder === undefined && config.renderDevice === undefined) {
+      return
+    }
+    const settings: SiteSettings = {
+      encoder: config.encoder ?? DEFAULT_SITE_SETTINGS.encoder,
+      renderDevice: config.renderDevice ?? DEFAULT_SITE_SETTINGS.renderDevice,
+    }
+    // (the runtime dir is traversable for everyone in PAM mode, the sessions run as other users)
+    const file = path.join(config.runtimeDir, 'nebula.conf')
+    writeFileSync(file, formatSiteSettings(settings), { mode: 0o644 })
+    this.siteSettingsPath = file
   }
 
   private reply(serial: number, reply: MonitorReply) {
@@ -322,12 +349,12 @@ export class Monitor {
       child = fork(sessionProcessPath, [], {
         env: inherited,
         cwd: user.home,
-        stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+        stdio: SESSION_STDIO,
       })
     } else {
       child = spawn(pamHelperPath, ['session', user.username, '--', process.execPath, sessionProcessPath], {
         env,
-        stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+        stdio: SESSION_STDIO,
       })
     }
 
@@ -369,18 +396,25 @@ export class Monitor {
       rmSync(dir, { recursive: true, force: true })
     })
 
-    const start: SessionStart = {
-      type: 'start',
-      sessionId: id,
+    // dev flags are the monitor's for now; the dev login helper will write them later
+    const sessionConfig: SessionConfig = {
+      version: 1,
       socketPath,
-      encoder: this.encoder,
-      renderDevice: this.config.renderDevice,
-      timeScale: this.config.timeScale,
-      linkKbps: this.config.linkKbps,
-      patchOrder: this.config.patchOrder,
-      patchShape: this.config.patchShape,
+      siteSettingsPath: this.siteSettingsPath,
+      ...(this.config.authMode === 'dev'
+        ? {
+            devFlags: {
+              timeScale: this.config.timeScale,
+              linkKbps: this.config.linkKbps,
+              patchOrder: this.config.patchOrder,
+              patchShape: this.config.patchShape,
+            },
+          }
+        : {}),
     }
-    child.send(start)
+    const configPipe = child.stdio[3] as Writable
+    configPipe.on('error', (e) => log.error(`Writing the session config failed: ${e.message}`))
+    configPipe.end(JSON.stringify(sessionConfig))
     log.info(`Started session ${id} for ${user.username}.`)
     await ready
     return entry

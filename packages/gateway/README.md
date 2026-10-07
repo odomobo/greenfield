@@ -86,8 +86,25 @@ sudo env -u DISPLAY /usr/local/bin/node /opt/greenfield/packages/gateway/dist/ma
 
 Options: `--cert/--key` for a real certificate (default: self-signed in /var/lib/greenfield/tls), `--hide-hostname`,
 `--allowed-origin` (behind a reverse proxy), `--insecure-plaintext` (HTTP; only on loopback/private addresses, for a
-trusted home LAN), `--encoder <auto|none|nvh264|vaapih264>` (default `auto`: a hardware video encoder if the machine has
-one, else none, which sends everything as lossless patches), `--render-device`. `--help` lists everything.
+trusted home LAN), `--help` lists everything.
+
+Site settings (the video encoder and the GPU render node) are in a root-owned file, `/etc/nebula/nebula.conf` (another
+path with `--site-config`); a missing file means the defaults. Format (see `src/site-settings.ts`):
+
+```
+# encoder: auto (default: a hardware video encoder if the machine has one, else none, which sends everything as
+# lossless patches), none, nvh264 or vaapih264
+encoder = auto
+render-device = /dev/dri/renderD128
+```
+
+Each session reads the file itself and detects the encoder itself (`gst-inspect-1.0` runs as the user, never in the
+privileged monitor). `--encoder` and `--render-device` override the file (the monitor writes a file for the sessions
+from them).
+
+A session is started with a `SessionConfig` record on fd 3 (format in `src/session-config.ts`) and has no other
+start-up input; its `devFlags` section (time scale, simulated link, patch order and shape) is what the `--dev-*`
+options fill in.
 
 ## Desktop shell
 

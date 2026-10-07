@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Nothing here is implemented yet.
+Decided 2026-10-07. Step 2 is implemented; the rest is not.
 
 ## Why
 
@@ -129,6 +129,12 @@ without changing how the pieces connect.
 - Site settings (encoder, render device) move to a root-owned config file the session reads itself. Encoder detection
   moves into the session, so GStreamer no longer runs as root.
 - No user-visible change.
+- Done: the record is `SessionConfig` in `packages/gateway/src/session-config.ts` (JSON, at most 16 KiB, read to EOF
+  from fd 3; the format is documented in that file's header, for the Rust helpers to write). Fd 4 carries the Node IPC
+  channel (ready signal, the session ends when it closes) until step 5 deletes the monitor; step 4's dev helper
+  signals readiness and goes away differently (its own mechanism). The site settings file is `key = value` lines
+  (`src/site-settings.ts`), default `/etc/nebula/nebula.conf`, named by `SessionConfig.siteSettingsPath` (the monitor
+  writes one from `--encoder` / `--render-device`). `devFlags` is written only in `--dev-auth` mode.
 
 ### 3. Sign-in over the WebSocket
 

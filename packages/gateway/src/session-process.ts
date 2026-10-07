@@ -19,7 +19,9 @@ import { existsSync, unlinkSync } from 'node:fs'
 import { createServer, IncomingMessage } from 'node:http'
 import { Socket } from 'node:net'
 import { AudioService } from './audio/service'
-import { SessionStart } from './ipc'
+import { resolveEncoder } from './encoder'
+import { DEFAULT_SITE_SETTINGS_PATH, DevFlags, readSessionConfig } from './session-config'
+import { readSiteSettings } from './site-settings'
 import { scrubEnvironment, setupSessionEnvironment } from './session-environment'
 import { ShellService } from './shell/service'
 
@@ -31,18 +33,19 @@ process.on('uncaughtException', (e) => {
 
 scrubEnvironment()
 
-process.once('message', (message: SessionStart) => {
-  if (message?.type !== 'start') {
-    logger.error('Expected a start message.')
-    process.exit(1)
-  }
-  start(message).catch((e) => {
+// the starter writes the SessionConfig to fd 3 (see session-config.ts); the IPC channel (fd 4) only carries the ready
+// signal and tells us when the starter goes away
+readSessionConfig()
+  .then(({ config, devFlags }) => start(config.socketPath, config.siteSettingsPath ?? DEFAULT_SITE_SETTINGS_PATH, devFlags))
+  .catch((e) => {
     logger.error(`Session failed to start: ${e.message}`)
     process.exit(1)
   })
-})
 
-async function start({ socketPath, encoder, timeScale, linkKbps, patchOrder, patchShape }: SessionStart) {
+async function start(socketPath: string, siteSettingsPath: string, { timeScale, linkKbps, patchOrder, patchShape }: DevFlags) {
+  const settings = readSiteSettings(siteSettingsPath)
+  // GStreamer is only ever run here, as the user (never in the privileged monitor)
+  const encoder = resolveEncoder(settings.encoder, (message) => logger.info(message))
   const { audioDir } = setupSessionEnvironment()
 
   const { viewerHost, apps } = startWlrootsCompositor({
