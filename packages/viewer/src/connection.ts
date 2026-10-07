@@ -20,7 +20,7 @@ export type ConnectionState =
   | { kind: 'taken-over' }
   /** the gateway no longer accepts our sign-in */
   | { kind: 'signed-out' }
-  /** the session doesn't exist (anymore) */
+  /** the desktop doesn't exist (anymore) */
   | { kind: 'ended' }
 
 /** close codes of the gateway */
@@ -62,10 +62,10 @@ export class Connection {
   private retryTimer?: number
   private target?: { url: string; token: string }
 
-  /** connect to a session (and stay connected) */
-  attach(session: string, token: string): void {
+  /** connect to the user's desktop (and stay connected) */
+  attach(token: string): void {
     this.stop()
-    const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?session=${encodeURIComponent(session)}`
+    const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
     this.target = { url, token }
     this.retryDelay = 500
     this.connect()

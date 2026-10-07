@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { useCore } from '../core'
-import { SessionNameField } from '../session-name'
 import { shellStore } from '../state'
 import { closePopup, closePopupOf, isOpen, openPopup, usePopupStack } from '../popups'
 import { useStore } from '../store'
@@ -17,7 +16,7 @@ export type AppsMenuActions = {
 }
 
 /**
- * The Apps menu, top to bottom: who and which session (rename by clicking the name) with the session menu
+ * The Apps menu, top to bottom: who, with the session menu
  * (Disconnect, Log out), search, then pinned apps and all apps. Always in the document, shown while open (like the
  * old markup, tests check its hidden flag): opening empties the search and puts the keyboard into it, closing gives
  * it back to the desktop.
@@ -27,7 +26,6 @@ export function AppsMenu({ actions }: { actions: AppsMenuActions }) {
   const { desktop, shell } = useCore()
   const open = usePopupStack().some((popup) => popup.kind === 'apps')
   const [query, setQuery] = useState('')
-  const [error, setError] = useState<string | undefined>(undefined)
   const searchRef = useRef<HTMLInputElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const sessionMenuButtonRef = useRef<HTMLButtonElement>(null)
@@ -54,7 +52,6 @@ export function AppsMenu({ actions }: { actions: AppsMenuActions }) {
         searchRef.current.value = ''
       }
       setQuery('')
-      setError(undefined)
       bodyRef.current?.scrollTo(0, 0)
       searchRef.current?.focus()
       shell.refreshApps()
@@ -112,22 +109,11 @@ export function AppsMenu({ actions }: { actions: AppsMenuActions }) {
       hidden={!open}
       data-popup-owner="apps-button"
     >
-      {/* who, which session, session menu */}
+      {/* who, session menu */}
       <div className="apps-header">
         <div className="apps-user" title={state.username}>
           <span className="apps-avatar" dangerouslySetInnerHTML={{ __html: glyphs.user(18) }} />
           <span className="apps-username">{state.username}</span>
-        </div>
-        <div className="apps-session">
-          {state.session && (
-            <SessionNameField
-              key={state.session.name}
-              id="apps-session-name"
-              session={state.session}
-              showError={setError}
-              onRenamed={(renamed) => (document.title = renamed.name)}
-            />
-          )}
         </div>
         <button
           ref={sessionMenuButtonRef}
@@ -143,10 +129,6 @@ export function AppsMenu({ actions }: { actions: AppsMenuActions }) {
           dangerouslySetInnerHTML={{ __html: glyphs.power() }}
         />
       </div>
-
-      <p className="error" role="alert" hidden={error === undefined}>
-        {error}
-      </p>
 
       <label className="apps-search">
         <span aria-hidden="true" dangerouslySetInnerHTML={{ __html: glyphs.search() }} />

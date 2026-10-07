@@ -87,6 +87,6 @@ if [ "$seconds" -gt $((LIMIT_SECONDS * 100)) ]; then
   echo "SLOW: the suite took over $LIMIT_SECONDS s: it needs an optimization pass (start with the slowest scripts above)" >&2
 fi
 if [ "$status" = 0 ]; then
-  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, renaming, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, lossy encoding on a slow link, the video path and audio"
+  echo "PASS: login, isolation checks, per-page sign-in, session survival, desktop shell, window management, reattaching, takeover, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, lossy encoding on a slow link, the video path and audio"
 fi
 exit "$status"

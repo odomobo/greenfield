@@ -80,7 +80,6 @@ GATEWAY_PID="$STARTED_PID"
 start_driver
 pw open "$BASE/?test=1" >/dev/null
 browser_login
-pw_eval "() => { document.querySelector('#new-session').click(); return true }" >/dev/null
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection" 40
 read -r DESK_X DESK_Y < <(pw_eval "() => { const r = document.getElementById('output').getBoundingClientRect(); return Math.round(r.x) + ' ' + Math.round(r.y) }" | tr -d '"'; echo)
 

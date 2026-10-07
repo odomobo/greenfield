@@ -17,7 +17,7 @@ import { createServer as createHTTPSServer } from 'node:https'
 import { connect, Server as NetServer, Socket } from 'node:net'
 import path from 'node:path'
 import { WebSocket, WebSocketServer } from 'ws'
-import { MAX_SESSION_NAME_LENGTH, MonitorReply, MonitorReplyEnvelope, WebRequest, WebStart } from './ipc'
+import { MonitorReply, MonitorReplyEnvelope, WebRequest, WebStart } from './ipc'
 import { log } from './log'
 import { errorPage, escapeHTML } from './pages'
 import { RateLimiter } from './rate-limit'
@@ -324,51 +324,22 @@ async function handlePost(request: IncomingMessage, response: ServerResponse, ur
     sendJSON(response, 200, { ok: true })
     return
   }
-  if (url.pathname === '/api/sessions') {
-    const reply = await monitor({ type: 'createSession', ticket: signIn.ticket })
-    if (reply.ok && reply.type === 'session') {
-      sendJSON(response, 201, reply.session)
+  if (url.pathname === '/api/desktop') {
+    // attach or create: the user's desktop is started if it isn't running
+    const reply = await monitor({ type: 'desktop', ticket: signIn.ticket })
+    if (reply.ok) {
+      sendJSON(response, 200, { ok: true })
     } else {
-      sendJSON(response, 500, { error: 'The session could not be started.' })
+      sendJSON(response, 500, { error: 'The desktop could not be started.' })
     }
     return
   }
-  const action = /^\/api\/sessions\/([A-Za-z0-9_-]{1,64})\/(rename|end)$/.exec(url.pathname)
-  switch (action?.[2]) {
-    case 'rename':
-      await handleRename(request, response, signIn, action[1])
-      return
-    case 'end': {
-      const reply = await monitor({ type: 'endSession', ticket: signIn.ticket, sessionId: action[1] })
-      sendJSON(response, reply.ok ? 200 : 404, reply.ok ? { ok: true } : { error: 'not found' })
-      return
-    }
+  if (url.pathname === '/api/desktop/end') {
+    const reply = await monitor({ type: 'endDesktop', ticket: signIn.ticket })
+    sendJSON(response, reply.ok ? 200 : 404, reply.ok ? { ok: true } : { error: 'not found' })
+    return
   }
   sendJSON(response, 404, { error: 'not found' })
-}
-
-/** POST /api/sessions/<id>/rename, body { name } */
-async function handleRename(request: IncomingMessage, response: ServerResponse, signIn: SignIn, sessionId: string) {
-  let body: any
-  try {
-    body = await readJSONBody(request)
-  } catch {
-    sendJSON(response, 400, { error: 'bad request' })
-    return
-  }
-  const reply = await monitor({
-    type: 'renameSession',
-    ticket: signIn.ticket,
-    sessionId,
-    name: typeof body?.name === 'string' ? body.name : '',
-  })
-  if (reply.ok && reply.type === 'session') {
-    sendJSON(response, 200, reply.session)
-  } else if (!reply.ok && reply.error === 'invalid') {
-    sendJSON(response, 400, { error: 'invalid name', maxLength: MAX_SESSION_NAME_LENGTH })
-  } else {
-    sendJSON(response, 404, { error: 'not found' })
-  }
 }
 
 async function handleGet(request: IncomingMessage, response: ServerResponse, url: URL) {
@@ -380,7 +351,7 @@ async function handleGet(request: IncomingMessage, response: ServerResponse, url
     serveFile(response, start.viewerDir, url.pathname.slice(1))
     return
   }
-  // the one page: sign-in, session list and desktop
+  // the one page: sign-in and desktop
   if (url.pathname === '/') {
     send(response, 200, indexHTML)
     return
@@ -404,11 +375,6 @@ async function handleGet(request: IncomingMessage, response: ServerResponse, url
 
   if (url.pathname === '/api/me') {
     sendJSON(response, 200, { username: signIn.username })
-    return
-  }
-  if (url.pathname === '/api/sessions') {
-    const reply = await monitor({ type: 'listSessions', ticket: signIn.ticket })
-    sendJSON(response, 200, reply.ok && reply.type === 'sessions' ? reply.sessions : [])
     return
   }
   sendJSON(response, 404, { error: 'not found' })
@@ -546,11 +512,11 @@ function closeWebSocket(socket: Socket, code: number, reason: string) {
 }
 
 /**
- * Viewer WebSocket: complete the handshake, take the token from the first message, check the session belongs to the
- * user, then relay bytes to the session's Unix socket (with a handshake of our own there). TLS ends here, so its key
+ * Viewer WebSocket: complete the handshake, take the token from the first message, find the user's desktop, then relay bytes
+ * to its Unix socket (with a handshake of our own there). TLS ends here, so its key
  * never leaves this process. The token isn't in the URL, so it doesn't end up in logs or history.
  */
-async function handleViewer(request: IncomingMessage, socket: Socket, head: Buffer, url: URL) {
+async function handleViewer(request: IncomingMessage, socket: Socket, head: Buffer) {
   const key = request.headers['sec-websocket-key']
   if (
     typeof key !== 'string' ||
@@ -575,11 +541,7 @@ async function handleViewer(request: IncomingMessage, socket: Socket, head: Buff
     return
   }
   const [, signIn] = current
-  const reply = await monitor({
-    type: 'sessionSocket',
-    ticket: signIn.ticket,
-    sessionId: url.searchParams.get('session') ?? '',
-  })
+  const reply = await monitor({ type: 'desktopSocket', ticket: signIn.ticket })
   if (!reply.ok || reply.type !== 'socket') {
     closeWebSocket(socket, CLOSE_NOT_FOUND, 'not found')
     return
@@ -649,7 +611,7 @@ function handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer) {
   if (url.pathname === '/control') {
     presenceServer.handleUpgrade(request, socket, head, handlePresence)
   } else {
-    handleViewer(request, socket, head, url).catch(() => socket.destroy())
+    handleViewer(request, socket, head).catch(() => socket.destroy())
   }
 }
 

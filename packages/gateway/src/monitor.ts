@@ -11,15 +11,7 @@ import { Writable } from 'node:stream'
 import { userInfo } from 'node:os'
 import path from 'node:path'
 import { GatewayConfig } from './config'
-import {
-  MonitorReply,
-  MonitorReplyEnvelope,
-  normalizeSessionName,
-  SessionInfo,
-  WebRequest,
-  WebRequestEnvelope,
-  WebStart,
-} from './ipc'
+import { MonitorReply, MonitorReplyEnvelope, WebRequest, WebRequestEnvelope, WebStart } from './ipc'
 import { SessionConfig } from './session-config'
 import { formatSiteSettings, SiteSettings, DEFAULT_SITE_SETTINGS } from './site-settings'
 import { loadTLS } from './tls'
@@ -29,7 +21,10 @@ type User = { username: string; uid: number; gid: number; home: string }
 
 type Ticket = User & { expiresAt: number }
 
-type SessionEntry = SessionInfo & {
+/** A user's desktop: the session process and where it listens. */
+type SessionEntry = {
+  id: string
+  createdAt: number
   uid: number
   username: string
   dir: string
@@ -45,10 +40,6 @@ const MAX_CONCURRENT_AUTH = 4
 const SESSION_START_TIMEOUT_MS = 20_000
 /** How long a stopping gateway waits for its sessions: they give their apps 5 s to quit (Apps.ts), then kill them. */
 const SESSION_EXIT_TIMEOUT_MS = 8_000
-
-function sessionInfo({ id, name, createdAt }: SessionEntry): SessionInfo {
-  return { id, name, createdAt }
-}
 
 /**
  * A session's stdio: fd 3 is the pipe for its SessionConfig (see session-config.ts); the pam helper execs the session
@@ -233,31 +224,13 @@ export class Monitor {
       case 'logout':
         this.tickets.delete(request.ticket)
         return { ok: true, type: 'done' }
-      case 'listSessions':
-        return {
-          ok: true,
-          type: 'sessions',
-          sessions: this.userSessions(user.uid).map(sessionInfo),
-        }
-      case 'createSession': {
-        const session = await this.createSession(user)
-        return { ok: true, type: 'session', session: sessionInfo(session) }
-      }
-      case 'renameSession': {
-        const session = this.sessions.get(request.sessionId)
-        if (session === undefined || session.uid !== user.uid || session.ending) {
-          return { ok: false, error: 'not-found' }
-        }
-        const name = normalizeSessionName(request.name)
-        if (name === undefined) {
-          return { ok: false, error: 'invalid' }
-        }
-        session.name = name
-        return { ok: true, type: 'session', session: sessionInfo(session) }
-      }
-      case 'endSession': {
-        const session = this.sessions.get(request.sessionId)
-        if (session === undefined || session.uid !== user.uid || session.ending) {
+      case 'desktop':
+        // attach or create: a user has at most one desktop
+        await (this.userDesktop(user)?.ready ?? this.createSession(user))
+        return { ok: true, type: 'done' }
+      case 'endDesktop': {
+        const session = this.userDesktop(user)
+        if (session === undefined) {
           return { ok: false, error: 'not-found' }
         }
         log.info(`Ending session ${session.id} of ${session.username}.`)
@@ -265,9 +238,9 @@ export class Monitor {
         session.process.kill('SIGTERM')
         return { ok: true, type: 'done' }
       }
-      case 'sessionSocket': {
-        const session = this.sessions.get(request.sessionId)
-        if (session === undefined || session.uid !== user.uid || session.ending) {
+      case 'desktopSocket': {
+        const session = this.userDesktop(user)
+        if (session === undefined) {
           return { ok: false, error: 'not-found' }
         }
         await session.ready
@@ -377,7 +350,6 @@ export class Monitor {
 
     const entry: SessionEntry = {
       id,
-      name: this.defaultSessionName(user.uid),
       createdAt: Date.now(),
       uid: user.uid,
       username: user.username,
@@ -420,18 +392,9 @@ export class Monitor {
     return entry
   }
 
-  private userSessions(uid: number): SessionEntry[] {
-    return [...this.sessions.values()].filter((session) => session.uid === uid && !session.ending)
-  }
-
-  /** "Nebula N" with the lowest N none of the user's sessions is called, so names don't shift when one ends. */
-  private defaultSessionName(uid: number): string {
-    const taken = new Set(this.userSessions(uid).map((session) => session.name))
-    let n = 1
-    while (taken.has(`Nebula ${n}`)) {
-      n++
-    }
-    return `Nebula ${n}`
+  /** The user's running desktop (one at most; one that is shutting down doesn't count). */
+  private userDesktop({ uid }: User): SessionEntry | undefined {
+    return [...this.sessions.values()].find((session) => session.uid === uid && !session.ending)
   }
 
   private shuttingDown = false

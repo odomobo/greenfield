@@ -91,16 +91,17 @@ echo "    ok"
 
 step "nothing is reachable without signing in"
 [ "$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/me")" = 401 ] || fail "/api/me without a token"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/sessions")" = 401 ] || fail "/api/sessions without a token"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer forged' "$BASE/api/sessions")" = 401 ] ||
-  fail "/api/sessions with a forged token"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Origin: $BASE" -X POST "$BASE/api/sessions")" = 401 ] ||
-  fail "creating a session without a token"
-[ "$(probe ws "$WSS/ws?session=x" "$BASE" forged)" = 4001 ] || fail "viewer WebSocket with a forged token"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Origin: $BASE" -X POST "$BASE/api/desktop")" = 401 ] ||
+  fail "starting a desktop without a token"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer forged' -H "Origin: $BASE" -X POST "$BASE/api/desktop")" = 401 ] ||
+  fail "starting a desktop with a forged token"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Origin: $BASE" -X POST "$BASE/api/desktop/end")" = 401 ] ||
+  fail "ending a desktop without a token"
+[ "$(probe ws "$WSS/ws" "$BASE" forged)" = 4001 ] || fail "viewer WebSocket with a forged token"
 [ "$(probe ws "$WSS/control" "$BASE" forged)" = 4001 ] || fail "presence WebSocket with a forged token"
 WS_HEADERS=(-H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==")
 ws_status() { curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "${WS_HEADERS[@]}" "$@" || true; }
-[ "$(ws_status -H "Origin: https://evil.example" "$BASE/ws?session=x")" = 403 ] || fail "WebSocket from a foreign origin"
+[ "$(ws_status -H "Origin: https://evil.example" "$BASE/ws")" = 403 ] || fail "WebSocket from a foreign origin"
 [ "$(ws_status -H "Origin: https://evil.example" "$BASE/control")" = 403 ] || fail "presence from a foreign origin"
 echo "    ok"
 
@@ -111,11 +112,11 @@ TOKEN="$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$WORK/good.json")"
 [ -n "$TOKEN" ] || fail "no token: $(cat "$WORK/good.json")"
 token_status() { curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/me"; }
 [ "$(token_status)" = 200 ] || fail "/api/me with the token"
-[ "$(probe ws "$WSS/ws?session=not-mine" "$BASE" "$TOKEN")" = 4004 ] || fail "WebSocket to someone else's session"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Origin: https://evil.example" -X POST "$BASE/api/sessions")" = 403 ] ||
-  fail "creating a session from a foreign origin"
-[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Origin: $BASE" -H 'Content-Type: application/json' --data '{"name":"x"}' "$BASE/api/sessions/x/rename")" = 401 ] ||
-  fail "renaming without the token"
+[ "$(probe ws "$WSS/ws" "$BASE" "$TOKEN")" = 4004 ] || fail "WebSocket with a valid token but no desktop running"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Origin: https://evil.example" -X POST "$BASE/api/desktop")" = 403 ] ||
+  fail "starting a desktop from a foreign origin"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Origin: $BASE" -X POST "$BASE/api/desktop/end")" = 404 ] ||
+  fail "ending a desktop that isn't running"
 echo "    ok"
 
 step "a sign-in lasts only while its page is there"

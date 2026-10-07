@@ -7,11 +7,11 @@ can disconnect and reattach at any time without the apps noticing.
 
 ## Running
 
-The viewer is the gateway's one page (`packages/gateway`, served at `/`): the sign-in form, the session list (open
-by clicking a row, rename by clicking the name, end) and the desktop. Signing in lasts only as long as the page (see
+The viewer is the gateway's one page (`packages/gateway`, served at `/`): the sign-in form and the desktop (signing
+in attaches to the user's one desktop, starting it if needed). Signing in lasts only as long as the page (see
 the gateway README and [src/auth.ts](src/auth.ts)), so it never navigates away. It talks to the gateway same-origin
-with a bearer token: `POST /api/login`, `/api/logout`, `/api/me`, `GET`/`POST /api/sessions`,
-`POST /api/sessions/<id>/{rename,end}`, WebSockets `/control` (presence) and `/ws?session=<id>` (the session),
+with a bearer token: `POST /api/login`, `/api/logout`, `/api/me`, `POST /api/desktop` (attach or
+create) and `POST /api/desktop/end`, WebSockets `/control` (presence) and `/ws` (the desktop),
 each sending the token as its first message. Build it with `yarn build`; see the gateway README for running
 everything.
 

@@ -3,22 +3,23 @@
 #
 # Starts the gateway in dev-auth mode (sessions run as the current user) with TLS on $GATEWAY_PORT, then, in a headless
 # browser (scripts/e2e/browser-driver.js):
-#   1. signs in (a second tab stays signed out), starts a session, launches foot from the Apps menu,
-#      renames the session there, pins foot (kept in the config dir), minimizes and restores it from the taskbar,
+#   1. signs in (a second tab stays signed out; signing in starts the user's desktop), launches foot from the Apps
+#      menu, pins foot (kept in the config dir), minimizes and restores it from the taskbar,
 #      maximizes and restores it down, shows a notification (notify-send) as a toast and in the history, types a
 #      command; history.back() and the mouse's back button over the desktop don't leave the page (foot gets
 #      BTN_SIDE); reloading asks to confirm first (dismiss keeps the page), then asks to sign in again and the old
-#      token stops working; closes the browser, signs in again, finds the session listed, opens it by clicking its
-#      row and checks the same window comes back with the earlier output, with foot still running, still pinned, and
+#      token stops working; closes the browser, signs in again and checks that it reattaches to the same desktop:
+#      the same window comes back with the earlier output, with foot still running, still pinned, and
 #      the notification still in the history;
 #   2. window management in the viewer: the taskbar's preview cards (title and close only, right-click opens the window
 #      menu), the window menu's Move (pointer, click, Escape, arrow keys) and Size, fullscreen (foot, bound to F11)
 #      covering the page above the taskbar and back, the cheap globals advertised; a resize follows the pointer immediately (without waiting for the server),
 #      resizing from the left/top edge keeps the right/bottom edge in place, and shrinking the viewport moves a window
 #      back into view;
-#   3. Disconnect (in the Apps menu's session menu) goes back to the session list without signing in again; renaming
-#      the session by clicking its name (a name with HTML in it shows as text, Escape cancels); signing out; Log out
-#      (session menu) ends the session, killing an app that ignores SIGTERM once its time is up.
+#   3. one desktop per user: Disconnect (in the Apps menu's session menu) signs out and keeps the desktop, signing in
+#      again reattaches to the same window; a second sign-in in another tab takes the same desktop over (the first tab
+#      is told and can take it back); Log out (session menu) ends the desktop, killing an app that ignores SIGTERM
+#      once its time is up, and signing in again starts a new, empty one.
 #
 # The gateway gets its own D-Bus session bus (for notifications), config dir (pinned apps) and a test app
 # (a .desktop file for foot with WAYLAND_DEBUG) in its own data dir. It runs with --dev-time-scale (see auth.sh).
@@ -122,49 +123,33 @@ no_animations() { echo "() => !Object.keys(window.__viewerTest.animations()).len
 step "signing in in the browser"
 pw open "$BASE/?test=1" >/dev/null
 browser_login
-[ "$(pw_eval "() => document.querySelectorAll('.sessions li').length")" = 0 ] || fail "unexpected sessions listed"
 
 step "another tab is not signed in"
 pw tab-new >/dev/null
 pw goto "$BASE/" >/dev/null
 wait_for "() => document.readyState === 'complete' && !!document.querySelector('#login-view')" "the second tab" 10
-[ "$(pw_eval "() => $(visible login-view) && !$(visible sessions-view)")" = true ] || fail "the second tab is signed in"
+[ "$(pw_eval "() => $(visible login-view) && !$(visible desktop-view)")" = true ] || fail "the second tab is signed in"
 pw tab-close >/dev/null
 pw tab-select 0 >/dev/null
-[ "$(pw_eval "() => $(visible sessions-view)")" = true ] || fail "the first tab was signed out"
+[ "$(pw_eval "() => $(visible desktop-view)")" = true ] || fail "the first tab was signed out"
 echo "    ok"
 
-step "starting a session"
-pw_eval "() => { document.querySelector('#new-session').click(); return true }" >/dev/null
+step "signing in starts the desktop"
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection" 40
-SESSION_ID="$(pw_eval "() => window.__viewerTest.session()" | tr -d '"')"
-[ -n "$SESSION_ID" ] || fail "no session"
 # the session runs on wlroots
 grep -aq 'WAYLAND_DISPLAY=.*(wlroots)' "$WORK/gateway.log" ||
   fail "the session isn't running on wlroots"
 
 TEST_APP=test-foot.desktop
-step "the Apps menu: you, the session, the installed apps"
+step "the Apps menu: you, the installed apps"
 click_element '#apps-button'
 wait_for "() => $(visible apps-menu) && !!document.querySelector('.app-row[data-app=\"$TEST_APP\"]')" "the test app in the Apps menu"
 [ "$(pw_eval "() => document.activeElement.id")" = '"apps-search"' ] || fail "the search field doesn't have the keyboard"
 [ "$(pw_eval "() => document.querySelector('.apps-username').textContent")" = "\"$ME\"" ] || fail "the user isn't shown"
-[ "$(pw_eval "() => document.querySelector('#apps-session-name input').value")" = '"Nebula 1"' ] ||
-  fail "the session name isn't shown"
 # searching narrows the list
 pw_eval "() => { const i = document.getElementById('apps-search'); i.value = 'test term'; i.dispatchEvent(new Event('input')); return true }" >/dev/null
 [ "$(pw_eval "() => [...document.querySelectorAll('.apps-list [data-app]')].map((e) => e.dataset.app).join(' ')")" = "\"$TEST_APP\"" ] ||
   fail "searching didn't find just the test app"
-echo "    ok"
-
-step "renaming the session in the Apps menu"
-click_element '#apps-session-name input'
-pw press Control+a >/dev/null
-pw type "Shell test" >/dev/null
-pw press Enter >/dev/null
-wait_for "() => document.querySelector('#apps-session-name input').value === 'Shell test' && document.title === 'Shell test'" "the new name"
-LISTED_NAME="$(pw_eval "async () => (await (await fetch('/api/sessions', { headers: { Authorization: 'Bearer ' + window.__viewerTest.token() } })).json())[0].name")"
-[ "$LISTED_NAME" = '"Shell test"' ] || fail "the rename didn't reach the session list: $LISTED_NAME"
 echo "    ok"
 
 step "pinning the test app"
@@ -321,7 +306,7 @@ reload_with_dialog dialog-dismiss
 reload_with_dialog dialog-accept
 wait_for "() => document.readyState === 'complete' && $(visible login-view)" "the sign-in form after reloading" 10
 # the reloaded page's old sign-in is revoked soon after its presence connection closed
-token_revoked() { [ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $BROWSER_TOKEN" "$BASE/api/sessions")" = 401 ]; }
+token_revoked() { [ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $BROWSER_TOKEN" "$BASE/api/me")" = 401 ]; }
 wait_until "the token of the reloaded page to stop working" $((5 / TIME_SCALE + 8)) token_revoked
 echo "    ok"
 
@@ -330,14 +315,9 @@ pw close >/dev/null
 sleep 1
 kill -0 "$FOOT_PID" 2>/dev/null || fail "foot didn't survive the browser going away"
 
-step "signing in again and reopening the session"
+step "signing in again reattaches to the same desktop"
 pw open "$BASE/?test=1" >/dev/null
 browser_login
-[ "$(pw_eval "() => document.querySelectorAll('.sessions li').length")" = 1 ] || fail "the session is not listed"
-LISTED="$(pw_eval "() => document.querySelector('.sessions li').dataset.session" | tr -d '"')"
-[ "$LISTED" = "$SESSION_ID" ] || fail "listed session $LISTED is not $SESSION_ID"
-# clicking the row (not just the Open button) opens it
-click_element '.sessions .when'
 wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer reconnection"
 wait_for "() => { const w = window.__viewerTest.windows(); return w.length === 1 && w[0].hasContent }" "foot window after reattach"
 
@@ -753,7 +733,7 @@ echo "    moved from $GX,$GY to $GX2,$GY2"
 [ "$GX2" -lt "$GX" ] || fail "the window wasn't moved"
 pw resize 1280 800 >/dev/null
 
-# --- session list: disconnect, renaming, signing out, logging out ---
+# --- one desktop per user: disconnect, signing in again, taking over, logging out ---
 
 # the session menu in the Apps menu. $1: disconnect or logout
 session_menu() {
@@ -764,47 +744,40 @@ session_menu() {
   click_element "#session-menu button[data-action=$1]"
 }
 
-step "Disconnect goes back to the session list, still signed in"
+# the foot window is on the desktop again: the same window as before (so the same desktop, not a new one)
+same_window_back() {
+  wait_for "() => { const w = window.__viewerTest.windows(); return w.length === 1 && w[0].hasContent && w[0].id === '$WINDOW_ID' }" "the same foot window"
+  kill -0 "$FOOT_PID" 2>/dev/null || fail "foot didn't survive"
+}
+
+step "Disconnect signs out and keeps the desktop; signing in again reattaches"
 session_menu disconnect
-wait_for "() => $(visible sessions-view) && document.querySelectorAll('.sessions li').length === 1" "the session list"
-[ "$(pw_eval "() => window.__viewerTest.connected()")" = false ] || fail "still connected to the session"
-kill -0 "$FOOT_PID" 2>/dev/null || fail "foot didn't survive disconnecting"
-echo "    ok"
-
-NAME_FIELD='.sessions .session-name input'
-step "renaming the session by clicking its name"
-[ "$(pw_eval "() => document.querySelector('$NAME_FIELD').value")" = '"Shell test"' ] ||
-  fail "the name given in the Apps menu isn't listed"
-[ "$(pw_eval "() => document.querySelector('$NAME_FIELD').getAttribute('aria-label')")" = '"Rename session"' ] ||
-  fail "the name field has no accessible label"
-click_element "$NAME_FIELD"
-[ "$(pw_eval "() => document.activeElement === document.querySelector('$NAME_FIELD') && $(visible sessions-view)")" = true ] ||
-  fail "clicking the name didn't start editing it (or opened the session)"
-pw press Control+a >/dev/null
-pw type "  <i>Build</i>   & tests " >/dev/null
-pw press Enter >/dev/null
-wait_for "() => document.querySelector('$NAME_FIELD').value === '<i>Build</i> & tests'" "the new name" 10
-[ "$(pw_eval "() => document.querySelectorAll('.sessions i').length")" = 0 ] || fail "HTML in the session name was rendered"
-click_element "$NAME_FIELD"
-pw type "xyz" >/dev/null
-pw press Escape >/dev/null
-[ "$(pw_eval "() => document.querySelector('$NAME_FIELD').value")" = '"<i>Build</i> & tests"' ] ||
-  fail "Escape didn't cancel the edit"
-RENAME_API="$(pw_eval "async () => { const token = window.__viewerTest.token(); const id = window.__viewerTest.session() || document.querySelector('.sessions li').dataset.session; const post = (name, auth) => fetch('/api/sessions/' + id + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + auth }, body: JSON.stringify({ name }) }).then((r) => r.status); const listed = (await (await fetch('/api/sessions', { headers: { Authorization: 'Bearer ' + token } })).json())[0].name; return [listed, await post('Work', token), await post('   ', token), await post('x'.repeat(65), token), await post('Nope', 'wrong')].join(' ') }")"
-echo "    API: $RENAME_API (expected the new name, then 200 400 400 401)"
-[ "$RENAME_API" = '"<i>Build</i> & tests 200 400 400 401"' ] || fail "rename API: $RENAME_API"
-echo "    ok"
-
-step "signing out"
-pw_eval "() => { document.querySelector('#sign-out').click(); return true }" >/dev/null
 wait_for "() => $(visible login-view)" "the sign-in form"
+[ "$(pw_eval "() => window.__viewerTest.connected()")" = false ] || fail "still connected to the desktop"
+kill -0 "$FOOT_PID" 2>/dev/null || fail "foot didn't survive disconnecting"
 browser_login
-[ "$(pw_eval "() => document.querySelector('$NAME_FIELD').value")" = '"Work"' ] || fail "the API rename didn't stick"
+wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection"
+same_window_back
 echo "    ok"
 
-step "Log out ends the session"
-pw_eval "() => { document.querySelector('.sessions button[data-action=open]').click(); return true }" >/dev/null
-wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection"
+step "a second sign-in (another tab) takes over the same desktop"
+pw tab-new >/dev/null
+pw goto "$BASE/?test=1" >/dev/null
+browser_login
+wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "viewer connection in the second tab"
+same_window_back
+pw tab-select 0 >/dev/null
+wait_for "() => !document.getElementById('overlay').hidden && document.getElementById('overlay-message').textContent.includes('opened somewhere else')" "the first tab to be told it was taken over" 10
+[ "$(pw_eval "() => window.__viewerTest.connected()")" = false ] || fail "the first tab is still connected"
+pw tab-select 1 >/dev/null
+pw tab-close >/dev/null
+pw tab-select 0 >/dev/null
+click_element '#overlay-reconnect'
+wait_for "() => $(visible desktop-view) && window.__viewerTest.connected()" "the first tab to take the desktop back"
+same_window_back
+echo "    ok"
+
+step "Log out ends the desktop"
 # an app that ignores SIGTERM (no window): the session kills it when its time is up (5 s, divided by the time scale)
 click_element '#apps-button'
 wait_for "() => $(visible apps-menu) && document.activeElement.id === 'apps-search'" "the Apps menu" 5
@@ -824,8 +797,9 @@ stubborn_gone() { ! kill -0 "$STUBBORN_PID" 2>/dev/null; }
 wait_until "the app that ignores SIGTERM to be killed" 5 stubborn_gone
 grep -aq "App Test Stubborn ($STUBBORN_PID) didn't quit, killing it." "$WORK/gateway.log" ||
   fail "the stubborn app wasn't killed by the session"
+# signing in again starts a new, empty desktop
 browser_login
-[ "$(pw_eval "() => document.querySelectorAll('.sessions li').length")" = 0 ] || fail "ended session still listed"
+wait_for "() => $(visible desktop-view) && window.__viewerTest.connected() && window.__viewerTest.windows().length === 0" "an empty new desktop"
 echo "    ok"
 
-echo "PASS: sign-in, session survival, desktop shell, window management, renaming and logging out"
+echo "PASS: sign-in, session survival, desktop shell, window management, reattaching, takeover and logging out"

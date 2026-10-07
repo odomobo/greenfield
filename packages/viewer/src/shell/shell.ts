@@ -1,4 +1,3 @@
-import { SessionInfo } from '../session-name'
 import { shellStore } from '../state'
 import { ServerMessage, ShellNotification, ViewerMessage } from '../protocol'
 import { closePopup, isKindOpen, openPopup } from '../popups'
@@ -26,15 +25,14 @@ export class ShellController {
     this.icons = new IconCache((names) => this.send({ type: 'shell.icons', names }))
   }
 
-  /** A session was opened: show its user and name, start empty until the session sends its state. */
-  start(username: string, session: SessionInfo): void {
+  /** The desktop was opened: show its user, start empty until the session sends its state. */
+  start(username: string): void {
     this.icons.clear()
     this.clearToastTimers()
     resetGroupOrder()
     closePopup()
     shellStore.update({
       username,
-      session,
       apps: [],
       pinned: [],
       windows: [],

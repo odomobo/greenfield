@@ -17,13 +17,13 @@ export function DesktopView({
   outputRef,
   appsMenuActions,
   onReconnect,
-  onBackToSessions,
+  onRestart,
 }: {
   core: Core | null
   outputRef: RefObject<HTMLDivElement>
   appsMenuActions: AppsMenuActions
   onReconnect: () => void
-  onBackToSessions: () => void
+  onRestart: () => void
 }) {
   const view = useStore(appStore)
   const connection = view.connection
@@ -34,9 +34,9 @@ export function DesktopView({
     connection.kind === 'reconnecting'
       ? `Connection lost. Reconnecting in ${connection.inSeconds}s…`
       : connection.kind === 'taken-over'
-        ? 'This session was opened somewhere else.'
+        ? 'This desktop was opened somewhere else.'
         : connection.kind === 'ended'
-          ? 'This session has ended.'
+          ? 'This desktop has ended.'
           : ''
   return (
     <CoreContext.Provider value={core}>
@@ -53,9 +53,9 @@ export function DesktopView({
                 Reconnect
               </button>
             )}
-            {(connection.kind === 'taken-over' || connection.kind === 'ended') && (
-              <button type="button" id="overlay-sessions" onClick={onBackToSessions}>
-                Back to sessions
+            {connection.kind === 'ended' && (
+              <button type="button" id="overlay-restart" onClick={onRestart}>
+                Start a new desktop
               </button>
             )}
           </div>
