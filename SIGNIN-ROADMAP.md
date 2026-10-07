@@ -2,7 +2,8 @@
 
 A separate roadmap for restructuring how nebula signs users in and connects their browser to their desktop. The main
 [ROADMAP.md](ROADMAP.md) covers everything else. Where they disagree (one desktop per user, sessions surviving a
-gateway restart), this document is newer and wins for sign-in and session lifetime.
+gateway restart, which is no longer
+required), this document is newer and wins for sign-in and session lifetime.
 
 Decided 2026-10-07. Nothing here is implemented yet.
 
@@ -43,8 +44,9 @@ In priority order:
 - **Disconnect keeps the desktop.** Signing in again reattaches. Only Log out ends the desktop.
 - **The open WebSocket is the sign-in.** No tokens, no presence connection, no REST API.
 - **TLS is done by a TLS library.** We write no TLS or crypto code. No kernel TLS, no handing TLS state around.
-- **The production login helper never contains dev code.** The dev helper is a separate project. The session always
-  receives a dev-flags struct; production always sends the defaults.
+- **The production login helper never contains dev code.** The dev helper is a separate project. The session has no
+  dev mode of its own: it is driven by dev flags in its config, which only the dev helper writes. The production helper
+  doesn't know they exist.
 - **No per-user throttling in our code.** Per-account lockout is PAM's job (`pam_faillock`).
 - **2FA is deferred.** The sign-in protocol carries PAM's prompts generically, so it needs no protocol change later.
 
@@ -74,10 +76,15 @@ Why this shape:
   listener (step 10).
 - **Root reads only short fixed-format records** from the worker, never network data.
 - **One PAM handle from sign-in to Log out** makes PAM modules that need the password at session start work.
-- **Desktops are independent** of the listener and helper, so they survive restarts of either.
+- **Desktops are independent** of the listener, so restarting the front leaves them running. Surviving a restart of
+  the whole service is not required: a service restart may end the desktops too.
 
-Two things no design fixes: the process carrying a connection sees that connection's password, and a self-signed
-certificate can be impersonated when users click through the warning (real certificates are the fix).
+Things no design fixes:
+
+- the process carrying a connection sees that connection's password;
+- a self-signed certificate can be impersonated when users click through the warning (real certificates are the fix);
+- signing in again doesn't refresh the running desktop's credentials: the reattach runs PAM in a new process, so
+  `pam_setcred` can't reach the desktop, and e.g. Kerberos tickets obtained at desktop start expire regardless.
 
 ## Steps
 
@@ -94,8 +101,9 @@ time without changing how the pieces connect.
 
 ### 2. Session config on fd 3
 
-- The monitor passes a `SessionConfig` record on an extra pipe (fd 3) instead of the IPC `start` message. It always
-  contains `devFlags` (`timeScale`, `linkKbps`, `patchOrder`, `patchShape`), all defaults in production.
+- The monitor passes a `SessionConfig` record on an extra pipe (fd 3) instead of the IPC `start` message. It has an
+  optional `devFlags` section (`timeScale`, `linkKbps`, `patchOrder`, `patchShape`); when it's missing the session
+  uses the defaults. Until step 5 the monitor fills it from today's dev flags.
 - Site settings (encoder, render device) move to a root-owned config file the session reads itself. Encoder detection
   moves into the session, so GStreamer no longer runs as root.
 - No user-visible change.
@@ -106,15 +114,17 @@ time without changing how the pieces connect.
   monitor's `auth`. On success it relays that same WebSocket to the user's desktop.
 - Remove tokens, `/control` presence, `/api/*` and the viewer's token code (`auth.ts`). Log out becomes an in-band
   message to the desktop. The takeover message carries the new connection's IP.
-- A dropped connection shows the sign-in form (resume comes in step 13).
+- A dropped connection shows the sign-in form.
 - Rewrite the e2e sign-in helper in `scripts/e2e/lib.sh` (and `probe.js`, `auth.sh`, `desktop.sh`, `audio.sh`).
 
 ### 4. The login protocol and the dev helper
 
 - Add a small native addon for passing fds over Unix sockets and reading `SO_PEERCRED` (next to the existing
   `socket-options` code in compositor-proxy).
-- The session accepts handed-over connections on `/run/nebula/users/<uid>/desktop.sock` (uid 0 only, or the dev
-  helper's uid in dev mode), next to its old `viewer.sock`.
+- The session accepts handed-over connections on `/run/nebula/users/<uid>/desktop.sock` from uid 0 or the
+  session's own uid, next to its old `viewer.sock`. This is the same check in both modes: the production helper is
+  root, the dev helper runs as the user. Accepting the own uid grants nothing, since that user controls the desktop
+  anyway.
 - Define the `login.sock` record protocol: `Begin`, `Prompt`, `Answer`, `Result`, with fixed layouts and hard length
   limits. On success the helper creates a socket pair, passes one end to the desktop and the other to the web
   process.
@@ -127,7 +137,7 @@ time without changing how the pieces connect.
 
 ### 5. The production login helper replaces the monitor
 
-- `native/pam-helper.c` grows into the `nebula-login` daemon, speaking the same protocol as the dev helper:
+- `packages/gateway/native/pam-helper.c` grows into the `nebula-login` daemon, speaking the same protocol as the dev helper:
   - accept loop on `login.sock`, peer uid check, global cap on attempts, one fork per attempt;
   - one PAM handle per attempt, prompts relayed to the page, `PAM_RHOST` and `PAM_TTY` set, a fixed 3 s minimum on
     failures, refusal of uid 0;
@@ -185,24 +195,17 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 - Refuse uids below `UID_MIN` (`/etc/login.defs`) and shells not in `/etc/shells` by default, both configurable.
 - Expired passwords: `PAM_NEW_AUTHTOK_REQD` → `pam_chauthtok` through the same prompt relay, with a page UI for it.
 
-### 13. Resume after an accidental drop
-
-- On each attach the desktop gives the page a single-use ticket (uid + 32 random bytes) and keeps its hash. After an
-  accidental drop the page reconnects with `Resume(ticket)` instead of a username; the helper runs only
-  `pam_acct_mgmt` and passes the connection to the desktop, which compares in constant time.
-- The Disconnect button, takeover and Log out revoke the ticket. The window is configurable; 0 turns resume off.
-
-### 14. Immutable caching for page assets
+### 13. Immutable caching for page assets
 
 - Serve content-hashed asset files with a long `immutable` cache lifetime, so repeat visits only fetch `index.html`
   and open the WebSocket. Fewer connections means fewer workers.
 
-### 15. systemd units and hardening
+### 14. systemd units and hardening
 
 - Socket activation for the listener (so nothing has to bind port 443 as root), unit hardening (`ProtectSystem`,
   `NoNewPrivileges` on the front, an empty capability set, `RestrictAddressFamilies`), a unit for the helper.
 - systemd stays optional: without it, the helper binds the port as in step 5.
-- Decide what stopping the service does to running desktops (leave them, or an explicit command that ends them).
+- Stopping the service may end running desktops (see "Why this shape").
 - Ties in with the install script item in ROADMAP.md.
 
 ## Order and parallelism
@@ -213,7 +216,7 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 2 ──┘              │              └──> 12
                    └──> 6 ──> 8 ──┬──> 9
                                   └──> 10
-                        6 ──> 13, 14, 15   (independent of each other and of 7–12)
+                        6 ──> 13, 14   (independent of each other and of 7–12)
 ```
 
 - **1 and 2 can run in parallel.** Step 1 is the viewer flow and monitor; step 2 is the config path into the session.
@@ -224,15 +227,13 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 - **After 6, two tracks and a set of independent items:**
   - helper track: 7, then 11 and 12 in parallel (doing them after the Rust port avoids writing them twice);
   - front track: 8, then 9 and 10 in parallel (both are easiest in the Rust worker);
-  - independent: 13 (resume), 14 (caching) and 15 (systemd) can start any time after 6, in parallel with everything.
-- **Security-critical steps** (5, 7, 9, 10, 11, 12, 13) each touch root code or a trust boundary. Review each one on
+  - independent: 13 (caching) and 14 (systemd) can start any time after 6, in parallel with everything.
+- **Security-critical steps** (5, 7, 9, 10, 11, 12) each touch root code or a trust boundary. Review each one on
   its own rather than batching them.
 
 ## Open decisions
 
-- Resume window length, or no resume (step 13).
 - Remote key signing vs each worker holding the key (step 10).
 - Default account policy (step 12).
 - A killed PAM parent: leave the desktop running, or `PR_SET_PDEATHSIG` (step 7).
-- What stopping the service does to running desktops (step 15).
 - Optional built-in ACME for real certificates, in the listener (after step 8).
