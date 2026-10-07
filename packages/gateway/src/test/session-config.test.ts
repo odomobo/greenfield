@@ -9,6 +9,12 @@ test('session config: defaults without devFlags', () => {
   assert.deepEqual(devFlags, { timeScale: 1, linkKbps: 0, patchOrder: 'oldest', patchShape: 'bands' })
 })
 
+test('session config: an inherited listening socket instead of a path', () => {
+  const { config } = parseSessionConfig('{"version":1,"listenFd":4}')
+  assert.equal(config.listenFd, 4)
+  assert.equal(config.socketPath, undefined)
+})
+
 test('session config: dev flags are filled in individually', () => {
   const { devFlags } = parseSessionConfig('{"version":1,"socketPath":"s","devFlags":{"timeScale":3,"patchShape":"tiles"}}')
   assert.deepEqual(devFlags, { timeScale: 3, linkKbps: 0, patchOrder: 'oldest', patchShape: 'tiles' })
@@ -23,6 +29,9 @@ test('session config: invalid records are rejected', () => {
     '{"version":1,"socketPath":"s","devFlags":{"timeScale":0}}',
     '{"version":1,"socketPath":"s","devFlags":{"patchOrder":"x"}}',
     '{"version":1,"socketPath":"s","siteSettingsPath":3}',
+    '{"version":1,"socketPath":"s","listenFd":4}',
+    '{"version":1,"listenFd":1}',
+    '{"version":1,"listenFd":"4"}',
   ]) {
     assert.throws(() => parseSessionConfig(text))
   }

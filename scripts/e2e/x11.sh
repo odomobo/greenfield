@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of X11 apps (XWayland) in the desktop: starts the gateway in dev-auth mode on $GATEWAY_PORT, signs in
+# End-to-end test of X11 apps (XWayland) in the desktop: starts the gateway in dev mode on $GATEWAY_PORT, signs in
 # in a headless browser (scripts/e2e/browser-driver.js), starts a session and, from the Apps menu:
 #   1. launches xev: its window is a desktop window with its X11 title, and the X11 app knows where the viewer put it
 #      (xwininfo's absolute position is the window's position in the viewer);

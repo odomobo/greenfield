@@ -30,6 +30,7 @@ pkg_check_modules(JPEG REQUIRED libjpeg IMPORTED_TARGET)
 
 add_library(proxy-poll-addon SHARED
         ${CMAKE_CURRENT_SOURCE_DIR}/native/poll/src/poll.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/poll/src/fd_passing.c
 )
 set_property(
     TARGET proxy-poll-addon

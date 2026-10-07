@@ -193,6 +193,14 @@ set_thread_nice(napi_env env, napi_callback_info info) {
     return return_value;
 }
 
+// fd_passing.c
+napi_value fd_unix_connect(napi_env env, napi_callback_info info);
+napi_value fd_accept_connection(napi_env env, napi_callback_info info);
+napi_value fd_send_with_fd(napi_env env, napi_callback_info info);
+napi_value fd_receive_with_fds(napi_env env, napi_callback_info info);
+napi_value fd_set_close_on_exec(napi_env env, napi_callback_info info);
+napi_value fd_close(napi_env env, napi_callback_info info);
+
 static napi_value
 init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
@@ -201,6 +209,12 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("setTcpNotSentLowat", set_tcp_not_sent_lowat),
             DECLARE_NAPI_METHOD("setSocketSendBuffer", set_socket_send_buffer),
             DECLARE_NAPI_METHOD("setThreadNice", set_thread_nice),
+            DECLARE_NAPI_METHOD("unixConnect", fd_unix_connect),
+            DECLARE_NAPI_METHOD("acceptConnection", fd_accept_connection),
+            DECLARE_NAPI_METHOD("sendWithFd", fd_send_with_fd),
+            DECLARE_NAPI_METHOD("receiveWithFds", fd_receive_with_fds),
+            DECLARE_NAPI_METHOD("setCloseOnExec", fd_set_close_on_exec),
+            DECLARE_NAPI_METHOD("closeFd", fd_close),
     };
 
     NAPI_CALL(env, napi_define_properties(env, exports, sizeof(desc) / sizeof(napi_property_descriptor), desc))

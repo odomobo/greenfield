@@ -1,0 +1,8 @@
+[package]
+name = "nebula-login-protocol"
+description = "The records the web process, the login helpers and the desktops exchange (login.sock, desktop.sock)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -1,0 +1,19 @@
+# The login helpers (see SIGNIN-ROADMAP.md): the protocol and the code both helpers share, and the helpers themselves
+# as separate binaries, so the production helper contains no dev code. std and libc only (the production helper adds
+# libpam).
+[workspace]
+resolver = "2"
+members = ["protocol", "common", "dev-login"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+libc = "0.2"
+nebula-login-protocol = { path = "protocol" }
+nebula-login-common = { path = "common" }
+
+[profile.release]
+panic = "abort"

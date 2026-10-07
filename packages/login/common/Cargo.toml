@@ -1,0 +1,10 @@
+[package]
+name = "nebula-login-common"
+description = "What the dev and production login helpers share: record channels with fd passing, attach-or-create, starting processes with inherited fds."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
+nebula-login-protocol.workspace = true

@@ -1,0 +1,14 @@
+{
+  "name": "@gfld/login",
+  "version": "0.1.0",
+  "description": "The login helpers (Rust): the protocol, the dev login helper nebula-dev-login, later the production one.",
+  "private": true,
+  "os": [
+    "linux"
+  ],
+  "scripts": {
+    "build": "cargo build --release --locked",
+    "test": "cargo test --release --locked"
+  },
+  "license": "AGPL-3.0-or-later"
+}

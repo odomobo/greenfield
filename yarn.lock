@@ -890,6 +890,12 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@gfld/login@workspace:packages/login":
+  version: 0.0.0-use.local
+  resolution: "@gfld/login@workspace:packages/login"
+  languageName: unknown
+  linkType: soft
+
 "@gfld/scene-protocol@workspace:^, @gfld/scene-protocol@workspace:libs/scene-protocol":
   version: 0.0.0-use.local
   resolution: "@gfld/scene-protocol@workspace:libs/scene-protocol"

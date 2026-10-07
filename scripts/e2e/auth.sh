@@ -2,8 +2,9 @@
 # End-to-end test of the gateway's sign-in and isolation: no browser, only curl and WebSocket probes (probe.js), which
 # speak the in-band sign-in on the page's WebSocket (see "Sign-in" in libs/scene-protocol).
 #
-# Starts the gateway in dev-auth mode on $GATEWAY_PORT, then checks:
-#   - unsafe flag combinations are refused, and there is no plain-HTTP mode;
+# Starts the gateway (the dev login helper, see lib.sh) on $GATEWAY_PORT, then checks:
+#   - unsafe flag combinations are refused, and there is no plain-HTTP mode; the production entry point (main.js) and
+#     the web process take no dev options;
 #   - the sign-in page leaks nothing: no product names, no cookies;
 #   - an unknown user and a wrong password look the same: the same message and timing, at least the minimum failure
 #     time;
@@ -12,8 +13,9 @@
 #   - failed sign-ins are throttled per IP (for any username), last since it blocks this IP.
 # Successful sign-ins, reattaching, takeover and logging out are in desktop.sh (they start a desktop).
 #
-# The gateway runs with --dev-time-scale, which shortens its failed-sign-in delay (3 s) so this finishes in seconds;
-# the assertions are the same, just scaled.
+# The dev login helper runs with --dev-time-scale, which shortens its failed-sign-in delay (3 s) so this finishes in
+# seconds; the assertions are the same, just scaled. (The web process's per-IP throttle refuses blocked addresses
+# without asking the helper, so without that delay.)
 #
 # Requires: curl, node, the built gateway and viewer. Usage: scripts/e2e/auth.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -21,17 +23,25 @@ require_tools curl node
 mkdir -p "$WORK/data" "$WORK/config"
 
 step "refusing unsafe configurations"
-gateway --dev-auth --bind-ip 0.0.0.0 --bind-port "$PORT" --state-dir "$WORK/state" >/dev/null 2>&1 &&
-  fail "dev auth started on a public address"
-gateway --insecure-plaintext --dev-auth --bind-ip 127.0.0.1 --bind-port "$PORT" --state-dir "$WORK/state" >/dev/null 2>&1 &&
+# the dev login helper
+gateway --bind-ip 0.0.0.0 --bind-port "$PORT" --state-dir "$WORK/state" >/dev/null 2>&1 &&
+  fail "the dev login helper started on a public address"
+gateway --insecure-plaintext --bind-ip 127.0.0.1 --bind-port "$PORT" --state-dir "$WORK/state" >/dev/null 2>&1 &&
   fail "the removed plaintext mode was accepted"
-GREENFIELD_DEV_PASSWORD=short node "$REPO/packages/gateway/dist/main.js" --dev-auth --bind-ip 127.0.0.1 \
-  --bind-port "$PORT" >/dev/null 2>&1 && fail "dev auth started with a weak password"
-gateway --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 && fail "PAM mode started without root"
-gateway --dev-auth --dev-time-scale 0 --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
+GREENFIELD_DEV_PASSWORD=short "$LOGIN_HELPER" --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
+  fail "the dev login helper started with a weak password"
+gateway --dev-time-scale 0 --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
   fail "an invalid time scale was accepted"
-gateway --dev-time-scale 3 --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
-  fail "a time scale was accepted without dev auth"
+# the production entry point (the monitor) has no dev mode any more, and needs root
+node "$REPO/packages/gateway/dist/main.js" --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
+  fail "PAM mode started without root"
+node "$REPO/packages/gateway/dist/main.js" --dev-auth --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
+  fail "the production gateway accepted --dev-auth"
+node "$REPO/packages/gateway/dist/main.js" --dev-time-scale 3 --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
+  fail "the production gateway accepted a dev option"
+# the web process takes no dev options either
+node "$REPO/packages/gateway/dist/web.js" --listen-fd 3 --login-socket /nonexistent --dev-time-scale 3 >/dev/null 2>&1 &&
+  fail "the web process accepted a dev option"
 echo "    ok"
 
 step "starting the gateway on :$PORT"

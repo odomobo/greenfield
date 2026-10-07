@@ -4,8 +4,11 @@ The front door: a login page and the per-user desktop sessions behind it (one de
 
 ## Processes
 
+Production (PAM, `main.js` as root; step 5 of [SIGNIN-ROADMAP.md](../../SIGNIN-ROADMAP.md) replaces the monitor with
+the production login helper):
+
 ```
-gateway (monitor)          root in PAM mode. Not network-facing. Authenticates users through native/pam-helper,
+gateway (monitor)          root. Not network-facing. Authenticates users through native/pam-helper,
 │                          issues one-use login tickets, keeps the session registry, spawns sessions.
 ├── gateway-web            unprivileged (--web-user, default "greenfield"). TLS, the page, Origin checks, failed
 │                          sign-in throttling, viewer files; runs the sign-in on the page's WebSocket and then relays
@@ -18,8 +21,27 @@ gateway (monitor)          root in PAM mode. Not network-facing. Authenticates u
                            uid:webgroup 2750, socket 0660).
 ```
 
+Development (the dev login helper, [packages/login](../login/README.md), the dev entry point; the same shape the
+production login helper will have):
+
+```
+nebula-dev-login           the current user (never root). Binds the port, owns the --dev-* options. Accepts the web
+│                          process's sign-ins on <runtime>/login.sock (the login protocol: client address, Begin,
+│                          Prompt/Answer, Result), one forked child per sign-in.
+├── gateway-web            started with the listening socket (fd 3) and where login.sock is. TLS, the page, Origin
+│                          checks, failed sign-in throttling per IP, viewer files; relays the helper's prompts to the
+│                          page and, once signed in, the WebSocket over the connection the Result carried.
+└── sign-in child          checks the password, then attaches to or starts the user's desktop: flock on
+    │                      <runtime>/users/<uid>/lock, connect to desktop.sock; if nothing listens, bind it and start
+    │                      the desktop with the listening socket inherited. Hands it the connection (a socket pair end
+    │                      and the client's address, a Handover record) and the web process the other end. A child
+    │                      that started a desktop stays as its parent until it exits.
+    └── session-process    the desktop, as the current user: accepts Handover records on its inherited desktop.sock
+                           (SessionConfig.listenFd). Log out closes it: the next sign-in starts a new desktop.
+```
+
 TLS ends in the web process, so users' sessions never have access to the key. There is no plain-HTTP mode: without
-`--cert`/`--key` the gateway generates a self-signed certificate. A user's desktop dies when they log out or when the
+`--cert`/`--key` the web process generates a self-signed certificate. A user's desktop dies when they log out or when the
 gateway stops; closing the browser doesn't affect it.
 
 ## Building
@@ -39,6 +61,9 @@ yarn install
 yarn build
 ```
 
+The login helpers (`packages/login`) are Rust: install a Rust toolchain with `cargo` (e.g. rustup; std and the
+`libc` crate only). `yarn build` runs `cargo build --release` there.
+
 `clang` and `lld` build the viewer's WebAssembly patch decoder (`wasm-ld`, or `wasm-ld-18`, or `$WASM_LD`; the build says
 "install lld (apt install lld)" if it is missing).
 
@@ -53,19 +78,23 @@ the first X11 app connects). `GFLD_XWAYLAND=0` in the gateway's environment turn
 ## Development (no root)
 
 ```bash
-yarn build
-cd packages/gateway
+yarn build   # builds packages/login (cargo) too
 env -u DISPLAY GREENFIELD_DEV_PASSWORD='choose-a-password' \
-  node dist/main.js --dev-auth --bind-ip 127.0.0.1 --bind-port 8443
+  packages/login/target/release/nebula-dev-login --bind-port 8443
 ```
 
 Open https://127.0.0.1:8443/ (self-signed certificate; the fingerprint is printed at startup) and sign in as your
-own user with that password. `--dev-auth` skips PAM and privilege separation: sessions run as you. It refuses to
-start on non-loopback addresses, as root, or without a password of at least 8 characters.
+own user with that password. The dev login helper has no PAM and no privilege separation: desktops run as you. It
+refuses to start on non-loopback addresses, as root, or without a password of at least 8 characters. Its options
+(`--help`): the `--dev-*` experiments and test settings (`--dev-time-scale`, `--dev-link-kbps`, `--dev-patch-order`,
+`--dev-patch-shape`), `--encoder` / `--render-device` / `--site-config`, `--runtime-dir` (default
+`$XDG_RUNTIME_DIR/nebula-dev-<port>`), and the web process's `--cert`, `--key`, `--state-dir` (default
+`~/.local/state/greenfield-dev`), `--hide-hostname`, `--allowed-origin`, which it passes on. The gateway's `main.js`
+and the web process take no dev options.
 
-End-to-end test: `scripts/test-gateway.sh` (runs the scripts in `scripts/e2e/` in parallel; they start the gateway
-with `--dev-auth --dev-time-scale 3`, a test-only flag that divides the failed-sign-in delay, and is refused without
-`--dev-auth`).
+End-to-end test: `scripts/test-gateway.sh` (runs the scripts in `scripts/e2e/` in parallel; they start the dev login
+helper with `--dev-time-scale 3`, a test-only option that divides the failed-sign-in delay, each with its own runtime
+directory).
 
 ## Real mode (PAM, multi-user)
 
@@ -104,8 +133,10 @@ privileged monitor). `--encoder` and `--render-device` override the file (the mo
 from them).
 
 A session is started with a `SessionConfig` record on fd 3 (format in `src/session-config.ts`) and has no other
-start-up input; its `devFlags` section (time scale, simulated link, patch order and shape) is what the `--dev-*`
-options fill in.
+start-up input; its `devFlags` section (time scale, simulated link, patch order and shape) is what the dev login
+helper's `--dev-*` options fill in. Started by a login helper, it inherits its listening socket (`listenFd`), on which
+connections arrive as Handover records (`src/login-protocol.ts`, layout in `packages/login/protocol`); the fd passing
+is in the compositor proxy's small poll addon (`native/poll/src/fd_passing.c`).
 
 ## Desktop shell
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of the window decorations (our own title bars, drawn by the viewer): starts the gateway in dev-auth
+# End-to-end test of the window decorations (our own title bars, drawn by the viewer): starts the gateway in dev
 # mode on $GATEWAY_PORT, signs in in a headless browser (scripts/e2e/browser-driver.js), starts a session and, from the
 # Apps menu:
 #   1. launches foot: it asks for server side decorations (xdg-decoration), the scene says it's decorated, it draws no

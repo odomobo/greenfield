@@ -28,9 +28,10 @@
 #                            drawing its lossy areas are sent again losslessly (the viewer shows its last frame exactly);
 #                            bursts (a large page painting and scrolling) and audio between chunks.
 #
-# Each can also be run on its own (they take GATEWAY_PORT). They start the gateway with --dev-auth --dev-time-scale,
-# which shortens its sign-in delays; see the header of scripts/e2e/auth.sh. Requires foot, dbus-daemon, notify-send,
-# Xwayland, x11-utils (xev, xfontsel, xwininfo), gst-launch-1.0 with x264enc (video.sh), gcc, wayland-scanner and
+# Each can also be run on its own (they take GATEWAY_PORT). They start the gateway as the dev login helper
+# (packages/login: nebula-dev-login, built here) with --dev-time-scale, which shortens its sign-in delays; see the header
+# of scripts/e2e/auth.sh. Requires foot, dbus-daemon, notify-send,
+# Xwayland, cargo, x11-utils (xev, xfontsel, xwininfo), gst-launch-1.0 with x264enc (video.sh), gcc, wayland-scanner and
 # wayland-protocols (for the drag and drop test client), libx11-dev (for the X11 test client), playwright-cli (for its Playwright library and Chrome), curl,
 # node, and the built packages (yarn build).
 #
@@ -40,6 +41,11 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
+# the dev login helper the scripts start (Rust; instant when it is up to date). The rest must be built (yarn build).
+cargo build --release --locked --quiet --manifest-path "$DIR/../../packages/login/Cargo.toml" || {
+  echo "FAILED: building the login helpers (packages/login)" >&2
+  exit 1
+}
 BASE_PORT="${GATEWAY_PORT:-8098}"
 START="$EPOCHREALTIME"
 # the suite's limit, in seconds (see CLAUDE.md)

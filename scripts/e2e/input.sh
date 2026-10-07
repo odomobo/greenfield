@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end test of input and X11 gaps (wave 3 H) in a headless browser (scripts/e2e/browser-driver.js): starts the
-# gateway in dev-auth mode on $GATEWAY_PORT, signs in, starts a session and launches foot (logging its Wayland traffic)
+# gateway in dev mode on $GATEWAY_PORT, signs in, starts a session and launches foot (logging its Wayland traffic)
 # from the Apps menu, then:
 #   1. scrolling: the wheel (Playwright's wheel is a 100 px click, deltaMode 0) reaches foot as one click (15 units, v120
 #      120: foot's wl_pointer is too old for axis_value120, so axis_discrete 1) with the wheel source; a small pixel

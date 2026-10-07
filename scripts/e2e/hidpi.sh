@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of HiDPI: apps render at the viewer's scale. Starts the gateway in dev-auth mode on $GATEWAY_PORT,
+# End-to-end test of HiDPI: apps render at the viewer's scale. Starts the gateway in dev mode on $GATEWAY_PORT,
 # signs in in a headless browser (scripts/e2e/browser-driver.js), launches foot and checks that:
 #   1. at a device pixel ratio of 1, the content of foot's surface (its buffer) is the size of the surface;
 #   2. when the ratio changes (the window moving to another monitor, browser zoom) to 2, and to 1.5 (wp_fractional_scale_v1

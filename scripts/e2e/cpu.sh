@@ -67,7 +67,7 @@ else
   launch test-flood.desktop "Test Flood"
   wait_for "() => window.__viewerTest.windows().some((w) => w.appId === 'test-flood' && w.placed && w.hasContent)" "the flood window" 30
 fi
-SESSION_PID="$(ps --ppid "$GATEWAY_PID" -o pid=,args= | grep session-process | awk '{print $1}' | head -1)"
+SESSION_PID="$(session_pid)"
 [ -n "$SESSION_PID" ] || fail "no session process"
 sleep 4 # let it settle (the busy surface is promoted after 1.5 - 2.25 s)
 # user + system CPU of the process, all threads, in ms (clock ticks are 100 Hz)

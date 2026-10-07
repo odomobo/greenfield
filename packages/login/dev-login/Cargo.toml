@@ -1,0 +1,15 @@
+[package]
+name = "nebula-dev-login"
+description = "The development login helper: GREENFIELD_DEV_PASSWORD instead of PAM, loopback only, runs as the current user."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nebula-dev-login"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+nebula-login-protocol.workspace = true
+nebula-login-common.workspace = true

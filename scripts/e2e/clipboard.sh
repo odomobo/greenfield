@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of the clipboard between the browser and remote apps (wave 3 E): starts the gateway in dev-auth mode on
+# End-to-end test of the clipboard between the browser and remote apps (wave 3 E): starts the gateway in dev mode on
 # $GATEWAY_PORT, signs in in a headless browser (scripts/e2e/browser-driver.js, which grants the page clipboard
 # permissions), starts a session and launches foot (from the Apps menu) running a small script:
 #   1. remote -> browser: the script sets the clipboard through OSC 52 (foot makes it the Wayland selection); the page's

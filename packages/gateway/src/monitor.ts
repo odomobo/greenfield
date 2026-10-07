@@ -1,14 +1,14 @@
 /**
- * The monitor is the privileged half of the gateway (root in PAM mode). It does nothing network-facing: it
+ * The monitor is the privileged half of the production gateway (root, PAM). It does nothing network-facing: it
  * authenticates users (through the PAM helper), keeps the session registry and spawns per-user session processes.
- * The unprivileged web process talks to it only over the IPC channel.
+ * The unprivileged web process talks to it only over the IPC channel. (Development uses the dev login helper instead,
+ * packages/login; step 5 of SIGNIN-ROADMAP.md replaces the monitor with the production login helper.)
  */
 import { ChildProcess, execFile, execFileSync, fork, spawn } from 'node:child_process'
-import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { chmodSync, chownSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, Server } from 'node:net'
 import { Writable } from 'node:stream'
-import { userInfo } from 'node:os'
 import path from 'node:path'
 import { GatewayConfig } from './config'
 import { MonitorReply, MonitorReplyEnvelope, SessionMessage, WebRequest, WebRequestEnvelope, WebStart } from './ipc'
@@ -66,13 +66,11 @@ export class Monitor {
 
   async start() {
     const { config } = this
-    if (config.authMode === 'pam') {
-      if (!existsSync(pamHelperPath)) {
-        throw new Error(`${pamHelperPath} is missing. Build it with libpam headers installed (yarn build:native).`)
-      }
-      if (!existsSync('/etc/pam.d/greenfield')) {
-        log.warn('/etc/pam.d/greenfield is missing; PAM falls back to the "other" service. See packages/gateway/pam/.')
-      }
+    if (!existsSync(pamHelperPath)) {
+      throw new Error(`${pamHelperPath} is missing. Build it with libpam headers installed (yarn build:native).`)
+    }
+    if (!existsSync('/etc/pam.d/greenfield')) {
+      log.warn('/etc/pam.d/greenfield is missing; PAM falls back to the "other" service. See packages/gateway/pam/.')
     }
 
     const web = this.lookupWebUser()
@@ -83,9 +81,10 @@ export class Monitor {
     const tls = await loadTLS(config)
     const listener = await this.listen()
 
-    // the web process runs unprivileged; in dev mode everything already runs as the current user
+    // the web process runs unprivileged
     const child = fork(path.resolve(__dirname, 'web.js'), [], {
-      ...(web ? { uid: web.uid, gid: web.gid } : {}),
+      uid: web.uid,
+      gid: web.gid,
       env: {
         PATH: process.env.PATH ?? '/usr/bin:/bin',
         LANG: process.env.LANG ?? 'C.UTF-8',
@@ -108,8 +107,6 @@ export class Monitor {
       hostname: config.hostname,
       allowedOrigins: config.allowedOrigins,
       viewerDir: config.viewerDir,
-      devMode: config.authMode === 'dev',
-      timeScale: config.timeScale,
     }
     // the web process owns the listening socket from now on; closing our copy only after the handle was passed
     child.send(start, listener, () => listener.close())
@@ -126,10 +123,7 @@ export class Monitor {
     })
   }
 
-  private lookupWebUser(): { uid: number; gid: number } | undefined {
-    if (this.config.authMode === 'dev') {
-      return undefined
-    }
+  private lookupWebUser(): { uid: number; gid: number } {
     try {
       const entry = execFileSync('getent', ['passwd', this.config.webUser], { encoding: 'utf8' }).trim()
       const [, , uid, gid] = entry.split(':')
@@ -149,13 +143,9 @@ export class Monitor {
     const sessionsDir = path.join(this.config.runtimeDir, 'sessions')
     rmSync(sessionsDir, { recursive: true, force: true })
     mkdirSync(sessionsDir, { recursive: true, mode: 0o700 })
-    if (this.webGid !== undefined) {
-      // traversable, not listable; each session dir decides who may enter
-      chmodSync(this.config.runtimeDir, 0o711)
-      chmodSync(sessionsDir, 0o711)
-    } else {
-      chmodSync(this.config.runtimeDir, 0o700)
-    }
+    // traversable, not listable; each session dir decides who may enter
+    chmodSync(this.config.runtimeDir, 0o711)
+    chmodSync(sessionsDir, 0o711)
   }
 
   /**
@@ -172,7 +162,7 @@ export class Monitor {
       encoder: config.encoder ?? DEFAULT_SITE_SETTINGS.encoder,
       renderDevice: config.renderDevice ?? DEFAULT_SITE_SETTINGS.renderDevice,
     }
-    // (the runtime dir is traversable for everyone in PAM mode, the sessions run as other users)
+    // (the runtime dir is traversable for everyone, the sessions run as other users)
     const file = path.join(config.runtimeDir, 'nebula.conf')
     writeFileSync(file, formatSiteSettings(settings), { mode: 0o644 })
     this.siteSettingsPath = file
@@ -233,24 +223,10 @@ export class Monitor {
     }
     this.activeAuths++
     try {
-      if (this.config.authMode === 'dev') {
-        return this.authenticateDev(username, password)
-      }
       return await this.authenticatePAM(username, password)
     } finally {
       this.activeAuths--
     }
-  }
-
-  private authenticateDev(username: string, password: string): User | undefined {
-    const expected = Buffer.from(this.config.devPassword ?? '')
-    const given = Buffer.from(password)
-    const passwordOk = given.length === expected.length && timingSafeEqual(given, expected)
-    if (!passwordOk || username !== this.config.devUser) {
-      return undefined
-    }
-    const info = userInfo()
-    return { username: info.username, uid: info.uid, gid: info.gid, home: info.homedir }
   }
 
   private authenticatePAM(username: string, password: string): Promise<User | undefined> {
@@ -282,32 +258,19 @@ export class Monitor {
     const id = randomBytes(12).toString('base64url')
     const dir = path.join(this.config.runtimeDir, 'sessions', id)
     mkdirSync(dir, { mode: 0o700 })
-    if (this.webGid !== undefined) {
-      // the user's session creates its socket here; the web process (group) may connect, nobody else may enter
-      chownSync(dir, user.uid, this.webGid)
-      chmodSync(dir, 0o2750)
-    }
+    // the user's session creates its socket here; the web process (group) may connect, nobody else may enter
+    chownSync(dir, user.uid, this.webGid!)
+    chmodSync(dir, 0o2750)
     const socketPath = path.join(dir, 'viewer.sock')
 
     const env: Record<string, string> = {
       PATH: '/usr/local/bin:/usr/bin:/bin',
       LANG: process.env.LANG ?? 'C.UTF-8',
     }
-    let child: ChildProcess
-    if (this.config.authMode === 'dev') {
-      // never hand the dev password down (it would stay readable in /proc/<pid>/environ)
-      const { GREENFIELD_DEV_PASSWORD: _password, ...inherited } = process.env
-      child = fork(sessionProcessPath, [], {
-        env: inherited,
-        cwd: user.home,
-        stdio: SESSION_STDIO,
-      })
-    } else {
-      child = spawn(pamHelperPath, ['session', user.username, '--', process.execPath, sessionProcessPath], {
-        env,
-        stdio: SESSION_STDIO,
-      })
-    }
+    const child = spawn(pamHelperPath, ['session', user.username, '--', process.execPath, sessionProcessPath], {
+      env,
+      stdio: SESSION_STDIO,
+    })
 
     let readyResolve!: () => void
     let readyReject!: (e: Error) => void
@@ -350,21 +313,11 @@ export class Monitor {
       rmSync(dir, { recursive: true, force: true })
     })
 
-    // dev flags are the monitor's for now; the dev login helper will write them later
+    // (no devFlags: only the dev login helper writes them)
     const sessionConfig: SessionConfig = {
       version: 1,
       socketPath,
       siteSettingsPath: this.siteSettingsPath,
-      ...(this.config.authMode === 'dev'
-        ? {
-            devFlags: {
-              timeScale: this.config.timeScale,
-              linkKbps: this.config.linkKbps,
-              patchOrder: this.config.patchOrder,
-              patchShape: this.config.patchShape,
-            },
-          }
-        : {}),
     }
     const configPipe = child.stdio[3] as Writable
     configPipe.on('error', (e) => log.error(`Writing the session config failed: ${e.message}`))
@@ -392,7 +345,7 @@ export class Monitor {
       session.process.kill('SIGTERM')
     }
     // the sessions end their apps (killing the ones that don't quit) before they exit; wait for that, within reason
-    const deadline = Date.now() + SESSION_EXIT_TIMEOUT_MS / this.config.timeScale
+    const deadline = Date.now() + SESSION_EXIT_TIMEOUT_MS
     const exitWhenDone = () => {
       if (this.sessions.size === 0 || Date.now() >= deadline) {
         process.exit(code)

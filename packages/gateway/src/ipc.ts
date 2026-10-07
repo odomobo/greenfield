@@ -29,9 +29,6 @@ export type WebStart = {
   hostname: string | undefined
   allowedOrigins: string[]
   viewerDir: string
-  devMode: boolean
-  /** test only (see --dev-time-scale): divides the failed-sign-in delay; 1 in production */
-  timeScale: number
 }
 
 /**

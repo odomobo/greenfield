@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")/.."
 mkdir -p dist
 if ! echo '#include <security/pam_appl.h>' | ${CC:-cc} ${PAM_CFLAGS} -E - >/dev/null 2>&1; then
-  echo "gateway: PAM headers not found (install libpam0g-dev / pam-devel). Skipping pam-helper; only --dev-auth will work." >&2
+  echo "gateway: PAM headers not found (install libpam0g-dev / pam-devel). Skipping pam-helper; for development use the dev login helper (packages/login)." >&2
   exit 0
 fi
 ${CC:-cc} -O2 -Wall -Wextra -D_FORTIFY_SOURCE=2 -fstack-protector-strong ${PAM_CFLAGS} \

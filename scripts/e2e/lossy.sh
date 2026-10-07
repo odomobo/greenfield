@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of lossy encoding when bandwidth is short (roadmap item 5b phase 2): starts the gateway in dev-auth mode
+# End-to-end test of lossy encoding when bandwidth is short (roadmap item 5b phase 2): starts the gateway in dev mode
 # on $GATEWAY_PORT with a simulated 8 Mbit/s link to the viewer (--dev-link-kbps), signs in in a headless browser and
 # launches the busy client (scripts/e2e/busy-client.c, a vsync-game-like client committing a full 640x480 frame on
 # every frame callback). The test checks that

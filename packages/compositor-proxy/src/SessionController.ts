@@ -11,24 +11,26 @@ export type SessionController = {
     request: { headers: IncomingMessage['headers']; method: IncomingMessage['method']; url: IncomingMessage['url'] },
     socket: Socket,
     head?: Buffer,
+    clientIP?: string,
   ): void
 }
 
 /**
  * WebSocket endpoints of a session process. The gateway already signed the user in and checked that the session
- * belongs to them; its handshake carries the client's IP address in `X-Client-IP` (for the takeover message the
- * previous viewer gets).
+ * belongs to them. The client's IP address (for the takeover message the previous viewer gets) is `clientIP` when the
+ * session knows it otherwise (a login helper's handover), else the handshake's `X-Client-IP` header (the monitor's
+ * relay).
  */
 export function createSessionController(viewerHost: ViewerHost): SessionController {
   const wss = new WebSocketServer({ perMessageDeflate: false, noServer: true })
 
   return {
-    onWsUpgrade(request, socket, head) {
+    onWsUpgrade(request, socket, head, clientIP) {
       wss.handleUpgrade(request as IncomingMessage, socket, head ?? Buffer.from([]), (ws) => {
         const url = new URL(request.url ?? '', `http://${request.headers.host}`)
         if (url.pathname === '/viewer') {
-          const ip = request.headers['x-client-ip']
-          viewerHost.attach(ws, typeof ip === 'string' ? ip : '')
+          const header = request.headers['x-client-ip']
+          viewerHost.attach(ws, clientIP ?? (typeof header === 'string' ? header : ''))
         } else {
           logger.info(`Unknown WebSocket endpoint: ${url.pathname}`)
           ws.close(4404, 'Not found')

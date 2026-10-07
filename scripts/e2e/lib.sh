@@ -10,8 +10,11 @@ BASE="https://127.0.0.1:$PORT"
 PASSWORD="test-password-$$"
 ME="$(id -un)"
 WORK="$(mktemp -d)"
-# The gateway runs with --dev-time-scale: its failed-sign-in delay (3 s) is divided by this (and so is the time the
-# sessions give their apps to quit at logout, 5 s). Everything the tests wait for is derived from it.
+# "The gateway" here is the dev login helper (packages/login: nebula-dev-login), the dev entry point: it binds the port,
+# starts the web process and the desktops. It runs with --dev-time-scale: its failed-sign-in delay (3 s) is divided by
+# this (and so is the time the desktops give their apps to quit at logout, 5 s). Everything the tests wait for is
+# derived from it.
+LOGIN_HELPER="$REPO/packages/login/target/release/nebula-dev-login"
 TIME_SCALE=3
 GATEWAY_PID=""
 DBUS_PID=""
@@ -64,17 +67,20 @@ require_tools() {
   for tool in "$@"; do
     command -v "$tool" >/dev/null || fail "$tool is not installed"
   done
-  [ -f "$REPO/packages/gateway/dist/main.js" ] || fail "build the gateway first: (cd packages/gateway && yarn build)"
+  [ -f "$REPO/packages/gateway/dist/web.js" ] || fail "build the gateway first: (cd packages/gateway && yarn build)"
+  [ -x "$LOGIN_HELPER" ] || fail "build the login helpers first: (cd packages/login && yarn build)"
   [ -f "$REPO/packages/viewer/dist/index.html" ] || fail "build the viewer first: (cd packages/viewer && yarn build)"
 }
 
-# Run the gateway in the foreground-ish way: gateway <args...> (no environment of its own, for refusal checks)
+# Run the dev login helper in the foreground: gateway <args...> (no environment of its own, for refusal checks)
 gateway() {
-  env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" node "$REPO/packages/gateway/dist/main.js" "$@"
+  env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" "$LOGIN_HELPER" "$@"
 }
 
-# Start a gateway in the background and wait until it answers. $1: port, $2: log file, $3...: extra arguments.
-# Sets STARTED_PID. (exec, so the pid is the gateway itself and cleanup can stop it)
+# Start a gateway (the dev login helper, with its own runtime directory, so the scripts running side by side as the
+# same user don't share desktops) in the background and wait until it answers. $1: port, $2: log file, $3...: extra
+# arguments. Sets STARTED_PID. (exec, so the pid is the helper itself and cleanup can stop it: it stops the web process
+# and the desktops)
 start_gateway() {
   # the test's own cache directory (file drops land there) would make GStreamer rebuild its plugin registry in every
   # session, which delays the video encoder by seconds: keep using the user's registry
@@ -83,17 +89,26 @@ start_gateway() {
   shift 2
   (exec env -u DISPLAY GREENFIELD_DEV_PASSWORD="$PASSWORD" XDG_DATA_HOME="$WORK/data" XDG_CONFIG_HOME="$WORK/config" XDG_CACHE_HOME="$WORK/cache" \
     GST_REGISTRY="$GST_REGISTRY" \
-    node "$REPO/packages/gateway/dist/main.js" --dev-auth --dev-time-scale "$TIME_SCALE" --encoder "${E2E_ENCODER:-none}" --bind-ip 127.0.0.1 \
-    --bind-port "$port" --state-dir "$WORK/state" "$@") >"$log" 2>&1 &
+    "$LOGIN_HELPER" --dev-time-scale "$TIME_SCALE" --encoder "${E2E_ENCODER:-none}" --bind-ip 127.0.0.1 \
+    --bind-port "$port" --state-dir "$WORK/state" --runtime-dir "$WORK/run-$port" "$@") >"$log" 2>&1 &
   STARTED_PID=$!
   EXTRA_PIDS+=("$STARTED_PID")
   local i
   for i in $(seq 1 200); do
-    curl -sk -o /dev/null "https://127.0.0.1:$port/" && return 0
+    curl -sk --max-time 2 -o /dev/null "https://127.0.0.1:$port/" && return 0
     kill -0 "$STARTED_PID" 2>/dev/null || break
     sleep 0.1
   done
   fail "gateway didn't start on :$port"
+}
+
+# The pid of this test's desktop (the session process): the dev login helper's grandchild (helper, sign-in child,
+# desktop). Empty if there is none.
+session_pid() {
+  local child
+  for child in $(ps --ppid "$GATEWAY_PID" -o pid=); do
+    ps --ppid "$child" -o pid=,args= | grep session-process | awk '{print $1}'
+  done | head -1
 }
 
 # The sign-in probes (scripts/e2e/probe.js): the in-band sign-in on the page's WebSocket, without a browser.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end test of the desktop in a browser: sign-in, shell, window management, and a session surviving the browser.
 #
-# Starts the gateway in dev-auth mode (sessions run as the current user) with TLS on $GATEWAY_PORT, then, in a headless
+# Starts the gateway in dev mode (sessions run as the current user) with TLS on $GATEWAY_PORT, then, in a headless
 # browser (scripts/e2e/browser-driver.js):
 #   1. signs in (a second tab stays signed out; signing in starts the user's desktop), launches foot from the Apps
 #      menu, pins foot (kept in the config dir), minimizes and restores it from the taskbar,

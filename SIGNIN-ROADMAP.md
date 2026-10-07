@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–3 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–4 are implemented; the rest is not.
 
 ## Why
 
@@ -205,6 +205,49 @@ without changing how the pieces connect.
 - The web process uses `login.sock` when started by the dev helper. Production still uses the monitor.
 - Still works because the e2e suite (always dev mode) now exercises the new path end to end, and production is
   untouched. Temporary duplication until step 5: two backends in the web process, two connection styles in the session.
+- As built:
+  - **The workspace** is `packages/login/` (also a yarn workspace, `@gfld/login`, whose `build` is
+    `cargo build --release --locked`; `scripts/test-gateway.sh` runs cargo too). Crates: `protocol`
+    (`nebula-login-protocol`, `forbid(unsafe_code)`, the record layout, documented in its `src/lib.rs`), `common`
+    (`nebula-login-common`: record channels with fd passing, `desktop::attach_or_create` parametrised over a closure
+    that starts the desktop with the listening fd, `spawn::spawn_with_fds`, logging, and all `unsafe` code in
+    `sys.rs`) and `dev-login` (the `nebula-dev-login` binary). Step 5 adds its binary next to `dev-login` and reuses
+    `protocol` and `common`.
+  - **Records**: a 4-byte header (u8 kind, u8 reserved 0, u16 big-endian payload length) and a payload with a per-kind
+    limit: `ClientAddress` 1 and `Handover` 6 (18 bytes: u8 family 4/6, u8 0, 16 address bytes), `Begin` 2 (user name,
+    ≤ 256 bytes; the web process sends an empty name for a longer one, which must fail like an unknown user), `Prompt`
+    3 (u8 style 1 echo off, 2 echo on, 3 info, 4 error, then ≤ 512 bytes), `Answer` 4 (≤ 1024 bytes, the page's
+    limit; a production helper may refuse more than `PAM_MAX_RESP_SIZE`), `Result` 5 (u8 outcome 0 signed in, 1
+    refused, 2 failed, then ≤ 256 bytes: the user name when signed in, else the message the page shows). A signed-in
+    `Result` and a `Handover` carry one fd (`SCM_RIGHTS` on the record's first byte). The TypeScript side is
+    `packages/gateway/src/login-protocol.ts`; both sides' tests check the same bytes.
+  - **Desktop start**: `SessionConfig` gained `listenFd` (exactly one of `listenFd` and `socketPath`); the helpers put
+    the config pipe at fd 3 and the listening socket at fd 4, start the desktop with `PR_SET_PDEATHSIG` = SIGTERM, and
+    the desktop marks fd 4 close-on-exec first thing (or its apps would keep the socket open after Log out). No ready
+    signal: the first handover waits in the backlog. Without IPC the session ends on SIGTERM. Socket and lock are
+    0600, `users/<uid>/` 0700 in dev (production: root-owned 0755, as above).
+  - **Dev helper**: `--bind-ip` (default 127.0.0.1, loopback only), `--bind-port`, `--runtime-dir`, `--gateway-dir`
+    (default `packages/gateway/dist` relative to the binary), `--node`, `--site-config` / `--encoder` /
+    `--render-device` (written to `<runtime>/nebula.conf` like the monitor did), the `--dev-*` options, and the web
+    process's options, passed on. It starts the web process as `node web.js --listen-fd 3 --login-socket <path>
+    [--cert --key --state-dir --hide-hostname --allowed-origin]` with a minimal environment; step 5 starts it the
+    same way. One fork per sign-in, no cap and no per-prompt PAM timeout yet (the dev child gives the address and
+    `Begin` 10 s, an answer 75 s). On SIGTERM it stops the web process and its children, which pass it on to their
+    desktops, and waits up to 8 s / time scale. The dev user is the current user (`getpwuid`).
+  - **Web process**: started with options (a helper) it reads the TLS key itself and uses `login.sock`; started
+    without (by `main.js`) it waits for the monitor's `start` message as before. It no longer takes or receives any
+    dev setting: `main.js` lost `--dev-auth` and every `--dev-*` option (it refuses them and runs as root only),
+    `WebStart` lost `devMode` and `timeScale`. With a helper, an IP over the per-IP throttle is refused by the web
+    process at once (after the page's password prompt, without contacting the helper or waiting the failure minimum).
+  - **Native addon**: `packages/compositor-proxy/native/poll/src/fd_passing.c` in the existing small poll addon
+    (`unixConnect`, `acceptConnection`, `sendWithFd`, `receiveWithFds`, `setCloseOnExec`, `closeFd`, non-blocking and
+    close-on-exec, driven by the addon's `startPoll`), exposed as `@gfld/compositor-proxy/dist/fd-passing.js`. The
+    gateway's `RecordChannel` wraps a raw fd with it; a received connection becomes a `net.Socket({ fd })`. The session
+    feeds handed-over sockets to its HTTP server (`emit('connection')`), so the web process still does the same
+    WebSocket handshake on the relay (without `X-Client-IP`: the address comes from the `Handover`).
+  - **e2e**: `scripts/e2e/lib.sh` starts `nebula-dev-login` with `--runtime-dir "$WORK/run-$port"`; `session_pid`
+    finds the desktop (the helper's grandchild). `auth.sh` checks the dev helper's refusals and that `main.js` and
+    `web.js` refuse dev options.
 
 ### 5. The production login helper replaces the monitor
 

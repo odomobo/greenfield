@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of a relentless client (core item 2a): starts the gateway in dev-auth mode on $GATEWAY_PORT, signs in
+# End-to-end test of a relentless client (core item 2a): starts the gateway in dev mode on $GATEWAY_PORT, signs in
 # in a headless browser (scripts/e2e/browser-driver.js), starts a session and launches
 #   1. a busy client (scripts/e2e/busy-client.c, built here with wayland-scanner and gcc) that behaves like a vsync game:
 #      it commits a new full-surface frame on every frame callback, forever. The test checks that it is shown (patches
@@ -80,7 +80,7 @@ promoted() { grep -aq 'is now streaming' "$WORK/gateway.log"; }
 wait_until "the busy surface to be promoted to the streaming class" 20 promoted
 echo "    $(grep -a 'is now streaming' "$WORK/gateway.log" | head -1 | sed 's/.*msg:"//; s/"}$//')"
 # Its patches are now encoded by the streaming workers, whose threads run at nice 19: those threads use CPU
-SESSION_PID="$(ps --ppid "$GATEWAY_PID" -o pid=,args= | grep session-process | awk '{print $1}' | head -1)"
+SESSION_PID="$(session_pid)"
 [ -n "$SESSION_PID" ] || fail "no session process"
 # CPU ticks (user + system) of the session's threads at nice 19
 nice19_ticks() {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of drag and drop (wave 3 E): starts the gateway in dev-auth mode on $GATEWAY_PORT, signs in in a
+# End-to-end test of drag and drop (wave 3 E): starts the gateway in dev mode on $GATEWAY_PORT, signs in in a
 # headless browser (scripts/e2e/browser-driver.js), starts a session and launches a small test client
 # (scripts/e2e/dnd-client.c, built here with wayland-scanner and gcc) from the Apps menu: two windows, a drag source and
 # a drop target.

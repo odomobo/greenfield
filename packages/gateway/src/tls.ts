@@ -7,10 +7,13 @@ import { GatewayConfig } from './config'
 import { log } from './log'
 
 /**
- * Reads the configured certificate and key, or generates a self-signed pair in the state dir on first run. The key
- * stays readable by the monitor only; its contents are handed to the web process over IPC.
+ * Reads the configured certificate and key, or generates a self-signed pair in the state dir on first run. Started by
+ * the monitor, the key stays readable by the monitor only and its contents are handed to the web process over IPC;
+ * started by a login helper, the web process reads it itself.
  */
-export async function loadTLS(config: GatewayConfig): Promise<{ cert: string; key: string }> {
+export async function loadTLS(
+  config: Pick<GatewayConfig, 'certFile' | 'keyFile' | 'stateDir'>,
+): Promise<{ cert: string; key: string }> {
   let certFile = config.certFile
   let keyFile = config.keyFile
   if (certFile === undefined || keyFile === undefined) {

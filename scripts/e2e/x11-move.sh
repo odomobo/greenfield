@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end test of X11 apps that move their own windows (XMoveWindow), with scripts/e2e/x11-move-client.c (built
-# here with gcc): starts the gateway in dev-auth mode on $GATEWAY_PORT, signs in in a headless browser
+# here with gcc): starts the gateway in dev mode on $GATEWAY_PORT, signs in in a headless browser
 # (scripts/e2e/browser-driver.js), starts a session and, from the Apps menu:
 #   1. launches a borderless square that drags itself: it moves itself on every pointer motion while button 1 is held,
 #      and the window follows (the server takes the position the app asks for, the viewer shows it), over a slow link

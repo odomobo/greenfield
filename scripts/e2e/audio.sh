@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of the session's audio: starts the gateway in dev-auth mode on $GATEWAY_PORT, signs in in a headless
+# End-to-end test of the session's audio: starts the gateway in dev mode on $GATEWAY_PORT, signs in in a headless
 # browser (which starts the user's desktop) and launches an app that plays a tone through the session's own PipeWire (PulseAudio
 # protocol, like most apps). Checks, in the page:
 #   1. the session has audio (the server said so) and the page's audio context runs (the sign-in click was the user
