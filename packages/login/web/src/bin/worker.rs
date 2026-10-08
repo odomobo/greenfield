@@ -19,6 +19,7 @@ use nebula_login_common::log;
 use nebula_login_protocol::{Outcome, PromptStyle, Record, MAX_ANSWER, MAX_USERNAME};
 use nebula_web::assets::Assets;
 use nebula_web::conn::{timed_out, wait, Tls};
+use nebula_web::helper;
 use nebula_web::http::{self, HeadError, Request, Response};
 use nebula_web::websocket::{self, ClientMessage, ServerMessage, CLOSE_SIGN_IN_FAILED, MAX_FRAME};
 use nebula_web::{sys, *};
@@ -321,26 +322,13 @@ impl Worker<'_> {
     fn helper_record(&mut self, channel: &mut Channel, helper_fd: i32) -> Option<(Record, Option<OwnedFd>)> {
         let deadline = Instant::now() + HELPER_TIMEOUT;
         loop {
-            let now = Instant::now();
-            if now >= deadline {
-                return None;
-            }
-            let watch_browser = self.tls.received.len() < 2 * MAX_FRAME;
-            let mut fds = [
-                libc::pollfd { fd: helper_fd, events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: if watch_browser { self.tls.fd() } else { -1 }, events: libc::POLLIN, revents: 0 },
-            ];
-            if sys::poll(&mut fds, Some(deadline - now)).ok()? == 0 {
-                continue;
-            }
-            if fds[1].revents != 0 {
-                match self.tls.read_available(2 * MAX_FRAME) {
+            let watch_browser = (self.tls.received.len() < 2 * MAX_FRAME).then(|| self.tls.fd());
+            match helper::next_record(channel, helper_fd, watch_browser, deadline).ok()? {
+                helper::Next::Record(record, fd) => return Some((record, fd)),
+                helper::Next::Other => match self.tls.read_available(2 * MAX_FRAME) {
                     Ok(_) if !self.tls.eof => {}
                     _ => std::process::exit(0),
-                }
-            }
-            if fds[0].revents != 0 {
-                return channel.read(deadline.saturating_duration_since(Instant::now())).ok();
+                },
             }
         }
     }

@@ -28,6 +28,7 @@
 //! The worker is started with PR_SET_PDEATHSIG = SIGTERM (it ends with the listener).
 pub mod assets;
 pub mod conn;
+pub mod helper;
 pub mod http;
 pub mod limits;
 pub mod sys;
