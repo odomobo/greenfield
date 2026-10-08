@@ -14,14 +14,18 @@
 //!     closes), asks for the password, and on success attaches to or creates the user's desktop (see
 //!     nebula_login_common::desktop) and passes the worker its end of the connection;
 //!   - a child that started a desktop stays as its parent until it exits (the PAM parent, in production);
+//!   - the per-IP failure backoff, as in production (nebula_login_common::backoff), its times divided by
+//!     --dev-time-scale: each child reports its attempt's outcome on a per-attempt pipe, and a child forked while its
+//!     client's address is blocked fails the attempt like a wrong password;
 //!   - SIGTERM / SIGINT stop the web process and the desktops (they end their apps first).
+use nebula_login_common::backoff::{self, Policy, Report, Table};
 use nebula_login_common::desktop::{self, Desktop};
 use nebula_login_common::session_config::{self, json_string, SESSION_CONFIG_FD, SESSION_LISTEN_FD};
 use nebula_login_common::spawn::{spawn_with_fds, wait_passing_terminate};
 use nebula_login_common::{channel::Channel, log, sys};
 use nebula_login_protocol::{is_loopback, Outcome, PromptStyle, Record};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, PipeReader, PipeWriter, Write};
 use std::net::{IpAddr, TcpListener};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
@@ -46,7 +50,8 @@ from $GREENFIELD_DEV_PASSWORD (at least 8 characters). Loopback only; refuses to
   --encoder <auto|none|nvh264|vaapih264>
                              video encoder, overriding the site settings file
   --render-device <path>     GPU render node, overriding the site settings file
-  --dev-time-scale <n>       divide the failed-sign-in delay (3 s) and the time apps get to quit by n (1..100, tests)
+  --dev-time-scale <n>       divide the failed-sign-in delay (3 s), the per-IP backoff's times and the time apps get
+                             to quit by n (1..100, tests)
   --dev-link-kbps <n>        desktops send to their viewer through a simulated link of n kbit/s (tests)
   --dev-patch-order <order>  oldest (default) or random: the order a window's queued patches are sent in
   --dev-patch-shape <shape>  bands (default) or tiles: how a window's large damage is split into patches
@@ -321,9 +326,21 @@ fn equal_constant_time(a: &[u8], b: &[u8]) -> bool {
     difference == 0
 }
 
-/// One sign-in, in a child of its own: returns the exit status.
-fn sign_in(config: &Config, site_settings: &Option<PathBuf>, connection: UnixStream) -> i32 {
+/// One sign-in, in a child of its own: returns the exit status. `backoff` is the table as it was when the child was
+/// forked; the attempt's outcome goes back to the main loop on `attempt_over`, which is closed when the attempt is over.
+fn sign_in(
+    config: &Config,
+    site_settings: &Option<PathBuf>,
+    backoff: &Table,
+    connection: UnixStream,
+    attempt_over: PipeWriter,
+) -> i32 {
     let mut channel = Channel::new(connection);
+    let report = |client: IpAddr, ok: bool| {
+        if let Err(e) = backoff::send(&mut &attempt_over, Report { ip: client, ok }) {
+            log::error(&format!("Reporting a sign-in to the main loop failed: {e}"));
+        }
+    };
     let result = (|| -> io::Result<Option<libc::pid_t>> {
         let client = match channel.read(BEGIN_TIMEOUT)? {
             (Record::ClientAddress(ip), _) => ip,
@@ -351,16 +368,24 @@ fn sign_in(config: &Config, site_settings: &Option<PathBuf>, connection: UnixStr
         // a monotonic clock: wall clock adjustments mustn't shorten the minimum failure time
         let answered_at = Instant::now();
         let password_ok = equal_constant_time(answer.as_bytes(), config.password.as_bytes());
-        if !(password_ok && username == config.user.name) {
-            // unknown users and wrong passwords take the same minimum time
+        // an address the backoff blocks fails like a wrong password (and isn't reported: that would extend the block)
+        let throttled = backoff.blocked(client, Instant::now());
+        if throttled || !(password_ok && username == config.user.name) {
+            if throttled {
+                log::info(&format!("Refused a sign-in from {client}: too many failed attempts from this address."));
+            } else {
+                log::info(&format!("Failed sign-in from {client}."));
+                report(client, false);
+            }
+            // unknown users, wrong passwords and blocked addresses take the same minimum time
             let minimum = MIN_FAILED_SIGN_IN.div_f64(config.time_scale);
             std::thread::sleep(minimum.saturating_sub(answered_at.elapsed()));
-            log::info(&format!("Failed sign-in from {client}."));
             let text = "The username or password is incorrect.".to_string();
             channel.write(&Record::Result { outcome: Outcome::Refused, text }, None)?;
             return Ok(None);
         }
 
+        report(client, true);
         let user_dir = desktop::user_dir(&config.runtime_dir, config.user.uid);
         fs::create_dir_all(&user_dir)?;
         fs::set_permissions(&user_dir, fs::Permissions::from_mode(0o700))?;
@@ -390,6 +415,8 @@ fn sign_in(config: &Config, site_settings: &Option<PathBuf>, connection: UnixStr
         Ok(started)
     })();
     drop(channel);
+    // the main loop counts this attempt as over
+    drop(attempt_over);
     match result {
         Ok(Some(desktop)) => wait_desktop(config, desktop),
         Ok(None) => 0,
@@ -436,7 +463,9 @@ fn main() {
     log::info(&format!("Signing in at {}", config.runtime_dir.join("login.sock").display()));
 
     let parent = sys::getpid();
-    let mut children: Vec<libc::pid_t> = Vec::new();
+    // each child with the read end of its per-attempt pipe (closed when its attempt is over)
+    let mut children: Vec<(libc::pid_t, Option<PipeReader>)> = Vec::new();
+    let mut table = Table::new(Policy::DEFAULT.scaled(config.time_scale));
     loop {
         if sys::terminate_requested() {
             shutdown(&config, web_pid, children, 0);
@@ -448,7 +477,13 @@ fn main() {
                     log::error(&format!("The web process exited ({}). Shutting down.", sys::describe_status(status)));
                     shutdown(&config, web_pid, children, 1);
                 }
-                Ok(Some((pid, _))) => children.retain(|&child| child != pid),
+                Ok(Some((pid, _))) => {
+                    // (its report may still be in the pipe)
+                    for (_, attempt) in children.iter_mut().filter(|(child, _)| *child == pid) {
+                        backoff::drain(attempt, &mut table);
+                    }
+                    children.retain(|(child, _)| *child != pid);
+                }
                 _ => break,
             }
         }
@@ -469,18 +504,34 @@ fn main() {
             log::error(&format!("Setting up a sign-in failed: {e}"));
             continue;
         }
+        let (attempt_read, attempt_write) = match io::pipe() {
+            Ok(pipe) => pipe,
+            Err(e) => {
+                log::error(&format!("Setting up a sign-in failed: {e}"));
+                continue;
+            }
+        };
+        // the reports the latest attempts sent before their result: the child about to be forked decides with them
+        for (_, attempt) in children.iter_mut() {
+            backoff::drain(attempt, &mut table);
+        }
         // one child per sign-in: it keeps no state here (whether a desktop runs is whether its socket accepts)
         match sys::fork() {
             Ok(sys::Forked::Child) => {
                 drop(login_listener);
+                drop(attempt_read);
+                drop(children);
                 sys::default_terminate();
                 // a stopping helper ends its sign-ins and desktops; if it is killed, they follow
                 if sys::set_parent_death_signal(libc::SIGTERM, parent).is_err() {
                     std::process::exit(1);
                 }
-                std::process::exit(sign_in(&config, &site_settings, connection));
+                std::process::exit(sign_in(&config, &site_settings, &table, connection, attempt_write));
             }
-            Ok(sys::Forked::Parent(pid)) => children.push(pid),
+            Ok(sys::Forked::Parent(pid)) => {
+                drop(attempt_write);
+                children.push((pid, Some(attempt_read)));
+            }
             Err(e) => log::error(&format!("Forking for a sign-in failed: {e}")),
         }
     }
@@ -488,14 +539,14 @@ fn main() {
 
 /// Stop the web process and the children (the desktops' parents pass it on to their desktops, which end their apps),
 /// wait for them within reason, and exit.
-fn shutdown(config: &Config, web_pid: libc::pid_t, children: Vec<libc::pid_t>, code: i32) -> ! {
+fn shutdown(config: &Config, web_pid: libc::pid_t, children: Vec<(libc::pid_t, Option<PipeReader>)>, code: i32) -> ! {
     log::info("Stopping the web process and the desktops.");
     sys::kill(web_pid, libc::SIGTERM);
-    for &pid in &children {
+    for &(pid, _) in &children {
         sys::kill(pid, libc::SIGTERM);
     }
     let deadline = Instant::now() + DESKTOP_EXIT_TIMEOUT.div_f64(config.time_scale);
-    let mut left: Vec<libc::pid_t> = children.into_iter().chain([web_pid]).collect();
+    let mut left: Vec<libc::pid_t> = children.into_iter().map(|(pid, _)| pid).chain([web_pid]).collect();
     while !left.is_empty() && Instant::now() < deadline {
         left.retain(|&pid| matches!(sys::wait_child(pid, false), Ok(None)));
         std::thread::sleep(Duration::from_millis(50));

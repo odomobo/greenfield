@@ -10,12 +10,14 @@
 #     time;
 #   - nothing is reachable without signing in: no API, the WebSocket refuses a foreign Origin, anything but the
 #     sign-in before it succeeded, and other WebSocket paths;
-#   - failed sign-ins are throttled per IP (for any username), last since it blocks this IP.
+#   - failed sign-ins are throttled per IP (for any username), by the login helper's backoff (after 10 failures; a
+#     blocked attempt fails like a wrong password, even with the right one) and by the web listener's limiter (after
+#     20; "Too many failed attempts"); last since it blocks this IP.
 # Successful sign-ins, reattaching, takeover and logging out are in desktop.sh (they start a desktop).
 #
 # The dev login helper runs with --dev-time-scale, which shortens its failed-sign-in delay (3 s) so this finishes in
-# seconds; the assertions are the same, just scaled. (The web listener's per-IP throttle refuses blocked addresses
-# without asking the helper, so without that delay.)
+# seconds, and its backoff's block times (30 s at first, so 10 s here); the assertions are the same, just scaled. (The
+# web listener's per-IP throttle refuses blocked addresses without asking the helper, so without that delay.)
 #
 # Requires: curl, node, the built gateway and viewer. Usage: scripts/e2e/auth.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -112,9 +114,16 @@ ws_status() { curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "${WS_HEADERS
 echo "    ok"
 
 step "failed sign-ins are throttled per IP, for any username"
-# (last: it blocks this IP.) 20 free failures, $FAILED of them used above; the failures wait their minimum time each,
-# so side by side
-probe failures "$WSS/ws" "$BASE" "nobody-$$" $((20 - FAILED)) >"$WORK/throttle.txt"
+# (last: it blocks this IP.) The failures wait their minimum time each, so side by side. First the login helper's
+# backoff: 10 free failures, $FAILED of them used above. A child decides with the reports the earlier attempts sent
+# before their result, so the next attempt is blocked: the right password fails like a wrong one.
+probe failures "$WSS/ws" "$BASE" "nobody-$$" $((10 - FAILED)) >"$WORK/throttle.txt"
+read -r OUTCOME _ _ MESSAGE < <(signin_attempt "$ME" "$PASSWORD")
+[ "$OUTCOME" = fail ] && [[ "$MESSAGE" == "The username or password is incorrect"* ]] ||
+  fail "the right password got through the helper's backoff: $OUTCOME $MESSAGE"
+# then the web listener's limiter: 20 free failures (the helper's refusals count too)
+FAILED=11
+probe failures "$WSS/ws" "$BASE" "nobody-$$" $((20 - FAILED)) >>"$WORK/throttle.txt"
 grep -q "Too many failed attempts" "$WORK/throttle.txt" && fail "throttled within the free failures: $(sort "$WORK/throttle.txt" | uniq -c)"
 read -r OUTCOME _ _ MESSAGE < <(signin_attempt "someone-else-$$" "wrong-password")
 [ "$OUTCOME" = fail ] && [[ "$MESSAGE" == "Too many failed attempts"* ]] || fail "the 21st failed sign-in was not throttled: $OUTCOME $MESSAGE"
