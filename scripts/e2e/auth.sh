@@ -35,8 +35,8 @@ GREENFIELD_DEV_PASSWORD=short "$LOGIN_HELPER" --bind-ip 127.0.0.1 --bind-port "$
 gateway --dev-time-scale 0 --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
   fail "an invalid time scale was accepted"
 # the production login helper has no dev options, and needs root
-PRODUCTION_HELPER="$REPO/packages/login/target/release/nebula-login"
-[ -x "$PRODUCTION_HELPER" ] || fail "build the login helpers first: (cd packages/login && yarn build)"
+PRODUCTION_HELPER="$REPO/packages/gatekeeper/target/release/nebula-login"
+[ -x "$PRODUCTION_HELPER" ] || fail "build the login helpers first: (cd packages/gatekeeper && yarn build)"
 OUTPUT="$("$PRODUCTION_HELPER" --bind-ip 127.0.0.1 --bind-port "$PORT" 2>&1)" &&
   fail "the production login helper started without root"
 [[ "$OUTPUT" == *"must be started as root"* ]] || fail "the production login helper didn't refuse for want of root"
@@ -44,7 +44,7 @@ OUTPUT="$("$PRODUCTION_HELPER" --dev-time-scale 3 --bind-ip 127.0.0.1 --bind-por
   fail "the production login helper accepted a dev option"
 [[ "$OUTPUT" == *"dev login helper"* ]] || fail "the production login helper didn't refuse a dev option"
 # the web front takes no dev options either
-OUTPUT="$("$REPO/packages/login/target/release/nebula-web" --listen-fd 3 --login-socket /nonexistent --dev-time-scale 3 2>&1)" &&
+OUTPUT="$("$REPO/packages/gatekeeper/target/release/nebula-web" --listen-fd 3 --login-socket /nonexistent --dev-time-scale 3 2>&1)" &&
   fail "the web front accepted a dev option"
 [[ "$OUTPUT" == *"unknown option --dev-time-scale"* ]] || fail "the web front didn't refuse a dev option"
 echo "    ok"

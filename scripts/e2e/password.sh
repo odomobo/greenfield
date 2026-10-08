@@ -8,7 +8,7 @@
 #      changed" message, and the sign-in form is back;
 #   2. new passwords that don't match: the mismatch error shows with the repeated "New password:" prompt (the earlier
 #      messages are gone); matching ones sign in, and the desktop shows.
-# The policy checks and the real pam_chauthtok call are unit-tested in packages/login (they need PAM and root).
+# The policy checks and the real pam_chauthtok call are unit-tested in packages/gatekeeper (they need PAM and root).
 #
 # Requires: dbus-daemon, playwright-cli (for its Playwright library and browser), curl, node, the built packages
 # (yarn build). Usage: scripts/e2e/password.sh   (GATEWAY_PORT)

@@ -20,15 +20,14 @@ This document records the design decisions made so far and the order of the rema
 
 ## Architecture
 
-- **Login helpers and web front** (`packages/login`, Rust): privilege-separated sign-in. The production helper
+- **Login helpers and web front** (`packages/gatekeeper`, Rust): privilege-separated sign-in. The production helper
   (`nebula-login`, root) does PAM; the dev helper (`nebula-dev-login`) runs as the current user. The web front
   (`nebula-web`) is a listener that forks a sandboxed worker per TCP connection for TLS, HTTP and WebSocket. See
-  `packages/login/README.md` and `packages/gateway/README.md` for the full process tree.
-- **Session process** (`packages/gateway`, one per desktop, runs as the user): the server side of a user's desktop.
-  Starts the compositor, the shell service (desktop entries, icons, notifications) and audio.
-- **Compositor** (`packages/compositor-proxy`): a Wayland compositor on wlroots (with XWayland), as a Node process
-  with C addons. Encodes frames (QOI/LZ4 patches, PNG, and lossy via GStreamer when bandwidth is short) and sends
-  them over the session's WebSocket.
+  `packages/gatekeeper/README.md` and `packages/session/README.md` for the full process tree.
+- **Session** (`packages/session`, one per desktop, runs as the user): the server side of a user's desktop. A Wayland
+  compositor on wlroots (with XWayland), as a Node process with C addons. Encodes frames (QOI/LZ4 patches, PNG, and
+  lossy via GStreamer when bandwidth is short), runs the shell service (desktop entries, icons, notifications) and
+  audio, and sends everything over the session's WebSocket.
 - **Viewer** (`packages/viewer`): the browser side. Receives a window-scene protocol (windows, positions, sizes,
   frames) over one WebSocket, decodes frames (WebCodecs plus QOI/LZ4 patches in a worker), shows each window as its
   own DOM element with a canvas per surface (the browser composites), does all window management and draws the shell.
@@ -482,7 +481,7 @@ What exists today: TCP's own backpressure keeps every queue bounded, so nothing 
 transport hands one data message at a time to the socket; `TCP_NOTSENT_LOWAT` is 32 KB on direct TCP; the session's
 Unix socket to the gateway has a 32 KB send buffer; the web worker relays with backpressure (it reads from the
 desktop only once TLS has sent everything, at most 64 KB at a time) and sets `TCP_NOTSENT_LOWAT` on the browser's socket
-(`packages/login/web/src/bin/worker.rs`). But those bounds are in bytes, not time
+(`packages/gatekeeper/web/src/bin/worker.rs`). But those bounds are in bytes, not time
 (about 150 KB in all: ~120 ms at 10 Mbit/s), and the kernel's usual congestion control (cubic) keeps filling the
 router buffer at the bottleneck until packets drop (bufferbloat: often hundreds of milliseconds). A reverse proxy in
 front of the gateway would add its own buffer. And the browser's WebSocket API has no backpressure at all: the
@@ -502,7 +501,7 @@ end to end.
 It follows BBRv3 as specified in the IETF draft draft-ietf-ccwg-bbr (revision 06, July 2026; the constants below are
 from it), adapted to messages instead of packets, with one substitution: we can't see packet loss or ECN, so a
 **delay signal** takes the place of loss (below). Code: a pure TypeScript module with an injected clock and no I/O
-(e.g. `packages/compositor-proxy/src/viewer/congestion.ts`), one instance per viewer connection (a new connection
+(e.g. `packages/session/src/viewer/congestion.ts`), one instance per viewer connection (a new connection
 starts from scratch).
 
 Units: bytes and milliseconds. "Item" = one data envelope (PATCH or FRAME). Control messages (CONTROL envelopes) are
@@ -656,7 +655,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
   11. 2-item floor: a single item larger than the in-flight limit is still sent.
 - `scripts/test-gateway.sh` must still pass (the e2e link is local, so the controller should simply stay out of the
   way: check that no e2e step got slower).
-- As implemented (phase 1 of 2b, `packages/compositor-proxy/src/viewer/congestion.ts`, test in `test/congestion.test.ts`
+- As implemented (phase 1 of 2b, `packages/session/src/viewer/congestion.ts`, test in `test/congestion.test.ts`
   with the harness `test/sim-link.ts`): every scenario runs on three seeds (item sizes 4–30 KB, jitter, bursts), about
   0.5 s for all. Where the assertions differ from the list above:
   - Bandwidth probes (ProbeBW_UP and the ProbeBW_DOWN that drains it) have their own bound. A probe sends 25% faster
@@ -736,7 +735,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
 - wlroots prototype: **go**. wlroots 0.17.4 (submodule, built against Ubuntu 24.04's packages) runs foot and
   gtk4-demo in the existing viewer through the existing scene protocol, transport and encoders: typing, pointer and
   cursors, resize, maximize, popups, dialogs, patches and video, reattach. Findings and gotchas in
-  `packages/compositor-proxy/native/wlr-core/README.md`.
+  `packages/session/native/wlr-core/README.md`.
 - wlroots migration, wave 1: every session runs on wlroots, with the desktop shell (Apps menu, launching, pinned apps,
   notifications; app processes tracked from client credentials). Built by `yarn build` (submodule + meson; CI on
   Ubuntu 24.04); `scripts/test-gateway.sh` passes on it; unit tests for `WlrCompositor` (fake core) and `Apps`. The
@@ -747,7 +746,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
   same policy; override-redirect menus and tooltips show with their window; X11/Wayland clipboard sync is wlroots'
   (untested). `scripts/e2e/x11.sh` (xev, xfontsel) runs in `scripts/test-gateway.sh`; gtk4-demo under X11 checked by
   hand. Works on WSL (read-only `/tmp/.X11-unix`) and with several users. Details:
-  `packages/compositor-proxy/native/wlr-core/README.md`.
+  `packages/session/native/wlr-core/README.md`.
 - Sticky modifiers fixed (Ctrl stayed held in foot after a key-up the page never saw). The browser is the truth about
   modifiers: every key, pointer, button and axis message carries `getModifierState()` (scene protocol v6 `Modifiers`;
   AltGr reported alone, without the Ctrl+Alt Windows adds), and the native core makes its xkb state agree before the
@@ -808,8 +807,8 @@ single large item never stalls the link. Initial window before any estimate: 64 
        focus, minimize, maximize, child windows centred on their parent, frame pacing, one `SurfaceEncoder` per
        surface. Frame pacing moved to `src/FramePacing.ts`, free of native code.
      - `src/wlroots/Apps.ts`: the session's app processes (launched, or connected on their own, by client pid).
-     - `packages/gateway/src/session-process.ts`: the session process.
-     - Detailed notes: `packages/compositor-proxy/native/wlr-core/README.md`.
+     - `packages/session/src/session-process.ts`: the session process.
+     - Detailed notes: `packages/session/native/wlr-core/README.md`.
    - **Verified in the prototype** (headless Chrome through the gateway): foot (typing, focus, its own decorations,
      cursor shapes, resizing by its edge, its maximize button); gtk4-demo (its shadow and input region, its own
      cursor, menus as popups, the About dialog centred and stacked above its parent); small surfaces as patches and
@@ -884,7 +883,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
     No scene protocol change.
     - **Implemented as listed below**, with these notes and deviations:
       - `auto` looks for `/dev/nvidia<N>` (not `/dev/nvidiactl`, which WSL has without a GPU device), and for the
-        elements with `gst-inspect-1.0 --exists`; the logic is in `packages/gateway/src/encoder.ts` (unit tests with
+        elements with `gst-inspect-1.0 --exists`; the logic is in `packages/session/src/encoder.ts` (unit tests with
         mocked probes). `EncoderPool` reports a creation failure once and then behaves as size 0.
       - Video frames take slots like patches (the sink's `sendFrame` got a `done` callback, and both sink calls carry
         the surface's class). When no slot is free, the wanted frame (a key frame, or a delta of the latest content) is
@@ -1100,10 +1099,10 @@ single large item never stalls the link. Initial window before any estimate: 64 
      KDE backends: they're ours. Without the portal, apps fall back to GSettings (today's behaviour).
    - Verify: the full e2e suite, and by hand gtk4-demo, Chrome and foot (initial sizes, buttons, right-click menu).
 4c. **Next steps after 4b** (to be done by an agent, in this order; the user agreed to them on 2026-10-04):
-   1. **Done** (merged as a02d4d6: compositor-proxy 156 and viewer 79 unit tests, `test-gateway.sh` 23 s;
+   1. **Done** (merged as a02d4d6: session 156 and viewer 79 unit tests, `test-gateway.sh` 23 s;
       `decorations.sh` also checks our window menu from gtk4-demo's header bar when gtk4-demo is installed). Was:
       **Merge branch `core4b-desktop-integration`** (xdg-shell 6: bounds, capabilities, our window menu for apps'
-      own title bars; scene protocol 14) into master. It was verified on its branch (compositor-proxy 155 and viewer
+      own title bars; scene protocol 14) into master. It was verified on its branch (session 155 and viewer
       79 unit tests, `test-gateway.sh` 22.8 s); master got the 30 Hz frame clock meanwhile (`FramePacing.ts` only).
       Its ROADMAP edit adds a status paragraph to 4b. After merging: `yarn build`, both unit suites (compare counts:
       `yarn test` runs compiled `dist/`), `test-gateway.sh`.
@@ -1117,7 +1116,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
       accident: say what changed.
    3. **Done** (`nebula-settings.ts` is the one place for the desktop's settings; the build
       (`build-dconf.js`) writes a dconf profile `user-db:user` + `file-db:<abs path>` and a defaults database to one
-      place for all users, `packages/gateway/dist/dconf/`, and `session-environment.ts` sets `DCONF_PROFILE` to it. dconf 0.40 (Ubuntu 24.04) supports `file-db:` and an absolute `DCONF_PROFILE`, so no
+      place for all users, `packages/session/dist/dconf/`, and `session-environment.ts` sets `DCONF_PROFILE` to it. dconf 0.40 (Ubuntu 24.04) supports `file-db:` and an absolute `DCONF_PROFILE`, so no
       root; `dconf-cli` isn't installed by default, so the database (GVDB) is written by our own
       code, checked against `dconf compile`'s output and read by libdconf/`gsettings`. `DCONF_PROFILE` is not in
       `dbus-update-activation-environment` (the bus is the user's, shared with their other desktops). For the install
@@ -1186,7 +1185,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
      is created on the first pointer or key event (the sign-in click), and the viewer tells the server it is muted until
      it runs. The taskbar's mute toggle (right side, left of the connection indicator) is remembered in localStorage and
      sent on every (re)connection. Test hook: `window.__viewerTest.audio()`.
-   - Tests: viewer 96 (was 79: jitter buffer 9, protocol 8), compositor-proxy 160 (was 156), gateway 28 (was 17),
+   - Tests: viewer 96 (was 79: jitter buffer 9, protocol 8), session 160 (was 156), gateway 28 (was 17),
      new `scripts/e2e/audio.sh` (tone in a session app, decoded in the browser, mute/unmute, reload, isolation with and
      without a user PipeWire running, cleanup at logout; 5-10 s); `test-gateway.sh` about 22 s.
    - Not verified by ear (needs the user): sound quality, clicks at underruns, drift over a long listen, recovery after
@@ -1238,7 +1237,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
          only `encodePng` (window icons). Measured with the new opt-in `scripts/e2e/cpu.sh` (session process CPU over
          10 s, no GPU, 1080p busy client / foot printing text): the busy client 17.3 s of CPU (1905 patches, 9.1 ms per
          patch) -> 8.9 s (5600 patches, 1.6 ms per patch, three times the throughput); foot 8.0 s (4.8 ms per patch)
-         -> 1.5 s (0.8 ms per patch). Tests: compositor-proxy 169 (was 160: cascade branches with exact round trips
+         -> 1.5 s (0.8 ms per patch). Tests: session 169 (was 160: cascade branches with exact round trips
          for 3 and 4 channels, the pools, the opaque flag), viewer 113 (was 96: the wasm decoder against the real
          encoder for all three formats, the protocol), gateway 28; `test-gateway.sh` about 23 s (checks that foot's
          patches arrive opaque and decoded in the worker). Not covered by a test: the opaque-region path of
@@ -1257,7 +1256,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
          lossy areas and refreshes in `SurfaceEncoder`; constant-QP hardware video with `setQuality`; x264 and the CPU
          video path deleted. New dev-only gateway option `--dev-link-kbps <n>` (with `--dev-auth`): the session sends
          to its viewer through a simulated link of n kbit/s (a FIFO in the transport), to try this by hand.
-       - Tests: compositor-proxy 190 (was 170: the monitor's rules and the monitor with the real controller on the
+       - Tests: session 190 (was 170: the monitor's rules and the monitor with the real controller on the
          simulated link, 11; lossy patches, refreshes and video quality in `SurfaceEncoder`, 5; JPEG encoding, 4),
          viewer 123 (was 116: the formats and `splitJpegAlpha`; 4 jitter-buffer tests fail since 5ef434a, unrelated),
          gateway 32. New `scripts/e2e/lossy.sh` (about 11 s): the busy client on an 8 Mbit/s simulated link becomes
@@ -1276,7 +1275,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
          to `SurfaceEncoder`; `BandwidthMonitor` lost its
          lossless-demand measure and takes the predicted backlog; `EncodingSink` gained `linkBandwidth` and
          `queuedBytes`, `sendPatch` takes a tier; the transport's patch messages carry `tier`.
-       - Tests: compositor-proxy 199 (the minimum frame rate; burst promotion order and its first patches lossy, none before the link was
+       - Tests: session 199 (the minimum frame rate; burst promotion order and its first patches lossy, none before the link was
          limited, the estimate, settling at the lowest tier while still limited, pre-empted by damage, re-settling
          damage that went lossy, demotion only once settled, the 9 : 3 : 1 tiers and a settling patch waiting in its
          damage's tier, the monitor's backlog trigger, exit and remembered bandwidth). `lossy.sh` (about 17 s) also
@@ -1369,7 +1368,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
       lossless): audio waited at most 15-19 ms with chunks; 70+ ms without (64K-pixel patches whole). The headless
       browser of the e2e tests is itself slow to take messages while it draws (gaps of about 110 ms between audio
       packets either way, software rendering under WSL), so the check is on the server.
-    - Tests: compositor-proxy 210 (7 chunking tests in `SendScheduler.test.ts`; the congestion tests run unchunked),
+    - Tests: session 210 (7 chunking tests in `SendScheduler.test.ts`; the congestion tests run unchunked),
       viewer 128 (the envelope and assembler, chunk acks), `lossy.sh` gains the audio check (a tone app, skipped
       without PipeWire), about 20 s.
     - Seen, not fixed: at the very start of a session on the simulated link (an unbounded FIFO), the busy client's
@@ -1449,7 +1448,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
 ### Last
 
 13. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
-    is manual (see `packages/gateway` docs). Must run `node packages/gateway/dist/build-dconf.js` in the installed tree
+    is manual (see `packages/session` docs). Must run `node packages/session/dist/build-dconf.js` in the installed tree
     (regenerates the dconf profile with the installed path, see 4c step 3). New package dependencies from audio (item
     5): `pipewire`, `pipewire-pulse` and `wireplumber` (Ubuntu 24.04: PipeWire 1.0.5, WirePlumber 0.4.17; WirePlumber
     0.5 has another configuration format), `gstreamer1.0-pulseaudio` (`pulsesrc`), `gstreamer1.0-plugins-base`

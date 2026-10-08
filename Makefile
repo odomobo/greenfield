@@ -1,33 +1,29 @@
-.PHONY: all scene-protocol compositor-proxy gateway viewer login clean
+.PHONY: all scene-protocol session viewer gatekeeper clean
 
-all: gateway viewer login
+all: session viewer gatekeeper
 
 # --- libs ---
 
 scene-protocol:
 	cd libs/scene-protocol && yarn run tsc
 
-# --- packages (TS) ---
+# --- packages (TS + C) ---
 
-compositor-proxy: scene-protocol
-	cd packages/compositor-proxy && yarn run rimraf dist types && yarn build:native && yarn build:typescript
-
-gateway: compositor-proxy
-	cd packages/gateway && yarn run rimraf dist && yarn run tsc && node dist/build-dconf.js && node dist/build-audio.js
+session: scene-protocol
+	cd packages/session && yarn run rimraf dist types && yarn build:native && yarn build:typescript && node dist/build-dconf.js && node dist/build-audio.js
 
 viewer: scene-protocol
 	cd packages/viewer && yarn build:wasm && yarn tsc --noEmit && yarn vite build
 
 # --- packages (Rust) ---
 
-login:
-	cargo build --release --locked --manifest-path packages/login/Cargo.toml
+gatekeeper:
+	cargo build --release --locked --manifest-path packages/gatekeeper/Cargo.toml
 
 # --- housekeeping ---
 
 clean:
 	rm -rf libs/scene-protocol/dist libs/scene-protocol/types
-	rm -rf packages/compositor-proxy/build packages/compositor-proxy/dist packages/compositor-proxy/types
-	rm -rf packages/gateway/dist
+	rm -rf packages/session/build packages/session/dist packages/session/types
 	rm -rf packages/viewer/dist
-	cd packages/login && cargo clean
+	cd packages/gatekeeper && cargo clean

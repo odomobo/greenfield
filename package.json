@@ -1,8 +1,7 @@
 {
   "workspaces": [
     "libs/*",
-    "packages/compositor-proxy",
-    "packages/gateway",
+    "packages/session",
     "packages/viewer"
   ],
   "packageManager": "yarn@4.5.0",

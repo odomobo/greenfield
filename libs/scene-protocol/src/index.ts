@@ -1,7 +1,7 @@
 /**
  * The wire protocol between the viewer (the browser app) and a session (the server side, in the compositor proxy).
  * This library is the single source of truth; packages/viewer/src/protocol.ts and
- * packages/compositor-proxy/src/viewer/protocol.ts re-export it.
+ * packages/session/src/viewer/protocol.ts re-export it.
  *
  * The page opens one WebSocket, wss://<server>/ws, and signs in on it first (see "Sign-in" below: text frames). Once
  * signed in, the same WebSocket is the connection to the user's desktop, and every message is a binary envelope:
@@ -310,7 +310,7 @@ export type ServerMessage =
   | { type: 'pointer.lock'; surface: string; locked: boolean; confined: boolean }
   /** A window's own icon (X11 _NET_WM_ICON, nearest to 48 px) as a PNG data URL, null if it has none (anymore). Resent on attach. */
   | { type: 'window.icon'; window: string; icon: string | null }
-  // desktop shell (packages/gateway/src/shell/service.ts)
+  // desktop shell (packages/session/src/shell/service.ts)
   /** installed applications, sorted by name; sent on attach */
   | { type: 'shell.apps'; apps: ShellApp[] }
   /** desktop file IDs of the pinned apps, in order */

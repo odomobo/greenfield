@@ -3,7 +3,7 @@ import { App } from './app'
 
 /*
  * Entry point: the gateway serves this one page and injects the host name into index.html (into the placeholder in
- * #hostname, see packages/gateway/src/web.ts); everything else is rendered by React.
+ * #hostname, see packages/gatekeeper/web); everything else is rendered by React.
  */
 
 // the host name shown on the sign-in form without needing a request

@@ -1,3 +1,3 @@
-[submodule "packages/compositor-proxy/native/wlroots"]
-	path = packages/compositor-proxy/native/wlroots
+[submodule "packages/session/native/wlroots"]
+	path = packages/session/native/wlroots
 	url = https://gitlab.freedesktop.org/wlroots/wlroots.git

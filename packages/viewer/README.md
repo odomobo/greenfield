@@ -7,7 +7,7 @@ can disconnect and reattach at any time without the apps noticing.
 
 ## Running
 
-The viewer is the gateway's one page (`packages/gateway`, served at `/`): the sign-in form and the desktop (signing
+The viewer is the gateway's one page (`packages/session`, served at `/`): the sign-in form and the desktop (signing
 in attaches to the user's one desktop, starting it if needed), so it never navigates away. It opens one WebSocket,
 `/ws` (same origin), signs in on it (the server's prompts answered in-band, see "Sign-in" in
 `libs/scene-protocol`) and then uses it for the desktop ([src/connection.ts](src/connection.ts)). There is no token:

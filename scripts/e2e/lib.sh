@@ -10,11 +10,11 @@ BASE="https://127.0.0.1:$PORT"
 PASSWORD="test-password-$$"
 ME="$(id -un)"
 WORK="$(mktemp -d)"
-# "The gateway" here is the dev login helper (packages/login: nebula-dev-login), the dev entry point: it binds the port,
-# starts the web front (nebula-web, its listener) and the desktops. It runs with --dev-time-scale: its failed-sign-in delay (3 s) is divided by
-# this (and so is the time the desktops give their apps to quit at logout, 5 s). Everything the tests wait for is
-# derived from it.
-LOGIN_HELPER="$REPO/packages/login/target/release/nebula-dev-login"
+# The dev login helper (packages/gatekeeper: nebula-dev-login), the dev entry point: it binds the port, starts the web
+# front (nebula-web, its listener) and the desktops. It runs with --dev-time-scale: its failed-sign-in delay (3 s) is
+# divided by this (and so is the time the desktops give their apps to quit at logout, 5 s). Everything the tests wait
+# for is derived from it.
+LOGIN_HELPER="$REPO/packages/gatekeeper/target/release/nebula-dev-login"
 TIME_SCALE=3
 GATEWAY_PID=""
 DBUS_PID=""
@@ -67,8 +67,8 @@ require_tools() {
   for tool in "$@"; do
     command -v "$tool" >/dev/null || fail "$tool is not installed"
   done
-  [ -f "$REPO/packages/gateway/dist/session-process.js" ] || fail "build the gateway first: (cd packages/gateway && yarn build)"
-  [ -x "$LOGIN_HELPER" ] || fail "build the login helpers first: (cd packages/login && yarn build)"
+  [ -f "$REPO/packages/session/dist/session-process.js" ] || fail "build the session first: make session"
+  [ -x "$LOGIN_HELPER" ] || fail "build the gatekeeper first: make gatekeeper"
   [ -f "$REPO/packages/viewer/dist/index.html" ] || fail "build the viewer first: (cd packages/viewer && yarn build)"
 }
 
@@ -112,7 +112,7 @@ session_pid() {
 }
 
 # The sign-in probes (scripts/e2e/probe.js): the in-band sign-in on the page's WebSocket, without a browser.
-probe() { NODE_NO_WARNINGS=1 WS_MODULE="$REPO/packages/gateway/node_modules/ws" node "$E2E_DIR/probe.js" "$@"; }
+probe() { NODE_NO_WARNINGS=1 WS_MODULE="$REPO/packages/session/node_modules/ws" node "$E2E_DIR/probe.js" "$@"; }
 
 # Sign in on a WebSocket of its own: prints "<ok|fail|closed> <seconds> <close code> <message>" (see probe.js).
 signin_attempt() {

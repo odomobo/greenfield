@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const buildDir = path.join(root, 'wasm', 'build')
-const lz4Dir = path.join(root, '..', 'compositor-proxy', 'native', 'patch', 'vendor')
+const lz4Dir = path.join(root, '..', 'session', 'native', 'patch', 'vendor')
 const output = path.join(root, 'src', 'patch', 'wasm-bytes.ts')
 
 function run(command, args) {

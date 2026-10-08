@@ -1,7 +1,7 @@
 # Visual design
 
 The look and feel of nebula's pages and desktop shell: what was decided and why. `ROADMAP.md` covers the architecture
-and the order of work; this file covers how things look and move. Values live in `packages/gateway/static/theme.css`
+and the order of work; this file covers how things look and move. Values live in `packages/session/static/theme.css`
 (colors, sizes, curves) and `packages/viewer/src/style.css` (layout, animations).
 
 ## Theme
@@ -9,7 +9,7 @@ and the order of work; this file covers how things look and move. Values live in
 - **Dark only.** No light theme, no `prefers-color-scheme` switch. The page declares `color-scheme: dark`, so the
   browser's own scrollbars and form controls match.
 - **One background picture behind every page**: sign-in and desktop both sit on the Carina nebula
-  (`packages/gateway/static/background.jpg`, a 3840 px wide copy of the original, ~1.2 MB), covering the viewport.
+  (`packages/session/static/background.jpg`, a 3840 px wide copy of the original, ~1.2 MB), covering the viewport.
 - **Two glass surfaces** for everything drawn on the picture:
   - **Passive**: `blur(24px)` and black at 60%. The taskbar, the Apps menu, the notification panel and toasts, context
     menus, the sign-in card and the title bars of inactive windows.
@@ -32,7 +32,7 @@ and the order of work; this file covers how things look and move. Values live in
 
 nebula tells apps it's dark and gives them an accent color, the standard ways, **as defaults only**: whatever the
 user set themselves always wins, and nothing is written over their settings (even where KDE itself would). Other
-desktops of the same user never see any of it. All of it comes from `packages/gateway/src/nebula-settings.ts`.
+desktops of the same user never see any of it. All of it comes from `packages/session/src/nebula-settings.ts`.
 
 - **GSettings** (GTK, Chrome): `color-scheme 'prefer-dark'` (GTK4, Chrome) and `gtk-theme 'Adwaita-dark'` (GTK3,
   whose theme ignores the color scheme), in the dconf defaults below the user's own database. A user whose

@@ -324,7 +324,7 @@ if command -v gsettings >/dev/null; then
   [ "$(cat "$WORK/qt-theme.out")" = kde ] || fail "QT_QPA_PLATFORMTHEME in the session: $(cat "$WORK/qt-theme.out")"
   # KDE apps read nebula's kdeglobals (dark, nebula's accent); the test's own ~/.config has none
   if [ -e "$WORK/kde-selection.out" ]; then
-    ACCENT="$(node -e "console.log(require('$REPO/packages/gateway/dist/nebula-settings.js').NEBULA_ACCENT.join(','))")"
+    ACCENT="$(node -e "console.log(require('$REPO/packages/session/dist/nebula-settings.js').NEBULA_ACCENT.join(','))")"
     [ "$(cat "$WORK/kde-selection.out")" = "$ACCENT" ] || fail "KDE selection color in the session: $(cat "$WORK/kde-selection.out") (not $ACCENT)"
     [ "$(cat "$WORK/kde-window.out")" = 42,46,50 ] || fail "KDE window color in the session: $(cat "$WORK/kde-window.out")"
   else
