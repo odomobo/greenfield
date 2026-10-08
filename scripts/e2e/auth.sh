@@ -64,6 +64,13 @@ grep -qi -E 'greenfield|gateway|compositor|wayland|node' "$WORK/login.html" && f
 grep -qi -E 'greenfield|express|node' <<<"$HEADERS" && fail "product name in headers"
 grep -qi '^cache-control: no-store' <<<"$HEADERS" || fail "the page may be cached"
 grep -qi '^strict-transport-security:' <<<"$HEADERS" || fail "no HSTS"
+# the viewer's hashed files (named in the page) are immutable; the page and the unhashed static files are not
+ASSET="$(grep -o '/assets/[A-Za-z0-9._-]*\.js' "$WORK/login.html" | head -1 || true)"
+[ -n "$ASSET" ] || fail "the page names no script under /assets/"
+ASSET_HEADERS="$(curl -sk -D - -o /dev/null "$BASE$ASSET")"
+grep -qi '^cache-control: public, max-age=31536000, immutable' <<<"$ASSET_HEADERS" || fail "$ASSET isn't immutable"
+STATIC_HEADERS="$(curl -sk -D - -o /dev/null "$BASE/static/theme.css")"
+grep -qi 'immutable' <<<"$STATIC_HEADERS" && fail "the unhashed /static/theme.css is immutable"
 grep -q "$(hostname)" "$WORK/login.html" || fail "hostname not shown"
 [ "$(curl -sk -o /dev/null -w '%{redirect_url}' "$BASE/login")" = "$BASE/" ] || fail "/login doesn't lead to the page"
 [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/" || true)" = 200 ] && fail "the page is served over plain HTTP"

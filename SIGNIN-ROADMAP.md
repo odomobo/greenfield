@@ -479,6 +479,11 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 
 - Serve content-hashed asset files with a long `immutable` cache lifetime, so repeat visits only fetch `index.html`
   and open the WebSocket. Fewer connections means fewer workers.
+- As built: `http::cache_control` (unit-tested in `routes`). The rule is the path: everything under `/assets/` (the
+  viewer build; Vite hashes every name there, including the patch worker and audio worklet; the wasm decoder is
+  inlined in a script) gets `public, max-age=31536000, immutable`; `public` since the files are the same for everyone.
+  `/static/` files (theme.css, images) keep their names, so they keep `private, max-age=3600`; the page stays
+  `no-store`. Hashing /static/ was not done (the viewer's scripts and theme.css refer to those names). e2e: `auth.sh`.
 
 ### 13. systemd units and hardening
 
