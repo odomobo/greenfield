@@ -220,7 +220,7 @@ fn parse_config() -> Config {
     let session_dir = session_dir.map(PathBuf::from).unwrap_or_else(|| {
         // <repo>/packages/gatekeeper/target/release/nebula-dev-login -> <repo>/packages/session/dist
         let exe = std::env::current_exe().unwrap_or_else(|e| fail(&format!("where am I? {e}")));
-        exe.ancestors().nth(4).unwrap_or(Path::new("/")).join("gateway/dist")
+        exe.ancestors().nth(4).unwrap_or(Path::new("/")).join("session/dist")
     });
     if !session_dir.join("session-process.js").is_file() {
         fail(&format!("no built session in {} (yarn build, or --session-dir)", session_dir.display()));

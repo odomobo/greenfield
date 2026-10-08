@@ -124,7 +124,7 @@ fn configure() -> Config {
     let session_dir = args.session_dir.clone().unwrap_or_else(|| {
         // <repo>/packages/gatekeeper/target/release/nebula-login -> <repo>/packages/session/dist
         let exe = std::env::current_exe().unwrap_or_else(|e| fatal(format!("Where am I? {e}")));
-        exe.ancestors().nth(4).unwrap_or(Path::new("/")).join("gateway/dist")
+        exe.ancestors().nth(4).unwrap_or(Path::new("/")).join("session/dist")
     });
     if !session_dir.join("session-process.js").is_file() {
         usage_error(&format!("no built session in {} (yarn build, or --session-dir)", session_dir.display()));
