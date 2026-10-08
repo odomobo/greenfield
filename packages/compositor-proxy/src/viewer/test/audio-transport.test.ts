@@ -58,14 +58,12 @@ test('audio packets are sent at once, whatever the congestion controller says ab
   assert.deepEqual(second, { kind: 'audio', seq: 8, timestamp: 8 * 960, opus: new Uint8Array([4]) })
 })
 
-test('audio packets are dropped, not queued, while the socket has a lot buffered', () => {
+test('audio packets are never dropped, however much the socket has buffered', () => {
   const { ws, transport } = setup()
   ws.bufferedAmount = 1024 * 1024
   transport.send({ priority: 'audio', packet: packet(1) })
-  assert.equal(ws.sent.length, 0)
-  ws.bufferedAmount = 0
   transport.send({ priority: 'audio', packet: packet(2) })
-  assert.deepEqual(ws.kinds(), ['audio'])
+  assert.deepEqual(ws.kinds(), ['audio', 'audio'])
 })
 
 test('audio packets after closing are ignored', () => {

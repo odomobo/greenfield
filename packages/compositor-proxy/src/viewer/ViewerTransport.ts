@@ -63,8 +63,8 @@ export type OutgoingMessage =
 export interface ViewerTransport {
   /**
    * Queue a message. Control messages are always sent before pending frames and patches, never held back; audio
-   * packets are written to the socket at once too (not subject to the congestion controller), unless the socket's
-   * buffer is over AUDIO_BUFFERED_LIMIT, then they're dropped. Of the rest, the three send tiers (the normal and
+   * packets are written to the socket at once too (not subject to the congestion controller, never dropped: late
+   * audio is the viewer's jitter buffer's to handle). Of the rest, the three send tiers (the normal and
    * streaming classes, then settling) share the link by byte-weighted deficit round-robin (9 : 3 : 1, work-conserving),
    * surfaces of a tier take turns, one item per visit, as fast as the congestion controller lets them go (see
    * congestion.ts: pacing, in-flight limit, the viewer's backlog). Video frames and patches of a surface are sent in
@@ -123,9 +123,6 @@ const UNIX_SEND_BUFFER_BYTES = 32 * 1024
 // A safety limit under the congestion controller: never hand a data item to the socket while more than this is still
 // buffered in user space (with the controller working, it shouldn't be reached).
 const SEND_BUFFERED_LIMIT = 256 * 1024
-// Audio packets are dropped instead of sent while more than this is buffered for the socket (about 9 s of audio at
-// 112 kbps behind video data): audio that late is useless, and it must never pile up.
-const AUDIO_BUFFERED_LIMIT = 128 * 1024
 // Deficit round-robin between the send tiers: each turn a tier may send up to its quantum (plus what it carried over)
 // in bytes. Normal surfaces get 3 times the share of streaming ones, which get 3 times the share of settling, and the
 // others get all of the link when a tier has nothing waiting.
@@ -245,7 +242,6 @@ export class WebSocketViewerTransport implements ViewerTransport {
   private pacingTimer?: NodeJS.Timeout
   private pacingAt = Infinity
   private safetyLimitLogged = false
-  private audioDropLogged = false
   private _closed = false
   private readonly bandwidth: BandwidthMonitor
   private readonly link?: SimulatedLink
@@ -377,13 +373,6 @@ export class WebSocketViewerTransport implements ViewerTransport {
 
   private sendAudio(packet: AudioPacket) {
     if (this.ws.readyState !== WebSocket.OPEN) {
-      return
-    }
-    if (this.ws.bufferedAmount > AUDIO_BUFFERED_LIMIT) {
-      if (!this.audioDropLogged) {
-        this.audioDropLogged = true
-        logger.info(`More than ${AUDIO_BUFFERED_LIMIT} bytes buffered for the viewer, dropping audio packets.`)
-      }
       return
     }
     // after queued control messages (normally none wait), before any data item
