@@ -13,7 +13,13 @@
 //!
 //! Limits: the TLS handshake within 10 s; a request head of at most 16 KiB within 20 s (the first byte of a further
 //! request on the connection within 5 s, keep-alive); each response written within 30 s; the WebSocket's `begin`
-//! within 10 s, each answer within 60 s, the helper's next record within 90 s, the desktop's handshake within 60 s.
+//! within 10 s, each answer within 60 s, the helper's next record within 90 s, the desktop's handshake within 60 s;
+//! what is left when a closing connection ends, within 5 s. The relay has no idle limit (a desktop may send nothing for
+//! hours); a browser that is gone without closing is noticed by TCP keepalive (probes after 60 s of silence, the
+//! connection ends when probes or data stay unacknowledged for 120 s).
+//!
+//! Once set up (fds checked, memfds mapped, the TLS configuration built, the TCP socket tuned) the worker enters its
+//! sandbox (src/sandbox.rs: no_new_privs, rlimits, a seccomp allowlist): it can then only use the fds it has.
 use nebula_login_common::channel::Channel;
 use nebula_login_common::log;
 use nebula_login_protocol::{Outcome, PromptStyle, Record, MAX_ANSWER, MAX_USERNAME};
@@ -22,7 +28,7 @@ use nebula_web::conn::{timed_out, wait, Tls};
 use nebula_web::helper;
 use nebula_web::http::{self, HeadError, Request, Response};
 use nebula_web::websocket::{self, ClientMessage, ServerMessage, CLOSE_SIGN_IN_FAILED, MAX_FRAME};
-use nebula_web::{sys, *};
+use nebula_web::{sandbox, sys, *};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -41,6 +47,11 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 const HELPER_TIMEOUT: Duration = Duration::from_secs(90);
 /// a desktop that is just starting accepts its first connection when it is ready
 const DESKTOP_TIMEOUT: Duration = Duration::from_secs(60);
+/// a connection with nothing sent either way for this long gets TCP keepalive probes, every KEEP_ALIVE_INTERVAL ...
+const KEEP_ALIVE_IDLE: Duration = Duration::from_secs(60);
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// ... and ends when probes or data stay unacknowledged this long
+const UNACKNOWLEDGED_TIMEOUT: Duration = Duration::from_secs(120);
 /// how long a closing connection may take to send what it still has
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// the desktop's handshake response
@@ -118,7 +129,17 @@ fn main() {
     let ip = tcp.peer_addr().map(|address| client_ip(address.ip()).to_string()).unwrap_or_default();
     // tuning only
     let _ = sys::tune_tcp(tcp.as_raw_fd(), TCP_NOTSENT_LOWAT_BYTES);
+    // the relay has no timeout of its own (a desktop may send nothing for hours): a vanished browser ends it this way
+    if let Err(e) = sys::tcp_keep_alive(tcp.as_raw_fd(), KEEP_ALIVE_IDLE, KEEP_ALIVE_INTERVAL, UNACKNOWLEDGED_TIMEOUT) {
+        fatal(&format!("Can't set up TCP keepalive: {e}"));
+    }
     let tls = Tls::new(tcp, config).unwrap_or_else(|e| fatal(&format!("TLS: {e}")));
+
+    // ---- The sandbox (sandbox.rs): from here on only the system calls in sandbox::ALLOWED, on the fds we have. ----
+    if let Err(e) = sandbox::enter(bundle.bytes().len()) {
+        fatal(&format!("Can't enter the sandbox: {e}"));
+    }
+
     let mut worker = Worker { tls, assets, allowed_origins, sign_in, ip };
     worker.serve(helper, report);
 }
@@ -354,7 +375,8 @@ impl Worker<'_> {
 /// The relay's own WebSocket handshake with the desktop (the session expects one); what the desktop sent after its
 /// response.
 fn desktop_handshake(upstream: &mut UnixStream) -> io::Result<Vec<u8>> {
-    upstream.set_nonblocking(true)?;
+    // (fcntl: std's set_nonblocking uses ioctl, which the sandbox doesn't allow)
+    sys::set_nonblocking(upstream.as_raw_fd())?;
     let deadline = Instant::now() + DESKTOP_TIMEOUT;
     let mut key = [0u8; 16];
     sys::random_bytes(&mut key)?;

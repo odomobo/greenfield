@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–7, 10, 11 and 13 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–8, 10, 11 and 13 are implemented; the rest is not.
 
 ## Why
 
@@ -412,6 +412,54 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
   helper channel.
 - Not planned: a separate uid per worker from a reserved pool. Non-dumpable workers (step 6) and the seccomp
   allowlist already keep workers apart, and a uid pool would need root to start every worker.
+- As built:
+  - **Where**: `web/src/sandbox.rs` (the allowlist `ALLOWED`, the rlimits, the BPF program built by hand; the
+    system calls themselves in `web/src/sys.rs`), applied at one marked point in the worker's `main`
+    (`sandbox::enter`), after it has checked its fds, mapped the page bundle, built the TLS configuration from the TLS
+    memfd (then closed and unmapped), tuned the TCP socket and created the rustls connection. Failing to enter it is
+    fatal. No new crates.
+  - **Order**: rlimits, `PR_SET_NO_NEW_PRIVS`, then the seccomp filter (`PR_SET_SECCOMP`, one thread so no TSYNC).
+  - **The filter** checks the architecture (x86_64 or aarch64, built per target; another arch is a compile error)
+    and on x86_64 refuses x32 numbers, then allows only: `write`, `writev`, `recvfrom`, `sendto`, `recvmsg`,
+    `sendmsg`, `shutdown`, `close`, `poll` (aarch64: `ppoll`), `fcntl` with `F_GETFL`/`F_SETFL` only, `getrandom`,
+    `clock_gettime`, `brk`, `mmap` and `mprotect` without `PROT_EXEC`, `mremap`, `munmap`, `madvise`,
+    `sigaltstack` (std's `process::exit`), `exit_group`. Found by running the unit tests and the e2e suite with the
+    default action set to `SECCOMP_RET_LOG` (first with an empty list, then with the candidates) and reading the
+    kernel's audit lines (`dmesg | grep type=1326`); how to repeat that is in the module header. `read` isn't needed
+    (std reads sockets with `recvfrom`), nor `futex` (one thread). The desktop connection is made non-blocking with
+    `fcntl` instead of std's `ioctl(FIONBIO)`.
+  - **Default action: kill the process** (`SECCOMP_RET_KILL_PROCESS`), not EPERM: a call outside the list is a bug
+    or an exploit; ending that one connection loudly is better than continuing in an untested state, and an error
+    return would let exploit code probe the filter. The listener logs a worker killed by a signal (rate-limited),
+    naming SIGSYS as the sandbox (`A worker ended with signal 31 (a system call its sandbox forbids).`). A Rust abort
+    also ends in SIGSYS (no `tgkill`).
+  - **rlimits** (soft = hard): `RLIMIT_NPROC` 0, `RLIMIT_CORE` 0, `RLIMIT_NOFILE` 8 (fds 0–7, the numbers the
+    listener uses; the desktop connection the helper's `Result` carries takes the place of a closed memfd, so a
+    worker can hold at most one received fd beyond its own), `RLIMIT_AS` the mapped bundle + 128 MiB (a worker peaks
+    at about 8 MiB in the e2e suite). **`RLIMIT_FSIZE` is not set to 0**: the worker opens no files, but its
+    stdout/stderr may be a file (the e2e suite's `gateway.log`, a redirected service log) and a limit of 0 would kill
+    it with SIGXFSZ at its first log line; with no `open` allowed there is nothing else it could write to.
+  - **No filesystem access**: no `open`/`openat`/`creat`/`stat`/`connect`/`bind`/`socket`/`execve`/`clone` in the
+    list. Everything the worker uses after setup is an fd it was given or received from the helper.
+  - **Timeouts**: the step 7 limits covered each stage (handshake 10 s, first head 20 s, keep-alive 5 s, each
+    response 30 s, `begin` 10 s, answers 60 s, helper 90 s, desktop handshake 60 s, closing 5 s) except the relay,
+    which has no limit of its own (a desktop may send nothing for hours, and there is no heartbeat in the protocol).
+    Added: TCP keepalive on the browser's socket (probes after 60 s idle, every 10 s) and `TCP_USER_TIMEOUT` 120 s,
+    set before the sandbox, so a browser that vanished without closing ends its worker.
+  - **The front's capabilities**: both helpers start `nebula-web` through `spawn::without_capabilities`
+    (`sys::drop_capabilities_for_good`, in `pre_exec`): the inheritable and ambient sets are cleared and
+    `no_new_privs` is set for the listener and everything it starts. Verified: a drop from root to the web user
+    already clears permitted, effective and ambient, but not inheritable (normally empty, but e.g. set from a unit's
+    `CapabilityInheritable=`); the dev helper runs unprivileged with all sets empty, so this changes nothing there.
+    Desktops are not given this (pam_cap sets inheritable capabilities for users on purpose).
+  - **Tests**: `web/src/sys.rs` forks children that enter the sandbox: the worker's calls work; `open`, `openat`,
+    `socket`, `clone`, an executable `mmap`, `fcntl(F_DUPFD)` and an x32 call each kill the child with SIGSYS.
+    `web/tests/listener.rs` checks a real worker's `/proc/<pid>/status` (`Seccomp: 2`, `NoNewPrivs: 1`) and
+    `/proc/<pid>/limits`. `common/src/spawn.rs` checks `without_capabilities`.
+  - **For step 9**: the signing channel is one more fd the worker reads and writes with calls already allowed
+    (`sendmsg`/`recvmsg`, `write`/`recvfrom`, `poll`). Keep its number at 7 or below (or raise `RLIMIT_NOFILE` in
+    `sandbox::limits`), and if the worker must build anything new from fd 7 (the certificate chain), do it before
+    `sandbox::enter`.
 
 ### 9. Keep the TLS key in the listener
 

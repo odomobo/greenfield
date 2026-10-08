@@ -254,8 +254,14 @@ fn listen(listener: TcpListener, settings: &Settings) -> ! {
                 }
                 alive
             });
-            // (reap them)
-            while let Ok(Some(_)) = common_sys::wait_child(-1, false) {}
+            // (reap them; one killed by a signal is a crash, or its sandbox stopped it: SIGSYS)
+            while let Ok(Some((_, status))) = common_sys::wait_child(-1, false) {
+                if libc::WIFSIGNALED(status) {
+                    let sandbox = libc::WTERMSIG(status) == libc::SIGSYS;
+                    let why = if sandbox { " (a system call its sandbox forbids)" } else { "" };
+                    warn(format!("A worker ended with {}{why}.", common_sys::describe_status(status)));
+                }
+            }
         }
         if fds[0].revents == 0 {
             continue;

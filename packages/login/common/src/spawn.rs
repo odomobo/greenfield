@@ -40,6 +40,12 @@ pub fn spawn_as(
     child
 }
 
+/// Have `command`'s process start without capabilities it could ever use or pass on, and with no_new_privs (see
+/// `sys::drop_capabilities_for_good`): for the web front. (Runs before `spawn_as` changes the user.)
+pub fn without_capabilities(command: &mut Command) -> &mut Command {
+    unsafe { command.pre_exec(sys::drop_capabilities_for_good) }
+}
+
 /// As a child's parent (a desktop's): wait for it to exit, passing SIGTERM / SIGINT on to it. Its exit status.
 pub fn wait_passing_terminate(pid: libc::pid_t) -> io::Result<libc::c_int> {
     sys::catch_terminate()?;
@@ -53,5 +59,22 @@ pub fn wait_passing_terminate(pid: libc::pid_t) -> io::Result<libc::c_int> {
             passed_on = true;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_process_without_capabilities_has_no_new_privs() {
+        let mut command = Command::new("cat");
+        command.arg("/proc/self/status");
+        let output = without_capabilities(&mut command).output().unwrap();
+        let status = String::from_utf8(output.stdout).unwrap();
+        let field = |name: &str| status.lines().find_map(|line| line.strip_prefix(name)).map(str::trim).unwrap_or("");
+        assert_eq!(field("NoNewPrivs:"), "1");
+        assert_eq!(field("CapInh:"), "0000000000000000");
+        assert_eq!(field("CapAmb:"), "0000000000000000");
     }
 }

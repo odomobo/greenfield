@@ -25,12 +25,15 @@
 //!   --allowed-origin <origin>              additionally accepted WebSocket Origin (repeatable)
 //! ```
 //!
-//! The worker is started with PR_SET_PDEATHSIG = SIGTERM (it ends with the listener).
+//! The worker is started with PR_SET_PDEATHSIG = SIGTERM (it ends with the listener). Once set up it sandboxes
+//! itself (sandbox.rs); its RLIMIT_NOFILE allows fds 0–7 only, so a new fd for workers must be numbered 7 or below
+//! (or the limit raised there).
 pub mod assets;
 pub mod conn;
 pub mod helper;
 pub mod http;
 pub mod limits;
+pub mod sandbox;
 pub mod sys;
 pub mod tls;
 pub mod websocket;

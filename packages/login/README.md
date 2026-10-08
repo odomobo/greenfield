@@ -29,7 +29,11 @@ The programs that sign users in and connect their browser to their desktop (see
   HTTP/1.1 (GET/HEAD of the page and its files, the security headers, `src/http.rs`), the WebSocket upgrade with the
   Origin check, the sign-in frames (`src/websocket.rs`) translated to and from login records, and then relays the raw
   WebSocket bytes to the desktop. The fds and arguments a worker gets are documented in `src/lib.rs`, the page
-  bundle's layout in `src/assets.rs`. All its unsafe code is in `src/sys.rs` (memfds, mmap, poll, socket options).
+  bundle's layout in `src/assets.rs`. Once set up, the worker enters its sandbox (`src/sandbox.rs`): rlimits (no
+  processes, 8 fds, bounded memory), no_new_privs and a seccomp allowlist (reading, writing and polling its fds,
+  memory, random numbers, exiting; anything else kills it with SIGSYS, which the listener logs). The helpers start
+  `nebula-web` with no inheritable or ambient capabilities and no_new_privs. All its unsafe code is in `src/sys.rs`
+  (memfds, mmap, poll, socket options, the sandbox's system calls).
 - `pam/nebula`: the PAM service file, installed as `/etc/pam.d/nebula`.
 
 Build: `yarn build` (here or at the root) runs `cargo build --release --locked`; `scripts/test-gateway.sh` builds it
@@ -113,10 +117,10 @@ systemd stays optional: without it `nebula-login` binds `--bind-ip` / `--bind-po
   `ProtectSystem` for it, but the front is started by the helper, not by systemd, so those can't apply to it without
   also applying to the desktops. It is hardened where it is started and in itself: an unprivileged user (groups,
   gid, uid dropped and verified), a cleared environment, `PR_SET_PDEATHSIG`, only the listening socket and
-  `login.sock` access, non-dumpable workers (step 6); the sandbox of step 8 (`no_new_privs`, seccomp, no filesystem
-  access, rlimits) is applied by the workers themselves, and is where `NoNewPrivileges` and an empty capability set
-  for the front belong. Dropping the helper's inheritable/ambient caps for the front when it starts it can go with
-  that step.
+  `login.sock` access, non-dumpable workers (step 6); the helper clears the inheritable and ambient capabilities and
+  sets `no_new_privs` when it starts the front (`spawn::without_capabilities`; the drop to the web user clears the
+  other sets), and the workers sandbox themselves (step 8: seccomp, no filesystem access, rlimits,
+  `web/src/sandbox.rs`).
 
 ## Per-IP backoff
 

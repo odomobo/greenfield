@@ -36,7 +36,7 @@ use attempt::{Host, Limits};
 use nebula_login_common::backoff::{self, Policy, Report, Table};
 use nebula_login_common::desktop;
 use nebula_login_common::session_config::{session_config, SESSION_CONFIG_FD, SESSION_LISTEN_FD};
-use nebula_login_common::spawn::{spawn_as, wait_passing_terminate};
+use nebula_login_common::spawn::{spawn_as, wait_passing_terminate, without_capabilities};
 use nebula_login_common::web::{web_binary, web_command, WEB_LISTEN_FD};
 use nebula_login_common::{log, sys};
 use relay::Relay;
@@ -272,6 +272,8 @@ fn start_web(config: &Config, listener: TcpListener) -> io::Result<std::process:
         .env("PATH", SESSION_PATH)
         .env("LANG", &config.lang)
         .stdin(Stdio::null());
+    // no capabilities it could pass on, no_new_privs (the workers add their sandbox, web/src/sandbox.rs)
+    without_capabilities(&mut command);
     let mut credentials = sys::Credentials::of(&config.web)?;
     credentials.dir = c"/".to_owned();
     spawn_as(&mut command, vec![(OwnedFd::from(listener), WEB_LISTEN_FD)], Some(credentials), Some(libc::SIGTERM))

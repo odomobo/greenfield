@@ -1,5 +1,6 @@
 //! The system calls the web front needs beyond nebula_login_common::sys: sealed memfds and read-only mappings of them,
-//! polling many fds, socket tuning, not being dumpable. Everything unsafe in this crate is in this module.
+//! polling many fds, socket tuning, not being dumpable, the worker's sandbox (no_new_privs, rlimits, installing a
+//! seccomp filter; the filter itself is built in sandbox.rs). Everything unsafe in this crate is in this module.
 use std::ffi::CStr;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -111,6 +112,18 @@ pub fn tune_tcp(fd: RawFd, not_sent_low_water: libc::c_int) -> io::Result<()> {
     set_int_option(fd, libc::IPPROTO_TCP, libc::TCP_NOTSENT_LOWAT, not_sent_low_water)
 }
 
+/// Notice a browser that is gone without closing its connection (a dropped network, a suspended laptop) even when
+/// nothing is being sent: TCP keepalive probes after `idle`, every `interval`, and the connection fails once data or
+/// probes go unacknowledged for `give_up` (TCP_USER_TIMEOUT). Then the worker's next read, write or poll fails.
+pub fn tcp_keep_alive(fd: RawFd, idle: Duration, interval: Duration, give_up: Duration) -> io::Result<()> {
+    let seconds = |duration: Duration| duration.as_secs().clamp(1, i32::MAX as u64) as libc::c_int;
+    set_int_option(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1)?;
+    set_int_option(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, seconds(idle))?;
+    set_int_option(fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, seconds(interval))?;
+    let give_up = give_up.as_millis().min(i32::MAX as u128) as libc::c_int;
+    set_int_option(fd, libc::IPPROTO_TCP, libc::TCP_USER_TIMEOUT, give_up)
+}
+
 /// poll(2) on `fds`: how many have events. `None` waits forever. Interrupted by a signal: Ok(0).
 pub fn poll(fds: &mut [libc::pollfd], timeout: Option<Duration>) -> io::Result<usize> {
     let millis = match timeout {
@@ -147,6 +160,29 @@ pub fn random_bytes(buffer: &mut [u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Set no_new_privs: no exec can grant privileges any more (setuid bits, file capabilities), for this process and
+/// everything it starts; a seccomp filter can then be installed without CAP_SYS_ADMIN. Can't be undone.
+pub fn set_no_new_privs() -> io::Result<()> {
+    check(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }).map(|_| ())
+}
+
+/// Set both the soft and the hard limit of `resource` to `value` (lowering the hard limit can't be undone without
+/// CAP_SYS_RESOURCE).
+pub fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> io::Result<()> {
+    let limit = libc::rlimit { rlim_cur: value as libc::rlim_t, rlim_max: value as libc::rlim_t };
+    check(unsafe { libc::setrlimit(resource, &limit) }).map(|_| ())
+}
+
+/// Install the seccomp-BPF filter `program` for this process (single-threaded: no TSYNC needed). Needs no_new_privs
+/// (`set_no_new_privs`). Filters can't be removed, and every later one is applied too.
+pub fn install_seccomp_filter(program: &[libc::sock_filter]) -> io::Result<()> {
+    let length = libc::c_ushort::try_from(program.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the filter is too long"))?;
+    let program = libc::sock_fprog { len: length, filter: program.as_ptr() as *mut libc::sock_filter };
+    let mode = libc::SECCOMP_MODE_FILTER as libc::c_ulong;
+    check(unsafe { libc::prctl(libc::PR_SET_SECCOMP, mode, &program as *const libc::sock_fprog) }).map(|_| ())
+}
+
 /// This machine's host name.
 pub fn hostname() -> String {
     let mut buffer = [0u8; 256];
@@ -170,6 +206,78 @@ mod tests {
         let mut file = std::fs::File::from(fd.try_clone().unwrap());
         assert!(file.write_all(b"x").is_err());
         assert!(file.set_len(1).is_err());
+    }
+
+    /// How a forked child that entered the worker's sandbox and then ran `body` ended (its exit code is `body`'s
+    /// result). The child makes only system calls: the test harness has other threads (malloc's lock may be held).
+    fn sandboxed(body: fn() -> i32) -> libc::c_int {
+        let program = crate::sandbox::filter(crate::sandbox::ALLOWED).unwrap();
+        // (the address space limit as if the worker had mapped 1 TiB: the test process with its threads is larger)
+        let limits = crate::sandbox::limits(1 << 40);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let code = if crate::sandbox::apply(&program, &limits).is_ok() { body() } else { 99 };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        status
+    }
+
+    fn anonymous_mapping(protection: libc::c_int) -> *mut libc::c_void {
+        let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+        unsafe { libc::mmap(std::ptr::null_mut(), 4096, protection, flags, -1, 0) }
+    }
+
+    fn exited(status: libc::c_int) -> Option<libc::c_int> {
+        libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status))
+    }
+
+    fn killed_by_the_filter(status: libc::c_int) -> bool {
+        libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGSYS
+    }
+
+    #[test]
+    fn the_sandbox_allows_what_the_worker_does() {
+        let status = sandboxed(|| {
+            let mut random = [0u8; 16];
+            let mut entry = libc::pollfd { fd: 1, events: libc::POLLOUT, revents: 0 };
+            let ok = unsafe {
+                libc::getrandom(random.as_mut_ptr().cast(), random.len(), 0) == 16
+                    && libc::poll(&mut entry, 1, 0) >= 0
+                    && libc::write(2, c"".as_ptr().cast(), 0) == 0
+                    && libc::fcntl(1, libc::F_GETFL) >= 0
+                    && anonymous_mapping(libc::PROT_READ | libc::PROT_WRITE) != libc::MAP_FAILED
+            };
+            if ok { 0 } else { 1 }
+        });
+        assert_eq!(exited(status), Some(0), "status {status}");
+    }
+
+    #[test]
+    fn the_sandbox_kills_a_worker_that_opens_a_file() {
+        assert!(killed_by_the_filter(sandboxed(|| unsafe { libc::open(c"/etc/hostname".as_ptr(), libc::O_RDONLY) })));
+        assert!(killed_by_the_filter(sandboxed(|| unsafe {
+            libc::syscall(libc::SYS_openat, libc::AT_FDCWD, c"/etc/hostname".as_ptr(), libc::O_RDONLY) as i32
+        })));
+    }
+
+    #[test]
+    fn the_sandbox_kills_a_worker_that_does_anything_else() {
+        // a new socket, a process, executable memory, a duplicated fd, a call through the x32 ABI (x86_64)
+        let forbidden: &[fn() -> i32] = &[
+            || unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) },
+            || unsafe { libc::syscall(libc::SYS_clone, libc::SIGCHLD, 0, 0, 0, 0) as i32 },
+            || anonymous_mapping(libc::PROT_READ | libc::PROT_EXEC) as usize as i32,
+            || unsafe { libc::fcntl(1, libc::F_DUPFD, 0) },
+            #[cfg(target_arch = "x86_64")]
+            || unsafe { libc::syscall(libc::SYS_getpid | 0x4000_0000) as i32 },
+        ];
+        for (i, &body) in forbidden.iter().enumerate() {
+            let status = sandboxed(body);
+            assert!(killed_by_the_filter(status), "forbidden call {i}: status {status}");
+        }
     }
 
     #[test]

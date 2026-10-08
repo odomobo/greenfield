@@ -1,6 +1,6 @@
 //! The listener and its workers as processes: a worker per connection, the client's address written to the helper
-//! first, workers not dumpable, and a worker's exit closing its helper connection. (The sign-in and the relay are
-//! covered end to end by scripts/e2e: auth.sh and desktop.sh.) Needs curl and openssl.
+//! first, workers not dumpable and sandboxed, and a worker's exit closing its helper connection. (The sign-in and the
+//! relay are covered end to end by scripts/e2e: auth.sh and desktop.sh.) Needs curl and openssl.
 use nebula_login_common::spawn::spawn_with_fds;
 use nebula_login_protocol::{decode, Record};
 use std::io::{ErrorKind, Read};
@@ -71,11 +71,15 @@ fn curl(port: u16, path: &str) -> (String, String) {
     (status.to_string(), body.to_string())
 }
 
+/// The listener's workers (not, say, the openssl it runs to make a certificate first).
 fn children(pid: u32) -> Vec<u32> {
     std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
         .unwrap_or_default()
         .split_whitespace()
         .filter_map(|pid| pid.parse().ok())
+        .filter(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|comm| comm.trim() == "nebula-web-work")
+        })
         .collect()
 }
 
@@ -127,6 +131,36 @@ fn workers_are_not_dumpable() {
     wait_until("the worker to be not dumpable", || {
         matches!(std::fs::read(format!("/proc/{worker}/environ")), Err(e) if e.kind() == ErrorKind::PermissionDenied)
     });
+    drop(connection);
+    wait_until("the worker to exit", || !Path::new(&format!("/proc/{worker}")).exists() || is_zombie(worker));
+}
+
+#[test]
+fn workers_are_sandboxed() {
+    let (listener, _helper) = start("sandbox");
+    let connection = loop {
+        if let Ok(connection) = TcpStream::connect(("127.0.0.1", listener.port)) {
+            break connection;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut worker = 0;
+    wait_until("a worker", || {
+        worker = children(listener.child.id()).first().copied().unwrap_or(0);
+        worker != 0
+    });
+    // (both files are readable although the worker is not dumpable) seccomp filter mode, no_new_privs, the rlimits
+    let field = |file: &str, name: &str| {
+        let text = std::fs::read_to_string(format!("/proc/{worker}/{file}")).unwrap_or_default();
+        let line = text.lines().find(|line| line.starts_with(name)).unwrap_or_default().to_string();
+        line[name.len().min(line.len())..].split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    wait_until("the worker's sandbox", || field("status", "Seccomp:") == "2");
+    assert_eq!(field("status", "NoNewPrivs:"), "1");
+    assert_eq!(field("limits", "Max open files"), "8 8 files");
+    assert_eq!(field("limits", "Max processes"), "0 0 processes");
+    assert_eq!(field("limits", "Max core file size"), "0 0 bytes");
+    // (the forbidden calls themselves: the sandbox tests in src/sys.rs)
     drop(connection);
     wait_until("the worker to exit", || !Path::new(&format!("/proc/{worker}")).exists() || is_zombie(worker));
 }

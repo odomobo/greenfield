@@ -199,6 +199,46 @@ pub fn child_setup(
     Ok(())
 }
 
+#[repr(C)]
+struct CapabilityHeader {
+    version: u32,
+    pid: libc::c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CapabilityData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+/// _LINUX_CAPABILITY_VERSION_3: two CapabilityData (capabilities 0–31 and 32–63)
+const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+/// For `pre_exec` (async-signal-safe), for a process that must never hold or pass on a capability (the web front):
+/// clear the inheritable and ambient capability sets and set no_new_privs, so nothing it execs can gain privileges
+/// (setuid programs, file capabilities). A drop from root to another user (`become_user`) already clears the
+/// permitted, effective and ambient sets, but not the inheritable one; a helper started without root normally has
+/// none of them, and this changes nothing then.
+pub fn drop_capabilities_for_good() -> io::Result<()> {
+    let mut header = CapabilityHeader { version: CAPABILITY_VERSION_3, pid: 0 };
+    let mut data = [CapabilityData::default(); 2];
+    check(unsafe { libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) } as libc::c_int)?;
+    if data.iter().any(|set| set.inheritable != 0) {
+        for set in &mut data {
+            set.inheritable = 0;
+        }
+        check(unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_ptr()) } as libc::c_int)?;
+    }
+    // (EINVAL: a kernel before 4.3, without ambient capabilities)
+    let cleared = unsafe { libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) };
+    if cleared < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINVAL) {
+        return Err(io::Error::last_os_error());
+    }
+    check(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }).map(|_| ())
+}
+
 /// Have `signal` sent to this process when its parent dies (fails if the parent `expected_parent` is gone already).
 pub fn set_parent_death_signal(signal: libc::c_int, expected_parent: libc::pid_t) -> io::Result<()> {
     child_setup(&[], None, Some(signal), expected_parent)

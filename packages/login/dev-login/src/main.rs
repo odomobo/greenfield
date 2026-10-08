@@ -24,7 +24,7 @@
 use nebula_login_common::backoff::{self, Policy, Report, Table};
 use nebula_login_common::desktop::{self, Desktop};
 use nebula_login_common::session_config::{self, json_string, SESSION_CONFIG_FD, SESSION_LISTEN_FD};
-use nebula_login_common::spawn::{spawn_with_fds, wait_passing_terminate};
+use nebula_login_common::spawn::{spawn_with_fds, wait_passing_terminate, without_capabilities};
 use nebula_login_common::web::{web_binary, web_command, WEB_LISTEN_FD};
 use nebula_login_common::{channel::Channel, log, sys};
 use nebula_login_protocol::{is_loopback, Outcome, PromptStyle, Record};
@@ -293,6 +293,8 @@ fn start_web(config: &Config, listener: TcpListener) -> io::Result<std::process:
         .env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()))
         .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into()))
         .stdin(Stdio::null());
+    // no capabilities it could pass on, no_new_privs (the workers add their sandbox, web/src/sandbox.rs)
+    without_capabilities(&mut command);
     spawn_with_fds(&mut command, vec![(OwnedFd::from(listener), WEB_LISTEN_FD)], Some(libc::SIGTERM))
 }
 
