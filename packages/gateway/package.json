@@ -1,7 +1,7 @@
 {
   "name": "@gfld/gateway",
   "version": "0.1.0",
-  "description": "The web process (TLS, the page, the sign-in relay) and the per-user desktop session process.",
+  "description": "The per-user desktop session process, and the static files of the page (served by the Rust web front in packages/login).",
   "type": "commonjs",
   "private": true,
   "engines": {

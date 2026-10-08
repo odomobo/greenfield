@@ -1,9 +1,9 @@
 /**
  * Unix sockets with fd passing (native/poll/src/fd_passing.c), importable without loading the rest of the proxy: the
- * gateway's web process and its sessions talk to the login helpers with them, which hand over connections as fds
- * (see packages/login). Node's own sockets can't pass fds, so these work on raw fds: wait for readability with
- * `startPoll`, read with `receiveWithFds`, and wrap a received connection in a `net.Socket({ fd })`. Also
- * `setNotDumpable`, which the web workers call so they can't inspect each other.
+ * gateway's sessions receive the connections a login helper hands over as fds with them (see packages/login).
+ * Node's own sockets can't pass fds, so these work on raw fds: wait for readability with `startPoll`, read with
+ * `receiveWithFds`, and wrap a received connection in a `net.Socket({ fd })`. (`unixConnect` and `sendWithFd` are the
+ * other side, for tests.)
  */
 import pollAddon from './addons/proxy-poll-addon'
 
@@ -18,5 +18,4 @@ export const {
   receiveWithFds,
   setCloseOnExec,
   closeFd,
-  setNotDumpable,
 } = pollAddon

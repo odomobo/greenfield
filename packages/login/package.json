@@ -1,7 +1,7 @@
 {
   "name": "@gfld/login",
   "version": "0.1.0",
-  "description": "The login helpers (Rust): the protocol, the production login helper nebula-login (PAM) and the dev login helper nebula-dev-login.",
+  "description": "The login helpers and the web front (Rust): the protocol, the production login helper nebula-login (PAM), the dev login helper nebula-dev-login, and the web listener and workers nebula-web.",
   "private": true,
   "os": [
     "linux"

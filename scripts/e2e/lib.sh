@@ -11,7 +11,7 @@ PASSWORD="test-password-$$"
 ME="$(id -un)"
 WORK="$(mktemp -d)"
 # "The gateway" here is the dev login helper (packages/login: nebula-dev-login), the dev entry point: it binds the port,
-# starts the web process and the desktops. It runs with --dev-time-scale: its failed-sign-in delay (3 s) is divided by
+# starts the web front (nebula-web, its listener) and the desktops. It runs with --dev-time-scale: its failed-sign-in delay (3 s) is divided by
 # this (and so is the time the desktops give their apps to quit at logout, 5 s). Everything the tests wait for is
 # derived from it.
 LOGIN_HELPER="$REPO/packages/login/target/release/nebula-dev-login"
@@ -67,7 +67,7 @@ require_tools() {
   for tool in "$@"; do
     command -v "$tool" >/dev/null || fail "$tool is not installed"
   done
-  [ -f "$REPO/packages/gateway/dist/web.js" ] || fail "build the gateway first: (cd packages/gateway && yarn build)"
+  [ -f "$REPO/packages/gateway/dist/session-process.js" ] || fail "build the gateway first: (cd packages/gateway && yarn build)"
   [ -x "$LOGIN_HELPER" ] || fail "build the login helpers first: (cd packages/login && yarn build)"
   [ -f "$REPO/packages/viewer/dist/index.html" ] || fail "build the viewer first: (cd packages/viewer && yarn build)"
 }

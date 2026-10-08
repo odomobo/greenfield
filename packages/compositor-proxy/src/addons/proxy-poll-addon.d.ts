@@ -37,9 +37,6 @@ declare namespace nodePoll {
 
   /** close(2): 0 or -errno. */
   export function closeFd(fd: number): number
-
-  /** PR_SET_DUMPABLE 0 for the calling process (no core dumps, no ptrace or /proc access by the same user): 0 or -errno. */
-  export function setNotDumpable(): number
 }
 
 export = nodePoll

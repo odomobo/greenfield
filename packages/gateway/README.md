@@ -11,12 +11,14 @@ nebula-login               root, Rust (std, libc, libpam). Binds the port. Never
 │                          web process's connections on /run/nebula/login.sock (only from the web user, SO_PEERCRED;
 │                          the login protocol: client address, Begin, Prompt/Answer, Result), at most 256 at a time,
 │                          one forked child per connection.
-├── nebula-web             the listener (web.js), as the web user (--web-user, default nebula-web), started with the
-│   │                      listening socket (fd 3) and where login.sock is. Never reads network data: opens a
-│   │                      login.sock connection per TCP connection, writes the client's address, starts a worker.
-│   └── nebula-web-worker  one per TCP connection, as the web user: TLS, the page, Origin checks, viewer files;
-│                          relays the helper's prompts (PAM's) to the page and, once signed in, the WebSocket over
-│                          the connection the Result carried.
+├── nebula-web             the listener (Rust, packages/login/web), as the web user (--web-user, default nebula-web),
+│   │                      started with the listening socket (fd 3) and where login.sock is. Never reads network
+│   │                      data: opens a login.sock connection per TCP connection, writes the client's address,
+│   │                      starts a worker (fork + exec).
+│   └── nebula-web-worker  one per TCP connection, as the web user, not dumpable: TLS 1.3 (rustls), the page and its
+│                          files (from a sealed memfd the listener filled), Origin checks; relays the helper's prompts
+│                          (PAM's) to the page and, once signed in, the WebSocket over the connection the Result
+│                          carried.
 └── sign-in child          root. One PAM handle (service "nebula"): pam_authenticate + pam_acct_mgmt with PAM's
     │                      prompts relayed to the page, PAM_RHOST = the client's IP; refuses root. Then attaches to
     │                      the user's running desktop (users/<uid>/desktop.sock) or opens the PAM session on the same
@@ -37,13 +39,14 @@ PAM or privileges, everything as the current user):
 nebula-dev-login           the current user (never root). Binds the port, owns the --dev-* options. Accepts
 │                          connections on <runtime>/login.sock (the login protocol: client address, Begin,
 │                          Prompt/Answer, Result), one forked child per connection.
-├── nebula-web             the listener (web.js), started with the listening socket (fd 3) and where login.sock is.
-│   │                      Never reads network data: accepts each TCP connection paused (caps: 256 in all, 32 per IP),
-│   │                      opens a login.sock connection for it and writes the client's address, and starts a worker
-│   │                      with both. Holds the TLS key and the per-IP throttle of failed sign-ins.
-│   └── nebula-web-worker  one per TCP connection (web-worker.js), not dumpable, exits when its connection closes.
-│                          TLS, the page, Origin checks, viewer files; relays the helper's prompts to the page and,
-│                          once signed in, the WebSocket over the connection the Result carried.
+├── nebula-web             the listener (Rust, packages/login/web), started with the listening socket (fd 3) and
+│   │                      where login.sock is. Never reads network data: accepts each TCP connection (caps: 256 in
+│   │                      all, 32 per IP), opens a login.sock connection for it and writes the client's address,
+│   │                      and starts a worker with both (fork + exec). Loads the TLS key and the page once, into
+│   │                      sealed memfds the workers map; holds the per-IP throttle of failed sign-ins.
+│   └── nebula-web-worker  one per TCP connection, not dumpable, exits when its connection closes. TLS 1.3 (rustls),
+│                          the page and its files, Origin checks; relays the helper's prompts to the page and, once
+│                          signed in, the WebSocket over the connection the Result carried.
 └── sign-in child          checks the password, then attaches to or starts the user's desktop: flock on
     │                      <runtime>/users/<uid>/lock, connect to desktop.sock; if nothing listens, bind it and start
     │                      the desktop with the listening socket inherited. Hands it the connection (a socket pair end
@@ -75,8 +78,9 @@ yarn install
 yarn build
 ```
 
-The login helpers (`packages/login`) are Rust: install a Rust toolchain with `cargo` (e.g. rustup; std and the
-`libc` crate only). `yarn build` runs `cargo build --release` there.
+The login helpers and the web front (`packages/login`) are Rust: install a Rust toolchain with `cargo` (e.g. rustup)
+and a C compiler (the front's crypto, ring, has some C). The helpers use std and the `libc` crate only; the front adds
+rustls and ring (fetched from crates.io, pinned in `Cargo.lock`). `yarn build` runs `cargo build --release` there.
 
 `clang` and `lld` build the viewer's WebAssembly patch decoder (`wasm-ld`, or `wasm-ld-18`, or `$WASM_LD`; the build says
 "install lld (apt install lld)" if it is missing).
@@ -134,7 +138,9 @@ Options (`--help` lists everything): `--bind-ip` / `--bind-port`, `--cert/--key`
 the web user; default: a self-signed one in `--state-dir`, default `/var/lib/nebula`, which the helper creates for the
 web user and refuses if it belongs to someone else), `--hide-hostname`, `--allowed-origin` (behind a reverse proxy),
 `--web-user` (default `nebula-web`), `--runtime-dir` (default `/run/nebula`), `--gateway-dir` (default: the built
-`packages/gateway/dist` next to the binary), `--node` (default: `node` from `PATH`), and the site settings below.
+`packages/gateway/dist` next to the binary; the page is read from `../static` and `../../viewer/dist` next to it),
+`--node` (default: `node` from `PATH`), and the site settings below. The web front (`nebula-web`,
+`nebula-web-worker`) is next to `nebula-login` in `packages/login/target/release`.
 
 The PAM service is `nebula` (`/etc/pam.d/nebula`; without it PAM falls back to `other`). Whatever is configured there
 runs on one handle per sign-in: the page shows PAM's prompts (a second hidden prompt, e.g. a one-time code, gets a

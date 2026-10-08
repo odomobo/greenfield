@@ -200,7 +200,6 @@ napi_value fd_send_with_fd(napi_env env, napi_callback_info info);
 napi_value fd_receive_with_fds(napi_env env, napi_callback_info info);
 napi_value fd_set_close_on_exec(napi_env env, napi_callback_info info);
 napi_value fd_close(napi_env env, napi_callback_info info);
-napi_value fd_set_not_dumpable(napi_env env, napi_callback_info info);
 
 static napi_value
 init(napi_env env, napi_value exports) {
@@ -216,7 +215,6 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("receiveWithFds", fd_receive_with_fds),
             DECLARE_NAPI_METHOD("setCloseOnExec", fd_set_close_on_exec),
             DECLARE_NAPI_METHOD("closeFd", fd_close),
-            DECLARE_NAPI_METHOD("setNotDumpable", fd_set_not_dumpable),
     };
 
     NAPI_CALL(env, napi_define_properties(env, exports, sizeof(desc) / sizeof(napi_property_descriptor), desc))

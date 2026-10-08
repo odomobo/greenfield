@@ -480,8 +480,9 @@ state, on any link speed and latency, without starving throughput on fast high-l
 
 What exists today: TCP's own backpressure keeps every queue bounded, so nothing runs away or disconnects. The
 transport hands one data message at a time to the socket; `TCP_NOTSENT_LOWAT` is 32 KB on direct TCP; the session's
-Unix socket to the gateway has a 32 KB send buffer; the gateway relays with `pipe()` (backpressure) and sets
-`TCP_NOTSENT_LOWAT` on the browser's socket (`gateway/src/web.ts`). But those bounds are in bytes, not time
+Unix socket to the gateway has a 32 KB send buffer; the web worker relays with backpressure (it reads from the
+desktop only once TLS has sent everything, at most 64 KB at a time) and sets `TCP_NOTSENT_LOWAT` on the browser's socket
+(`packages/login/web/src/bin/worker.rs`). But those bounds are in bytes, not time
 (about 150 KB in all: ~120 ms at 10 Mbit/s), and the kernel's usual congestion control (cubic) keeps filling the
 router buffer at the bottleneck until packets drop (bufferbloat: often hundreds of milliseconds). A reverse proxy in
 front of the gateway would add its own buffer. And the browser's WebSocket API has no backpressure at all: the

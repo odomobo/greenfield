@@ -1,12 +1,11 @@
-// Unix sockets with fd passing, for the gateway (its web process and its sessions talk to the login helpers, which
-// hand them connections as fds: see packages/login). Node's own sockets can't send or receive fds, so these work on
+// Unix sockets with fd passing, for the gateway (its sessions talk to the login helpers, which hand them connections
+// as fds: see packages/login). Node's own sockets can't send or receive fds, so these work on
 // raw fds; the caller waits for readability with startPoll (poll.c) and wraps a received connection in a net.Socket.
 // All sockets made here are non-blocking and close-on-exec. Errors are returned as -errno, never thrown.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
-#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -211,13 +210,4 @@ fd_close(napi_env env, napi_callback_info info) {
         return int_value(env, -EINVAL);
     }
     return int_value(env, close(fd) < 0 ? -errno : 0);
-}
-
-// setNotDumpable(): number. Marks the calling process as not dumpable (PR_SET_DUMPABLE 0): no core dumps, and other
-// processes of the same user can't ptrace it or read its memory, environment or fds under /proc. The gateway's
-// per-connection web workers call it first thing, so they can't inspect each other. 0, or -errno.
-napi_value
-fd_set_not_dumpable(napi_env env, napi_callback_info info) {
-    (void) info;
-    return int_value(env, prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) < 0 ? -errno : 0);
 }

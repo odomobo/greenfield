@@ -6,8 +6,8 @@
 //! options (they go to the desktops in SessionConfig.devFlags; the web process takes none).
 //!
 //! What it does:
-//!   - binds the TCP port and starts the web process (`node web.js`, the listener) with the listening socket as fd 3,
-//!     telling it where `login.sock` is;
+//!   - binds the TCP port and starts the web front (`nebula-web`, the listener, next to this binary) with the
+//!     listening socket as fd 3, telling it where `login.sock` is;
 //!   - accepts the web process's connections on `<runtime>/login.sock` (the listener opens one for every TCP
 //!     connection and hands it to that connection's worker) and forks a child for each, which reads the client's
 //!     address (from the listener) and the user name (from the worker; a connection that never becomes a sign-in just
@@ -18,6 +18,7 @@
 use nebula_login_common::desktop::{self, Desktop};
 use nebula_login_common::session_config::{self, json_string, SESSION_CONFIG_FD, SESSION_LISTEN_FD};
 use nebula_login_common::spawn::{spawn_with_fds, wait_passing_terminate};
+use nebula_login_common::web::{web_binary, web_command, WEB_LISTEN_FD};
 use nebula_login_common::{channel::Channel, log, sys};
 use nebula_login_protocol::{is_loopback, Outcome, PromptStyle, Record};
 use std::fs;
@@ -39,9 +40,9 @@ from $GREENFIELD_DEV_PASSWORD (at least 8 characters). Loopback only; refuses to
   --bind-port <port>         port to listen on (default 8443)
   --runtime-dir <dir>        login.sock and the desktops' users/<uid>/ directories
                              (default $XDG_RUNTIME_DIR/nebula-dev-<port>)
-  --gateway-dir <dir>        the built gateway: web.js, session-process.js (default: packages/gateway/dist next to
-                             this binary's packages/login)
-  --node <path>              the node to run them with (default: node from PATH)
+  --gateway-dir <dir>        the built gateway: session-process.js, and the page in ../static and ../../viewer/dist
+                             (default: packages/gateway/dist next to this binary's packages/login)
+  --node <path>              the node to run the desktops with (default: node from PATH)
   --site-config <file>       site settings file the desktops read (default /etc/nebula/nebula.conf)
   --encoder <auto|none|nvh264|vaapih264>
                              video encoder, overriding the site settings file
@@ -66,8 +67,6 @@ const BEGIN_TIMEOUT: Duration = Duration::from_secs(10);
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(75);
 /// How long a stopping helper waits for its desktops (they give their apps 5 s to quit, then kill them).
 const DESKTOP_EXIT_TIMEOUT: Duration = Duration::from_secs(8);
-/// The web process's listening TCP socket.
-const WEB_LISTEN_FD: i32 = 3;
 const PASSWORD_VARIABLE: &str = "GREENFIELD_DEV_PASSWORD";
 
 struct Config {
@@ -75,6 +74,7 @@ struct Config {
     bind_port: u16,
     runtime_dir: PathBuf,
     gateway_dir: PathBuf,
+    web: PathBuf,
     node: PathBuf,
     site_config: Option<PathBuf>,
     encoder: Option<String>,
@@ -202,15 +202,17 @@ fn parse_config() -> Config {
         let exe = std::env::current_exe().unwrap_or_else(|e| fail(&format!("where am I? {e}")));
         exe.ancestors().nth(4).unwrap_or(Path::new("/")).join("gateway/dist")
     });
-    if !gateway_dir.join("web.js").is_file() || !gateway_dir.join("session-process.js").is_file() {
+    if !gateway_dir.join("session-process.js").is_file() {
         fail(&format!("no built gateway in {} (yarn build, or --gateway-dir)", gateway_dir.display()));
     }
+    let web = web_binary().unwrap_or_else(|e| fail(&format!("no web front: {e} (yarn build)")));
 
     Config {
         bind_ip,
         bind_port,
         runtime_dir: absolute(&runtime_dir),
         gateway_dir: absolute(&gateway_dir),
+        web,
         node: node.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("node")),
         site_config: site_config.map(|path| absolute(Path::new(&path))),
         encoder,
@@ -263,18 +265,12 @@ fn prepare_site_settings(config: &Config) -> io::Result<Option<PathBuf>> {
 }
 
 fn start_web(config: &Config, listener: TcpListener) -> io::Result<std::process::Child> {
-    let mut command = Command::new(&config.node);
+    let mut command = web_command(&config.web, &config.gateway_dir, &config.runtime_dir.join("login.sock"));
     command
-        .arg(config.gateway_dir.join("web.js"))
-        .arg("--listen-fd")
-        .arg(WEB_LISTEN_FD.to_string())
-        .arg("--login-socket")
-        .arg(config.runtime_dir.join("login.sock"))
         .args(&config.web_args)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()))
         .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into()))
-        .env("NODE_ENV", "production")
         .stdin(Stdio::null());
     spawn_with_fds(&mut command, vec![(OwnedFd::from(listener), WEB_LISTEN_FD)], Some(libc::SIGTERM))
 }

@@ -1,8 +1,8 @@
-# Login helpers
+# Login helpers and the web front
 
 The programs that sign users in and connect their browser to their desktop (see
-[SIGNIN-ROADMAP.md](../../SIGNIN-ROADMAP.md)). Rust, one Cargo workspace, std and the `libc` crate only (the
-production helper adds libpam):
+[SIGNIN-ROADMAP.md](../../SIGNIN-ROADMAP.md)). Rust, one Cargo workspace. The helpers use std and the `libc` crate only
+(the production helper adds libpam); the web front adds rustls and ring (TLS), pinned in `Cargo.lock`:
 
 - `protocol` (`nebula-login-protocol`, `#![forbid(unsafe_code)]`): the records on `login.sock` (web process ↔ helper)
   and `desktop.sock` (helper → desktop), with fixed layouts and hard length limits. The byte layout is documented in
@@ -19,6 +19,17 @@ production helper adds libpam):
   conversation relayed to the page (`relay.rs`), one sign-in attempt behind `Pam` / `Host` traits (`attempt.rs`, unit
   tested with fakes), startup and the accept loop (`main.rs`). See the header of `login/src/main.rs` and
   `nebula-login --help`; installing and running it is in [packages/gateway/README.md](../gateway/README.md).
+- `web` (`nebula-web`): the web front, unprivileged, the only network-facing code. Two binaries: the listener
+  `nebula-web` (`src/bin/listener.rs`) accepts TCP connections without reading them and starts a worker
+  `nebula-web-worker` (`src/bin/worker.rs`) for each with fork + exec. The listener opens the worker's `login.sock`
+  connection and writes the client's address, caps workers (256 in all, 32 per IP), throttles failed sign-ins per IP
+  (20 free, then doubling blocks up to 15 minutes; workers report refusals on a socket of their own), and loads the
+  TLS certificate and key (or generates a self-signed pair with openssl) and the page with its files once, each into a
+  sealed read-only memfd every worker maps. The worker (not dumpable) does TLS 1.3 (rustls with ring), a minimal
+  HTTP/1.1 (GET/HEAD of the page and its files, the security headers, `src/http.rs`), the WebSocket upgrade with the
+  Origin check, the sign-in frames (`src/websocket.rs`) translated to and from login records, and then relays the raw
+  WebSocket bytes to the desktop. The fds and arguments a worker gets are documented in `src/lib.rs`, the page
+  bundle's layout in `src/assets.rs`. All its unsafe code is in `src/sys.rs` (memfds, mmap, poll, socket options).
 - `pam/nebula`: the PAM service file, installed as `/etc/pam.d/nebula`.
 
 Build: `yarn build` (here or at the root) runs `cargo build --release --locked`; `scripts/test-gateway.sh` builds it
@@ -26,8 +37,8 @@ too. Tests: `yarn test` (`cargo test`).
 
 ## How a sign-in goes
 
-1. The helper binds the TCP port and starts the web process with the listening socket as fd 3 and
-   `--login-socket <runtime>/login.sock`.
+1. The helper binds the TCP port and starts the web front (`nebula-web`, next to the helper) with the listening socket
+   as fd 3, `--login-socket <runtime>/login.sock` and where the page is (`common/src/web.rs`).
 2. For each TCP connection the web listener connects to `login.sock`, writes `ClientAddress` (the accepted socket's
    peer address) and hands the connection to that TCP connection's worker, which writes `Begin` if the connection
    becomes a sign-in (the page's WebSocket). The helper forks a child for each connection; most never get a `Begin`
