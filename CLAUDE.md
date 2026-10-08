@@ -18,9 +18,9 @@
   own gateway, ports and browser; about 30 s) and prints how long each took, slowest first. **The whole parallel run
   must stay under one minute.** If it goes over (the runner prints "SLOW: ..."), the suite needs an optimization and
   refactoring pass, starting with the slowest scripts, before more checks are added.
-- Its gateways run with `--dev-auth --dev-time-scale 3`, which shortens the sign-in delays (test only); the browser is
-  driven by `scripts/e2e/browser-driver.js` rather than `playwright-cli` (which waits a fixed second after every
-  command). New e2e checks go into one of those scripts (or a new script added to the runner), and wait on conditions
+- Its gateways are the dev login helper (`nebula-dev-login`) run with `--dev-time-scale 3`, which shortens the sign-in
+  delays (test only); the browser is driven by `scripts/e2e/browser-driver.js` rather than `playwright-cli` (which
+  waits a fixed second after every command). New e2e checks go into one of those scripts (or a new script added to the runner), and wait on conditions
   with `wait_for` / `wait_until` from `scripts/e2e/lib.sh`, never fixed sleeps.
 - The scripts share the machine, so a check must not depend on how fast things happen (the suite was flaky until
   2026-10-05 from exactly this):
