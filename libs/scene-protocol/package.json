@@ -2,12 +2,10 @@
   "name": "@gfld/scene-protocol",
   "version": "0.1.0",
   "description": "Wire protocol between the browser viewer and a session (window scene, frames, control messages).",
-  "main": "dist-cjs/index.js",
   "module": "dist/index.js",
   "typings": "types/index.d.ts",
   "files": [
     "dist",
-    "dist-cjs",
     "types"
   ],
   "keywords": [
@@ -18,8 +16,8 @@
   ],
   "license": "AGPL-3.0-or-later",
   "scripts": {
-    "prebuild": "yarn run rimraf dist dist-cjs types",
-    "build": "yarn run tsc && yarn run tsc -p tsconfig.cjs.json"
+    "prebuild": "yarn run rimraf dist types",
+    "build": "yarn run tsc"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^7.14.1",

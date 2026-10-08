@@ -1,12 +1,11 @@
 {
   "workspaces": [
     "libs/*",
-    "packages/*"
+    "packages/compositor-proxy",
+    "packages/gateway",
+    "packages/viewer"
   ],
   "packageManager": "yarn@4.5.0",
-  "scripts": {
-    "build": "yarn workspaces foreach -A --parallel --topological-dev run build"
-  },
   "dependenciesMeta": {
     "usocket": {
       "built": false
