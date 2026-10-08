@@ -1,7 +1,6 @@
 # Login helpers and the web front
 
-The programs that sign users in and connect their browser to their desktop (see
-[SIGNIN-ROADMAP.md](../../SIGNIN-ROADMAP.md)). Rust, one Cargo workspace. The helpers use std and the `libc` crate only
+The programs that sign users in and connect their browser to their desktop. Rust, one Cargo workspace. The helpers use std and the `libc` crate only
 (the production helper adds libpam); the web front adds rustls and ring (TLS), pinned in `Cargo.lock`:
 
 - `protocol` (`nebula-login-protocol`, `#![forbid(unsafe_code)]`): the records on `login.sock` (web process ↔ helper)
@@ -142,7 +141,7 @@ the reports before it forks the next child, and the child decides with its copy 
 
 The web listener (`packages/gateway/src/web.ts`) still has its own per-IP limiter (20 free failures, then "Too many
 failed attempts" without contacting the helper). It is a cheap first line and duplicates this table; whether it stays
-is left to the Rust front (step 7 of SIGNIN-ROADMAP.md).
+is left to the Rust front.
 
 ## Per-account lockout: pam_faillock
 

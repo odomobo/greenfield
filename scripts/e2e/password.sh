@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end test of changing an expired password in the browser: the page's side of the conversation nebula-login
-# relays from pam_chauthtok (step 11 of SIGNIN-ROADMAP.md). Starts the gateway (the dev login helper, see lib.sh) with
+# relays from pam_chauthtok. Starts the gateway (the dev login helper, see lib.sh) with
 # --dev-expired-password, which makes every sign-in find the password expired and ask for a new one with pam_unix's
 # prompts and messages, then checks in a headless browser (scripts/e2e/browser-driver.js):
 #   1. after the form's password, the page shows the expiry notice and "Changing password for <user>." and asks for

@@ -15,27 +15,27 @@ This document records the design decisions made so far and the order of the rema
   (hit-testing, window placement, animations, the shell UI).
 - Sessions survive closing the browser. Sign in again and you're back where you left off.
 - Goal: snappy regardless of latency. An effective remote desktop, not bells and whistles.
-- Reuse the good parts of Greenfield (libwayland fork, GStreamer encoder, TS protocol implementation, WebGL renderer,
-  WebCodecs decoding). Drop what doesn't serve this goal (WASM apps, browser-as-Wayland-server, the unauthenticated
-  proxy CLI).
+- Started from Greenfield's codebase; the original protocol implementation, libwayland fork, WebGL renderer, WASM
+  apps and proxy CLI have all been replaced or removed.
 
 ## Architecture
 
-- **Session process** (one per desktop session, runs as the user): the Greenfield protocol implementation running in
-  Node on top of the libwayland fork, plus the GStreamer encoder. Apps connect to it like any Wayland compositor.
-  (The protocol implementation and libwayland fork are being replaced by wlroots, see Core item 1.)
+- **Login helpers and web front** (`packages/login`, Rust): privilege-separated sign-in. The production helper
+  (`nebula-login`, root) does PAM; the dev helper (`nebula-dev-login`) runs as the current user. The web front
+  (`nebula-web`) is a listener that forks a sandboxed worker per TCP connection for TLS, HTTP and WebSocket. See
+  `packages/login/README.md` and `packages/gateway/README.md` for the full process tree.
+- **Session process** (`packages/gateway`, one per desktop, runs as the user): the server side of a user's desktop.
+  Starts the compositor, the shell service (desktop entries, icons, notifications) and audio.
+- **Compositor** (`packages/compositor-proxy`): a Wayland compositor on wlroots (with XWayland), as a Node process
+  with C addons. Encodes frames (QOI/LZ4 patches, PNG, and lossy via GStreamer when bandwidth is short) and sends
+  them over the session's WebSocket.
 - **Viewer** (`packages/viewer`): the browser side. Receives a window-scene protocol (windows, positions, sizes,
-  frames) over one WebSocket, decodes frames (WebCodecs), shows each window as its own DOM element with a canvas per
-  surface (the browser composites), does all window management and draws the shell.
-- **Gateway** (`packages/gateway`): privilege-separated.
-  - Root monitor + a small C PAM helper for authentication and starting sessions (with `pam_systemd`/logind).
-  - Unprivileged web process (system user `greenfield`) serving the page and relaying connections to session processes
-    over Unix sockets.
+  frames) over one WebSocket, decodes frames (WebCodecs plus QOI/LZ4 patches in a worker), shows each window as its
+  own DOM element with a canvas per surface (the browser composites), does all window management and draws the shell.
 - **Transport**: a single WebSocket with a priority send queue (input/control before video), latest-wins frame
-  coalescing, one frame in flight per window, and small kernel send buffers (`TCP_NOTSENT_LOWAT`). It sits behind a
-  `ViewerTransport` interface so WebTransport can be added later if ever needed. Planned: priority classes and a
-  per-surface scheduler (see [Encoding policy](#encoding-policy)) and our own congestion control (see
-  [Transport and congestion control](#transport-and-congestion-control)).
+  coalescing, one frame in flight per window, and small kernel send buffers (`TCP_NOTSENT_LOWAT`), with a BBRv3-style
+  congestion controller. It sits behind a `ViewerTransport` interface so WebTransport can be added later if ever
+  needed. See [Encoding policy](#encoding-policy) and [Transport and congestion control](#transport-and-congestion-control).
 
 ## Security and sign-in
 
