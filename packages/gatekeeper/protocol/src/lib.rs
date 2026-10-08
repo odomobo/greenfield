@@ -1,5 +1,5 @@
 //! The login protocol: the records exchanged on `login.sock` (between the web process and a login helper) and on a
-//! desktop's `desktop.sock` (between a login helper and the user's desktop). See SIGNIN-ROADMAP.md, step 4.
+//! desktop's `desktop.sock` (between a login helper and the user's desktop). See see the sign-in design.
 //!
 //! # Byte layout
 //!

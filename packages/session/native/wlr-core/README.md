@@ -1,7 +1,7 @@
 # wlroots core
 
 A session's Wayland side on wlroots 0.17.4. It replaced the libwayland fork and the TypeScript protocol implementation
-(deleted in wave 2 C of the migration, ROADMAP.md, Core item 1): every session runs on it, with the desktop shell.
+(deleted in wave 2 C of the migration, ARCHITECTURE.md): every session runs on it, with the desktop shell.
 Since wave 2 B, X11 apps run too (XWayland).
 
 ## Layout
@@ -85,7 +85,7 @@ The prototype, by hand:
   size, placed at the output origin).
 - gtk4-demo: maps with its client-side shadow and input region; its own cursor surface; its menu (xdg_popup, part of the
   window's surface list); the About dialog (`set_parent`, centered on the parent, stacked above it).
-- Encoding (as of wave 1; replaced by Core 2a, see "Encoding policy" in ROADMAP.md): small surfaces as patches, busy
+- Encoding (as of wave 1; replaced by Core 2a, see "Encoding policy" in ARCHITECTURE.md): small surfaces as patches, busy
   surfaces as H.264 (86 video frames while foot scrolled, with the viewer's pacing simulated); lazy patch capture
   unchanged (the buffer stays locked until the next commit).
 - Reattach: closing the browser, signing in again and reopening the session brings back all three windows with a mean
@@ -192,7 +192,7 @@ XWayland (wave 2 B):
 ### Video encoder (`native/encoding/src/gst_frame_encoder.c`)
 
 Since Core 2a the encoder is only used with GPU acceleration (`--encoder nvh264|vaapih264`, or `auto` finding one) and
-only for streaming surfaces (see "Encoding policy" in ROADMAP.md). With `--encoder none` (what `auto` resolves to
+only for streaming surfaces (see "Encoding policy" in ARCHITECTURE.md). With `--encoder none` (what `auto` resolves to
 without a GPU) no encoder is ever created and everything is sent as patches. Since item 5b phase 2 there is no video on
 the CPU at all: the x264 encoder, its CPU pipelines (`videoconvert ! videobox ! x264enc`) and the CPU alpha path are
 gone. None of the following is tested here (no GPU).
@@ -220,7 +220,7 @@ Wave 3 D (polish):
 
 - **Fullscreen**: `toplevel-request-fullscreen` is answered with a configure to the output size (and again when the output
   changes); the scene's `fullscreen` flag places the window at the output origin. The output excludes the taskbar,
-  so a fullscreen window fills the desktop area and never covers the taskbar (ROADMAP.md, shell principles). foot
+  so a fullscreen window fills the desktop area and never covers the taskbar (ARCHITECTURE.md). foot
   has no fullscreen key by default (`-o key-bindings.fullscreen=F11`, as the e2e test app does).
 - **Popups**: `setPosition` is now told for every window, not only X11 ones (the core keeps it in `gsurf.pos_x/pos_y`);
   a new `xdg_popup` is unconstrained (`wlr_xdg_popup_unconstrain_from_box`) against the output in its root toplevel's
@@ -308,14 +308,14 @@ Clipboard images and files (only text crosses to the browser), drag and drop wit
 on HiDPI (Xwayland stays 1x in wlroots 0.17), GPU (dmabuf) buffers (wave 4).
 
 X11 specifically, not done: X11 apps without their own decorations (xev, xterm) can be moved only with the window menu's
-Move (taskbar button or preview card), until the viewer has title bars of its own (ROADMAP.md, decorations); minimizing isn't
+Move (taskbar button or preview card), until the viewer has title bars of its own (ARCHITECTURE.md, decorations); minimizing isn't
 told to X11 apps; activation requests (`_NET_ACTIVE_WINDOW`) and positions apps ask for (USPosition) are ignored, the
 viewer places windows; unmanaged window types that aren't override-redirect (some toolkits' menus) are ordinary
 windows.
 
 ## The migration
 
-ROADMAP.md, Core item 1, "Work plan: four waves". Wave 1 (this stack as the default, with the desktop shell, CI and
+ARCHITECTURE.md, "Work plan: four waves". Wave 1 (this stack as the default, with the desktop shell, CI and
 tests) and wave 2 B (XWayland) are done.
 
 ## Packages

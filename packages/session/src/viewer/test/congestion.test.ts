@@ -31,7 +31,7 @@ const outsideProbes = (result: SimResult, from: number, to: number) =>
   itemsBetween(result, from, to).filter(
     (item) => item.stateAtSend !== 'ProbeBW_UP' && item.stateAtSend !== 'ProbeBW_DOWN',
   )
-/** at 40 ms RTT, see ROADMAP.md: the delay threshold plus what a probe adds in the round trip before it sees it */
+/** at 40 ms RTT, see ARCHITECTURE.md: the delay threshold plus what a probe adds in the round trip before it sees it */
 const PROBE_PEAK_MS = 50
 const inState = (result: SimResult, from: number, to: number, state: string) =>
   itemsBetween(result, from, to).filter((item) => item.stateAtSend === state)
@@ -54,7 +54,7 @@ function seededTest(name: string, body: (seed: number) => void) {
   })
 }
 
-// --- the scenarios of ROADMAP.md, "Transport and congestion control", "Testing" -----------------------------------
+// --- the scenarios of ARCHITECTURE.md, "Transport and congestion control", "Testing" -----------------------------------
 
 seededTest('1. 20 Mbit/s, 40 ms: full link, short queue', (seed) => {
   const config: LinkConfig = { seed, rate: () => mbit(20), baseRtt: () => 40 }
@@ -135,7 +135,7 @@ seededTest('8. jitter and batched acks: full link, delay signals stay harmless',
   const result = simulate(config, saturating(patchSizes(seed)), 22_000)
   assert.ok(utilization(result, config, 2000, 21_500) >= 0.8, 'throughput')
   // Noise of up to ~26 ms (16 ms of ack batching, +-5 ms of jitter) on top of a real queue does push some rounds over
-  // the 20 ms threshold (about three times as many as on a clean link, see ROADMAP.md). They only resize the
+  // the 20 ms threshold (about three times as many as on a clean link, see ARCHITECTURE.md). They only resize the
   // short-term bounds to the measured delivery rate: the estimate and the link's use must not collapse.
   // the noise blurs the controller's view of the queue by about its own size: a few items (under 1%) go over 20 ms
   assert.ok(maxQueueDelay(inState(result, 2000, 21_500, 'ProbeBW_CRUISE')) <= 25, 'CRUISE queue')

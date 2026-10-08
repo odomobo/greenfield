@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks'
  * A surface's frame callbacks are held while it isn't ready for a new frame (its slots are full of damage: it has as
  * many items between capture and the socket as it may), and released at the next tick of the frame clock once it is.
  * So an app slows down to what can be sent (the transport's congestion control and the viewer's backlog decide when
- * items go out, see ROADMAP.md). But a surface sent as patches never below MIN_FRAME_RATE: after MAX_FRAME_HOLD_MS the
+ * items go out, see ARCHITECTURE.md). But a surface sent as patches never below MIN_FRAME_RATE: after MAX_FRAME_HOLD_MS the
  * callback goes anyway, and the app's next frame is queued as damage, read when a slot frees (a slow repaint may then
  * show parts of different frames, but the app keeps responding). Not one streamed as video: a video frame is the whole
  * surface at once, it never shows a partial repaint to get ahead of. Without a viewer apps are throttled.

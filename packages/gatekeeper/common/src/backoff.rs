@@ -1,4 +1,4 @@
-//! Per-IP failure backoff (step 10 of SIGNIN-ROADMAP.md): a fixed-size table in the helper's main loop, fed by
+//! Per-IP failure backoff (the sign-in design): a fixed-size table in the helper's main loop, fed by
 //! fixed-size reports from its own sign-in children over their per-attempt pipes.
 //!
 //! - A sign-in child writes one `Report` {address, signed in or not} when its attempt is decided, before it tells the

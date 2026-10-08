@@ -1,4 +1,4 @@
-//! The web front (see SIGNIN-ROADMAP.md, "Target architecture"): the listener `nebula-web` (src/bin/listener.rs)
+//! The web front (see the sign-in architecture): the listener `nebula-web` (src/bin/listener.rs)
 //! accepts TCP connections and starts a fresh worker `nebula-web-worker` (src/bin/worker.rs) for each, which does
 //! everything network-facing for that one connection.
 //!

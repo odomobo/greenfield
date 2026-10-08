@@ -1,5 +1,5 @@
 /**
- * The patch encoder: the QOI cascade (raw / QOI / QOI + LZ4, see "Encoding policy" in ROADMAP.md), and JPEG for lossy
+ * The patch encoder: the QOI cascade (raw / QOI / QOI + LZ4, see "Encoding policy" in ARCHITECTURE.md), and JPEG for lossy
  * patches, native, in the small nebula-patch-addon (native/patch). It is synchronous and meant for worker threads
  * (patch-worker.ts); every thread loads its own instance of the addon.
  */

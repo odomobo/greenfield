@@ -32,13 +32,13 @@
  *
  * CHUNK payload (server -> viewer): u32le item id, u8 flags (1: first, 2: last), then the next bytes of a data envelope
  * (FRAME or PATCH) too large to send at once. Large items are sent in chunks so that control messages and audio can go
- * between them (see "Chunk large data items" in ROADMAP.md): the viewer joins an item's chunks (`ChunkAssembler`) and
+ * between them (see "Chunk large data items" in HISTORY.md): the viewer joins an item's chunks (`ChunkAssembler`) and
  * handles the result as that envelope. An item's chunks arrive in order, but chunks of up to a few items (one per send
  * tier) may be interleaved; ids are per connection, counting up from 0 (mod 2^32). Items that fit in one chunk are sent
  * as they are.
  *
  * Data envelopes (FRAME, PATCH and CHUNK) are acknowledged for congestion control (see "Transport and congestion control" in
- * ROADMAP.md): the viewer sends an ACK first thing when a data envelope arrives, before decoding it, so the server's
+ * ARCHITECTURE.md): the viewer sends an ACK first thing when a data envelope arrives, before decoding it, so the server's
  * round-trip times measure the network, not decoding. Data envelopes are numbered implicitly, in the order they're
  * sent (TCP keeps it); `received` counts them. The ACK also reports the viewer's backlog (received, not yet applied):
  * the server sends no data while `backlogBytes - largestPendingBytes > BACKLOG_HOLD_BYTES` (an item's chunks count as one
@@ -48,7 +48,7 @@
  *
  * A surface is either streamed as video (FRAME, H.264) or updated with patches (PATCH) of its changed areas: lossless
  * (raw, QOI or QOI + LZ4), or, for streaming surfaces while bandwidth is short, lossy (JPEG, JPEG with alpha), which a
- * lossless patch replaces once bandwidth recovers. See the encoding policy in ROADMAP.md. Frames and patches of one
+ * lossless patch replaces once bandwidth recovers. See the encoding policy in ARCHITECTURE.md. Frames and patches of one
  * surface arrive in order and are applied in order: a patch draws over whatever the surface showed (including the last
  * video frame), a video frame replaces it.
  *
@@ -687,7 +687,7 @@ export class ChunkAssembler {
 
 /**
  * How a patch's pixels are encoded (the format tag). Raw, QOI and QOI + LZ4 are lossless (the cascade of "Encoding
- * policy" in ROADMAP.md); JPEG and JPEG with alpha are lossy, sent only for streaming surfaces while bandwidth is short.
+ * policy" in ARCHITECTURE.md); JPEG and JPEG with alpha are lossy, sent only for streaming surfaces while bandwidth is short.
  */
 export enum PatchFormat {
   /** width x height x channels bytes, RGB (opaque) or RGBA, rows top to bottom */

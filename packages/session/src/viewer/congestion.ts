@@ -1,5 +1,5 @@
 /**
- * Congestion control for the data sent to one viewer (see "Transport and congestion control" in ROADMAP.md).
+ * Congestion control for the data sent to one viewer (see "Transport and congestion control" in ARCHITECTURE.md).
  *
  * BBRv3 as specified in the IETF draft draft-ietf-ccwg-bbr (revision 06), run in user space on top of whatever TCP the
  * kernel uses: pacing our sends at the measured bottleneck rate keeps TCP (with a small TCP_NOTSENT_LOWAT) from ever

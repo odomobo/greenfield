@@ -1,4 +1,4 @@
-//! The worker's sandbox (SIGNIN-ROADMAP.md, step 8), entered once its setup is done (fds checked, memfds mapped, TLS
+//! The worker's sandbox (see the sign-in design), entered once its setup is done (fds checked, memfds mapped, TLS
 //! configuration built, the TCP socket tuned): from then on it only reads, writes and polls the fds it has, and can't
 //! open, create, exec, fork, signal or trace anything.
 //!

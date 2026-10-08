@@ -1,5 +1,5 @@
 /**
- * Per-surface encoding state machine (see "Encoding policy" in ROADMAP.md). A surface is in the normal or the
+ * Per-surface encoding state machine (see "Encoding policy" in ARCHITECTURE.md). A surface is in the normal or the
  * streaming priority class (relentless surfaces, see RelentlessMeter). Its content goes out as patches of the damaged
  * areas, or, for streaming surfaces when a hardware video encoder is available, as H.264 video of the whole surface.
  * Patches are lossless, except a streaming surface's while the link is short of bandwidth (the sink says so): those may

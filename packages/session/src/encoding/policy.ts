@@ -1,5 +1,5 @@
 /**
- * The per-surface encoding policy (see "Encoding policy" in ROADMAP.md). Pure, no Node or native dependencies.
+ * The per-surface encoding policy (see "Encoding policy" in ARCHITECTURE.md). Pure, no Node or native dependencies.
  *
  * A surface has a priority class: normal, or streaming when it is relentless (it keeps sending new data before its old
  * data has gone out). Whether a surface is sent as video or as patches is decided separately, by the surface

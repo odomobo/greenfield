@@ -1,6 +1,6 @@
 /**
  * Whether the link to the viewer is short of bandwidth, for the streaming class's encoding (see "QOI patches, and lossy
- * encoding only when bandwidth is short" in ROADMAP.md): while it is, streaming surfaces are sent as JPEG patches (or
+ * encoding only when bandwidth is short" in ARCHITECTURE.md): while it is, streaming surfaces are sent as JPEG patches (or
  * lower-quality video). Their lossy areas are settled (sent again losslessly) at the lowest priority whenever they
  * have no damage to send.
  *

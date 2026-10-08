@@ -1,6 +1,6 @@
 # Visual design
 
-The look and feel of nebula's pages and desktop shell: what was decided and why. `ROADMAP.md` covers the architecture
+The look and feel of nebula's pages and desktop shell: what was decided and why. `ARCHITECTURE.md` covers the design
 and the order of work; this file covers how things look and move. Values live in `packages/session/static/theme.css`
 (colors, sizes, curves) and `packages/viewer/src/style.css` (layout, animations).
 

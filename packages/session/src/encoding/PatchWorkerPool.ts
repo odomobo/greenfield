@@ -1,6 +1,6 @@
 /**
  * Patch encoding (the QOI cascade or JPEG of the native nebula-patch-addon, see patch-encoder.ts) on a few worker threads, each
- * with its own OS thread and nice level (see "Encode scheduling" in ROADMAP.md). Streaming surfaces' patches go to a pool
+ * with its own OS thread and nice level (see "Encode scheduling" in ARCHITECTURE.md). Streaming surfaces' patches go to a pool
  * at the lowest priority: relentless encoding only gets the CPU nothing else wants. Normal surfaces' patches go to a
  * pool at normal priority (nice 0). The encode runs on the worker's own thread, so the nice level applies to all of it.
  */

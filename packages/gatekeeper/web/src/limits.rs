@@ -1,5 +1,5 @@
 //! The listener's bookkeeping: workers alive per client IP against the caps, and the per-IP throttle of failed
-//! sign-ins (until the login helper does it, step 10 of SIGNIN-ROADMAP.md).
+//! sign-ins (until the login helper does it, the sign-in design).
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};

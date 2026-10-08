@@ -1,5 +1,5 @@
 /**
- * The session's Wayland side (ROADMAP.md, Core item 1): wlroots 0.17 (native/wlr-core) implements the protocols; this
+ * The session's Wayland side (ARCHITECTURE.md): wlroots 0.17 (native/wlr-core) implements the protocols; this
  * is the policy: window
  * positions, stacking, focus and minimize state, frame pacing, and the encoding of every surface's content.
  */

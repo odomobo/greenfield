@@ -1,5 +1,5 @@
 /**
- * Choosing the video encoder (see "GPU acceleration and encoders" in ROADMAP.md). Without GPU acceleration there is no
+ * Choosing the video encoder (see "GPU acceleration and encoders" in ARCHITECTURE.md). Without GPU acceleration there is no
  * video at all: everything is sent as PNG patches (`none`).
  */
 import { execFileSync } from 'node:child_process'

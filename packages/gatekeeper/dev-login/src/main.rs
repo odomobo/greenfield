@@ -1,6 +1,6 @@
 //! nebula-dev-login: the development login helper, the dev entry point of nebula. DEVELOPMENT ONLY.
 //!
-//! It is started like the production helper (step 5 of SIGNIN-ROADMAP.md) and speaks the same protocol, without PAM
+//! It is started like the production helper (the sign-in design) and speaks the same protocol, without PAM
 //! and without privileges: the only user is the current one, signing in with the password from
 //! $GREENFIELD_DEV_PASSWORD, from loopback addresses only, and desktops run as the current user. It owns the `--dev-*`
 //! options (they go to the desktops in SessionConfig.devFlags; the web process takes none).
