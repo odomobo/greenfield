@@ -6,11 +6,13 @@
 //! options (they go to the desktops in SessionConfig.devFlags; the web process takes none).
 //!
 //! What it does:
-//!   - binds the TCP port and starts the web process (`node web.js`) with the listening socket as fd 3, telling it
-//!     where `login.sock` is;
-//!   - accepts the web process's connections on `<runtime>/login.sock` and forks a child for each sign-in, which reads
-//!     the client's address and the user name, asks for the password, and on success attaches to or creates the
-//!     user's desktop (see nebula_login_common::desktop) and passes the web process its end of the connection;
+//!   - binds the TCP port and starts the web process (`node web.js`, the listener) with the listening socket as fd 3,
+//!     telling it where `login.sock` is;
+//!   - accepts the web process's connections on `<runtime>/login.sock` (the listener opens one for every TCP
+//!     connection and hands it to that connection's worker) and forks a child for each, which reads the client's
+//!     address (from the listener) and the user name (from the worker; a connection that never becomes a sign-in just
+//!     closes), asks for the password, and on success attaches to or creates the user's desktop (see
+//!     nebula_login_common::desktop) and passes the worker its end of the connection;
 //!   - a child that started a desktop stays as its parent until it exits (the PAM parent, in production);
 //!   - SIGTERM / SIGINT stop the web process and the desktops (they end their apps first).
 use nebula_login_common::desktop::{self, Desktop};
@@ -346,9 +348,13 @@ fn sign_in(config: &Config, site_settings: &Option<PathBuf>, connection: UnixStr
             (Record::ClientAddress(ip), _) => ip,
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "expected the client address")),
         };
-        let username = match channel.read(BEGIN_TIMEOUT)? {
-            (Record::Begin { username }, _) => username,
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "expected Begin")),
+        let username = match channel.read(BEGIN_TIMEOUT) {
+            Ok((Record::Begin { username }, _)) => username,
+            // the web listener opens a connection for every TCP connection, and most never become a sign-in (the page's
+            // files): its worker exits without writing Begin
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Ok(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, "expected Begin")),
+            Err(e) => return Err(e),
         };
         if !is_loopback(&client) {
             log::warn(&format!("Refused a sign-in from {client}: the dev login helper accepts loopback only."));

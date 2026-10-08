@@ -5,7 +5,8 @@ The front door: a login page and the per-user desktop sessions behind it (one de
 ## Processes
 
 Production (PAM, `main.js` as root; step 5 of [SIGNIN-ROADMAP.md](../../SIGNIN-ROADMAP.md) replaces the monitor with
-the production login helper):
+the production login helper). **Broken until step 5 lands:** since step 6 split the web process into a listener and
+per-connection workers, the web process can only be started by a login helper; the monitor's start message is gone.
 
 ```
 gateway (monitor)          root. Not network-facing. Authenticates users through native/pam-helper,
@@ -25,12 +26,16 @@ Development (the dev login helper, [packages/login](../login/README.md), the dev
 production login helper will have):
 
 ```
-nebula-dev-login           the current user (never root). Binds the port, owns the --dev-* options. Accepts the web
-│                          process's sign-ins on <runtime>/login.sock (the login protocol: client address, Begin,
-│                          Prompt/Answer, Result), one forked child per sign-in.
-├── gateway-web            started with the listening socket (fd 3) and where login.sock is. TLS, the page, Origin
-│                          checks, failed sign-in throttling per IP, viewer files; relays the helper's prompts to the
-│                          page and, once signed in, the WebSocket over the connection the Result carried.
+nebula-dev-login           the current user (never root). Binds the port, owns the --dev-* options. Accepts
+│                          connections on <runtime>/login.sock (the login protocol: client address, Begin,
+│                          Prompt/Answer, Result), one forked child per connection.
+├── nebula-web             the listener (web.js), started with the listening socket (fd 3) and where login.sock is.
+│   │                      Never reads network data: accepts each TCP connection paused (caps: 256 in all, 32 per IP),
+│   │                      opens a login.sock connection for it and writes the client's address, and starts a worker
+│   │                      with both. Holds the TLS key and the per-IP throttle of failed sign-ins.
+│   └── nebula-web-worker  one per TCP connection (web-worker.js), not dumpable, exits when its connection closes.
+│                          TLS, the page, Origin checks, viewer files; relays the helper's prompts to the page and,
+│                          once signed in, the WebSocket over the connection the Result carried.
 └── sign-in child          checks the password, then attaches to or starts the user's desktop: flock on
     │                      <runtime>/users/<uid>/lock, connect to desktop.sock; if nothing listens, bind it and start
     │                      the desktop with the listening socket inherited. Hands it the connection (a socket pair end
@@ -40,7 +45,8 @@ nebula-dev-login           the current user (never root). Binds the port, owns t
                            (SessionConfig.listenFd). Log out closes it: the next sign-in starts a new desktop.
 ```
 
-TLS ends in the web process, so users' sessions never have access to the key. There is no plain-HTTP mode: without
+TLS ends in the web workers (one process per TCP connection, so an exploit reaches only its own connection), so
+users' sessions never have access to the key. There is no plain-HTTP mode: without
 `--cert`/`--key` the web process generates a self-signed certificate. A user's desktop dies when they log out or when the
 gateway stops; closing the browser doesn't affect it.
 

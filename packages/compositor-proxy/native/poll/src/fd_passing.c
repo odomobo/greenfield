@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -210,4 +211,13 @@ fd_close(napi_env env, napi_callback_info info) {
         return int_value(env, -EINVAL);
     }
     return int_value(env, close(fd) < 0 ? -errno : 0);
+}
+
+// setNotDumpable(): number. Marks the calling process as not dumpable (PR_SET_DUMPABLE 0): no core dumps, and other
+// processes of the same user can't ptrace it or read its memory, environment or fds under /proc. The gateway's
+// per-connection web workers call it first thing, so they can't inspect each other. 0, or -errno.
+napi_value
+fd_set_not_dumpable(napi_env env, napi_callback_info info) {
+    (void) info;
+    return int_value(env, prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) < 0 ? -errno : 0);
 }

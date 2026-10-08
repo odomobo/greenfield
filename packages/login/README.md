@@ -21,8 +21,10 @@ too. Tests: `yarn test` (`cargo test`).
 
 1. The helper binds the TCP port and starts the web process with the listening socket as fd 3 and
    `--login-socket <runtime>/login.sock`.
-2. For each sign-in the web process connects to `login.sock` and writes `ClientAddress` (until the listener of step 6
-   does) and `Begin`. The helper forks a child for the connection.
+2. For each TCP connection the web listener connects to `login.sock`, writes `ClientAddress` (the accepted socket's
+   peer address) and hands the connection to that TCP connection's worker, which writes `Begin` if the connection
+   becomes a sign-in (the page's WebSocket). The helper forks a child for each connection; most never get a `Begin`
+   (the page's files) and end quietly when the worker exits.
 3. The child sends `Prompt`s and reads `Answer`s (the web process relays them to and from the page), then decides.
    Failures take at least 3 s from the last answer and end with `Result` refused.
 4. On success it attaches or creates (`common/src/desktop.rs`): flock `<runtime>/users/<uid>/lock`, connect to

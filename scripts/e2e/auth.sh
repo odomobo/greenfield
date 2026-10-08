@@ -14,7 +14,7 @@
 # Successful sign-ins, reattaching, takeover and logging out are in desktop.sh (they start a desktop).
 #
 # The dev login helper runs with --dev-time-scale, which shortens its failed-sign-in delay (3 s) so this finishes in
-# seconds; the assertions are the same, just scaled. (The web process's per-IP throttle refuses blocked addresses
+# seconds; the assertions are the same, just scaled. (The web listener's per-IP throttle refuses blocked addresses
 # without asking the helper, so without that delay.)
 #
 # Requires: curl, node, the built gateway and viewer. Usage: scripts/e2e/auth.sh   (GATEWAY_PORT)
