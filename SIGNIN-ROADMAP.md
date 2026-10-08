@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–5 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–6 are implemented; the rest is not.
 
 ## Why
 
@@ -287,8 +287,9 @@ without changing how the pieces connect.
   - **Refusals without PAM**: a user name that isn't what useradd accepts (≤ 64 bytes; includes the empty name) and a
     name whose passwd entry is uid 0 get a fake `Password: ` prompt and the same refusal; a canonical PAM user with
     uid 0 is refused after PAM too.
-  - **Limits** (step 10/11 may tune them): 16 attempts at a time (the main loop counts children whose per-attempt
-    pipe is still open; more are closed at once), `ClientAddress`/`Begin` within 10 s, each answer within 75 s, a
+  - **Limits** (step 10/11 may tune them): 256 login.sock connections at a time, the listener's `MAX_WORKERS`, since
+    it opens one per TCP connection (the main loop counts children whose per-attempt pipe is still open; more are
+    closed at once; EOF or the `Begin` timeout before `Begin` end a child quietly, as in the dev helper), `ClientAddress`/`Begin` within 10 s, each answer within 75 s, a
     whole attempt within 180 s (`alarm`, cancelled once the child becomes a PAM parent), 3 s failure minimum.
     `login.sock` is `root:<web group>` 0660 plus the `SO_PEERCRED` check (only the web user's uid).
   - **Entry point**: `nebula-login` as root takes `--bind-ip`, `--bind-port`, `--web-user` (default `nebula-web`),
@@ -315,6 +316,39 @@ without changing how the pieces connect.
 
 The target shape is reached here. Known limits until later steps: workers are separate processes but not sandboxed,
 each worker holds the TLS key, and a Node process per connection costs roughly 50 ms and 30–50 MB.
+
+- As built:
+  - **Listener**: `packages/gateway/src/web.ts` (`nebula-web`), same command line as before (`--listen-fd 3
+    --login-socket <path> ...`). A `net.Server` on the inherited fd with `pauseOnConnect`; caps of 256 workers in all
+    and 32 per client IP (over them a connection is closed at once). It loads the TLS key and certificate (or
+    generates the self-signed pair) and the page once. Per connection: `unixConnect(login.sock)`, `ClientAddress`
+    from `socket.remoteAddress` (IPv4 without the `::ffff:` prefix), then `spawn(node, web-worker.js)` with stdio
+    `[ignore, inherit, inherit, <TCP socket>, <helper fd>, 'ipc']`, and our copies of both closed.
+  - **Worker**: `packages/gateway/src/web-worker.ts` (`nebula-web-worker`): fd 3 the TCP connection, fd 4 the helper
+    connection, a Node IPC channel. It calls `setNotDumpable()` first (exits if that fails), waits for the
+    listener's `WorkerStart` message (TLS cert and key, the page with the host name filled in, allowed origins, the
+    viewer directory, and `signIn`: `helper`, `blocked` or `unavailable`), wraps fd 3 in an HTTPS server
+    (`emit('connection')`) and serves every request on it (keep-alive) or one WebSocket. It exits when the TCP
+    connection closes, or when the IPC channel does (the listener is gone, e.g. stopped by the helper's SIGTERM).
+    One sign-in per worker. The monitor backend is gone from the web process (it can no longer be started by
+    `main.js`; step 5 deletes the monitor).
+  - **Per-IP throttle** (until step 10): the `RateLimiter` lives in the listener. A worker reports a refused sign-in
+    (`{type: 'refused'}` on IPC, before the page hears of it, so the page's next attempt finds the throttle up to
+    date); the listener counts at most one per worker, for the IP it accepted the connection from. For a throttled IP
+    the listener opens no helper connection and the worker answers the page's password with "Too many failed
+    attempts" by itself.
+  - **The helper connection is opened eagerly**, for every TCP connection, as specified (the listener can't know
+    which connection will become a sign-in). Cost: a helper child per TCP connection, waiting for `Begin`; most get
+    EOF instead (the dev helper ends those quietly) when their worker exits (Node's 5 s keep-alive timeout closes an
+    idle connection). Consequences for the production helper (step 5): its cap on concurrent children counts every
+    open TCP connection, so it must be at least the listener's 256 (or the listener's cap lowered); EOF before
+    `Begin` is a normal end, not an error worth logging; its wait for `Begin` counts from the TCP accept, which works
+    because browsers open the WebSocket on a fresh connection and the page sends `begin` as soon as it opens
+    (a sign-in on a keep-alive connection older than that wait would fail).
+  - **Native addon**: `setNotDumpable()` (`prctl(PR_SET_DUMPABLE, 0)`) in `fd_passing.c`.
+  - **Cost measured** (Chrome, loopback, fresh context per load): a page load (the page and its 4 files, 1–2
+    connections) takes about 145 ms instead of 42 ms; a single HTTPS request with a fresh connection (curl) about
+    44 ms instead of 2.5 ms, nearly all of it starting the worker. The e2e suite's total stayed at about 34 s.
 
 ### 7. Port the listener and worker to Rust
 

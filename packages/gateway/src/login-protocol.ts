@@ -228,6 +228,7 @@ type FdPassingModule = {
   receiveWithFds(fd: number, maxBytes: number): { data: Buffer; fds: number[] } | number
   setCloseOnExec(fd: number): number
   closeFd(fd: number): number
+  setNotDumpable(): number
 }
 let fdPassingModule: FdPassingModule | undefined
 

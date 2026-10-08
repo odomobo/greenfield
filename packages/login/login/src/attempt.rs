@@ -95,17 +95,22 @@ fn invalid(message: &str) -> io::Error {
 }
 
 /// Run one attempt on a login.sock connection. Ok(Some) when it started a desktop (the caller waits for it, then
-/// closes the PAM session); Ok(None) when it is over (signed in to a running desktop, or refused); Err when the
-/// connection broke before a result could be sent.
+/// closes the PAM session); Ok(None) when it is over (signed in to a running desktop, refused, or the connection
+/// never became a sign-in: closed or idle before Begin); Err when the connection broke after Begin, before a result
+/// could be sent.
 pub fn sign_in<H: Host>(host: &H, limits: &Limits, connection: UnixStream) -> io::Result<Option<Started<H::Pam>>> {
     let mut channel = Channel::new(connection);
     let client = match channel.read(limits.begin_timeout)? {
         (Record::ClientAddress(ip), _) => ip,
         _ => return Err(invalid("expected the client address")),
     };
-    let username = match channel.read(limits.begin_timeout)? {
-        (Record::Begin { username }, _) => username,
-        _ => return Err(invalid("expected Begin")),
+    let username = match channel.read(limits.begin_timeout) {
+        Ok((Record::Begin { username }, _)) => username,
+        // the web listener opens a connection for every TCP connection (step 6), and most never become a sign-in (the
+        // page's files): their worker exits, or keeps its connection idle, without writing Begin
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof || e.kind() == io::ErrorKind::TimedOut => return Ok(None),
+        Ok(_) => return Err(invalid("expected Begin")),
+        Err(e) => return Err(e),
     };
     let mut relay = Relay::new(channel, limits.answer_timeout);
 
@@ -458,6 +463,22 @@ mod tests {
         let (connection, web_end) = UnixStream::pair().unwrap();
         Channel::new(web_end).write(&Record::Begin { username: "alice".into() }, None).unwrap();
         assert!(sign_in(&host, &LIMITS, connection).is_err());
+        assert!(host.log.borrow().started.is_empty());
+    }
+
+    #[test]
+    fn a_connection_that_never_becomes_a_sign_in_ends_quietly() {
+        let host = FakeHost::new();
+        // closed after the address (a worker that only served files)
+        let (connection, web_end) = UnixStream::pair().unwrap();
+        Channel::new(web_end).write(&Record::ClientAddress("::1".parse().unwrap()), None).unwrap();
+        assert!(sign_in(&host, &LIMITS, connection).unwrap().is_none());
+        // idle until the Begin timeout
+        let limits = Limits { begin_timeout: Duration::from_millis(50), ..LIMITS };
+        let (connection, web_end) = UnixStream::pair().unwrap();
+        let mut channel = Channel::new(web_end);
+        channel.write(&Record::ClientAddress("::1".parse().unwrap()), None).unwrap();
+        assert!(sign_in(&host, &limits, connection).unwrap().is_none());
         assert!(host.log.borrow().started.is_empty());
     }
 

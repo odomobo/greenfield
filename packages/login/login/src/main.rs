@@ -3,8 +3,9 @@
 //! What it does (see SIGNIN-ROADMAP.md, steps 4 and 5, and packages/login/README.md):
 //!   - binds the TCP port and starts the web process (`node web.js --listen-fd 3 --login-socket <runtime>/login.sock`)
 //!     as the unprivileged web user (`--web-user`, default nebula-web), with the listening socket as fd 3;
-//!   - accepts the web process's connections on `<runtime>/login.sock` (only from the web user: SO_PEERCRED), at most
-//!     MAX_ATTEMPTS sign-ins at a time, and forks a child for each;
+//!   - accepts the web process's connections on `<runtime>/login.sock` (only from the web user: SO_PEERCRED; the
+//!     listener opens one for every TCP connection, most never become a sign-in), at most MAX_ATTEMPTS at a time, and
+//!     forks a child for each;
 //!   - the child runs PAM with one handle (service "nebula"): pam_authenticate and pam_acct_mgmt with PAM's prompts
 //!     relayed to the page (relay.rs), PAM_RHOST set to the client's address and PAM_TTY to "nebula"; refuses root;
 //!     failures take at least 3 s from the last answer;
@@ -50,8 +51,10 @@ const LIMITS: Limits = Limits {
     answer_timeout: Duration::from_secs(75),
     min_failure: Duration::from_secs(3),
 };
-/// Sign-ins in progress at once; more are turned away (the web process tells the page signing in is not possible).
-const MAX_ATTEMPTS: usize = 16;
+/// login.sock connections in progress at once (before Begin, and attempts until they are over); more are closed at
+/// once (the web process tells the page signing in is not possible). The web listener opens one for every TCP
+/// connection, and caps those at the same number (MAX_WORKERS in packages/gateway/src/web.ts).
+const MAX_ATTEMPTS: usize = 256;
 /// A sign-in child that hasn't finished its attempt by then (PAM stuck, or a page answering very slowly) is ended.
 const ATTEMPT_TIMEOUT_SECONDS: u32 = 180;
 /// How long a stopping helper waits for its desktops (they give their apps 5 s to quit, then kill them).
@@ -422,7 +425,7 @@ fn main() {
         }
         if attempts_in_progress(&mut children) >= MAX_ATTEMPTS {
             // closing the connection: the web process tells the page signing in didn't work
-            log::warn(&format!("Turned a sign-in away: {MAX_ATTEMPTS} are in progress."));
+            log::warn(&format!("Turned a login.sock connection away: {MAX_ATTEMPTS} are in progress."));
             continue;
         }
         if let Err(e) = connection.set_nonblocking(false) {

@@ -28,8 +28,10 @@ too. Tests: `yarn test` (`cargo test`).
 
 1. The helper binds the TCP port and starts the web process with the listening socket as fd 3 and
    `--login-socket <runtime>/login.sock`.
-2. For each sign-in the web process connects to `login.sock` and writes `ClientAddress` (until the listener of step 6
-   does) and `Begin`. The helper forks a child for the connection.
+2. For each TCP connection the web listener connects to `login.sock`, writes `ClientAddress` (the accepted socket's
+   peer address) and hands the connection to that TCP connection's worker, which writes `Begin` if the connection
+   becomes a sign-in (the page's WebSocket). The helper forks a child for each connection; most never get a `Begin`
+   (the page's files) and end quietly when the worker exits.
 3. The child sends `Prompt`s and reads `Answer`s (the web process relays them to and from the page), then decides.
    Failures take at least 3 s from the last answer and end with `Result` refused. In production the prompts are
    PAM's: one handle per attempt (`pam_start` with `PAM_RHOST` = the client's address and `PAM_TTY` = `nebula`,
@@ -53,8 +55,8 @@ too. Tests: `yarn test` (`cargo test`).
    desktop's listening socket, so the next sign-in creates a new desktop.
 
 Production limits (`login/src/main.rs`): `login.sock` is `root:<web group>` 0660 and only the web user's uid is
-accepted (`SO_PEERCRED`); at most 16 attempts at a time (more are closed at once, the page says signing in is not
-possible); `ClientAddress` and `Begin` within 10 s, each answer within 75 s (the web process gives the page 60 s), a
+accepted (`SO_PEERCRED`); at most 256 connections at a time, the web listener's cap, since it opens one per TCP
+connection (more are closed at once; a connection that ends or idles before `Begin` ends quietly); `ClientAddress` and `Begin` within 10 s, each answer within 75 s (the web process gives the page 60 s), a
 whole attempt within 180 s (`alarm`; not once it is a PAM parent).
 
 The runtime directory (dev: `--runtime-dir`, default `$XDG_RUNTIME_DIR/nebula-dev-<port>`; production `/run/nebula`,
