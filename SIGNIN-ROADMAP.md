@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–7, 9, 10, 11 and 13 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–7, 9–13 are implemented; the rest is not.
 
 ## Why
 
