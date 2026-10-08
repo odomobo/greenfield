@@ -63,3 +63,19 @@ For completed work see [HISTORY.md](HISTORY.md).
 - Pinning two apps in quick succession once left only one pinned; not reproduced since.
 - Input on a Wayland subsurface or popup the app just moved can land off by the move for about a round trip. Not seen
   with a real app. Fix if it shows: send coordinates relative to the window's main surface.
+- Snap apps (Firefox on Ubuntu, any snap on the GNOME runtime) play into the user's audio, not the session's: the
+  snap's `desktop-launch` (gnome-46-2404, lines 390-397) overwrites `PULSE_SERVER` with
+  `$XDG_RUNTIME_DIR/../pulse/native`, i.e. `/run/user/<uid>/pulse/native`, whenever that socket exists (on WSL, WSLg's
+  server: the sound comes out of Windows). Practical fix: launch `/snap/bin/*` programs through
+  `snap run --shell <app> -c 'export PULSE_SERVER=<ours>; exec <app command from meta/snap.yaml> "$@"'`. With AppArmor
+  enforcing (not on WSL) that alone gives no sound rather than the user's: the snap's audio-playback policy only allows
+  the standard socket paths, so the session's socket would also have to be somewhere a snap can reach (a socket in
+  `~`, or TCP on localhost with authentication; both unverified). Cleaner but out of our hands: snapcraft's desktop
+  extension keeping a `PULSE_SERVER` that is already set.
+- Audio isolation only holds for processes the session starts. Not covered (unverified, by how they work): an app
+  that hands off to an instance already running elsewhere (Firefox, Chrome, VS Code); D-Bus-activated apps and
+  services, which get the user's bus environment (`DBusActivatable=true` apps, gnome-terminal's server,
+  speech-dispatcher); systemd user services; a tmux/screen server started outside the session. A thorough fix needs a
+  session bus and systemd instance of the session's own, or one desktop per user. Also to check: clients with a
+  libpipewire older than 1.0.5 may ignore `PIPEWIRE_RUNTIME_DIR` and reach the user's PipeWire (`PIPEWIRE_REMOTE` with
+  an absolute path may be more robust); Flatpak is expected to honour `PULSE_SERVER` but wasn't tested.
