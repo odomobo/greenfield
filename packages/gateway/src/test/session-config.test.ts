@@ -4,19 +4,13 @@ import { parseSessionConfig } from '../session-config'
 import { formatSiteSettings, parseSiteSettings } from '../site-settings'
 
 test('session config: defaults without devFlags', () => {
-  const { config, devFlags } = parseSessionConfig('{"version":1,"socketPath":"/x/viewer.sock","extra":true}')
-  assert.equal(config.socketPath, '/x/viewer.sock')
+  const { config, devFlags } = parseSessionConfig('{"version":1,"listenFd":4,"extra":true}')
+  assert.equal(config.listenFd, 4)
   assert.deepEqual(devFlags, { timeScale: 1, linkKbps: 0, patchOrder: 'oldest', patchShape: 'bands' })
 })
 
-test('session config: an inherited listening socket instead of a path', () => {
-  const { config } = parseSessionConfig('{"version":1,"listenFd":4}')
-  assert.equal(config.listenFd, 4)
-  assert.equal(config.socketPath, undefined)
-})
-
 test('session config: dev flags are filled in individually', () => {
-  const { devFlags } = parseSessionConfig('{"version":1,"socketPath":"s","devFlags":{"timeScale":3,"patchShape":"tiles"}}')
+  const { devFlags } = parseSessionConfig('{"version":1,"listenFd":4,"devFlags":{"timeScale":3,"patchShape":"tiles"}}')
   assert.deepEqual(devFlags, { timeScale: 3, linkKbps: 0, patchOrder: 'oldest', patchShape: 'tiles' })
 })
 
@@ -24,12 +18,12 @@ test('session config: invalid records are rejected', () => {
   for (const text of [
     'nope',
     '[]',
-    '{"version":2,"socketPath":"s"}',
+    '{"version":2,"listenFd":4}',
     '{"version":1}',
-    '{"version":1,"socketPath":"s","devFlags":{"timeScale":0}}',
-    '{"version":1,"socketPath":"s","devFlags":{"patchOrder":"x"}}',
-    '{"version":1,"socketPath":"s","siteSettingsPath":3}',
-    '{"version":1,"socketPath":"s","listenFd":4}',
+    '{"version":1,"listenFd":4,"devFlags":{"timeScale":0}}',
+    '{"version":1,"listenFd":4,"devFlags":{"patchOrder":"x"}}',
+    '{"version":1,"listenFd":4,"siteSettingsPath":3}',
+    '{"version":1,"socketPath":"/x/viewer.sock"}',
     '{"version":1,"listenFd":1}',
     '{"version":1,"listenFd":"4"}',
   ]) {

@@ -3,17 +3,17 @@ import { X509Certificate } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import path from 'node:path'
-import { GatewayConfig } from './config'
 import { log } from './log'
 
 /**
- * Reads the configured certificate and key, or generates a self-signed pair in the state dir on first run. Started by
- * the monitor, the key stays readable by the monitor only and its contents are handed to the web process over IPC;
- * started by a login helper, the web process reads it itself.
+ * Reads the configured certificate and key, or generates a self-signed pair in the state dir on first run. The web
+ * process reads them itself (as the web user, so the files and the state dir must be readable by it).
  */
-export async function loadTLS(
-  config: Pick<GatewayConfig, 'certFile' | 'keyFile' | 'stateDir'>,
-): Promise<{ cert: string; key: string }> {
+export async function loadTLS(config: {
+  certFile?: string
+  keyFile?: string
+  stateDir: string
+}): Promise<{ cert: string; key: string }> {
   let certFile = config.certFile
   let keyFile = config.keyFile
   if (certFile === undefined || keyFile === undefined) {

@@ -4,45 +4,49 @@ The front door: a login page and the per-user desktop sessions behind it (one de
 
 ## Processes
 
-Production (PAM, `main.js` as root; step 5 of [SIGNIN-ROADMAP.md](../../SIGNIN-ROADMAP.md) replaces the monitor with
-the production login helper):
+Production (the production login helper, [packages/login](../login/README.md): `nebula-login`, started as root):
 
 ```
-gateway (monitor)          root. Not network-facing. Authenticates users through native/pam-helper,
-│                          issues one-use login tickets, keeps the session registry, spawns sessions.
-├── gateway-web            unprivileged (--web-user, default "greenfield"). TLS, the page, Origin checks, failed
-│                          sign-in throttling, viewer files; runs the sign-in on the page's WebSocket and then relays
-│                          that WebSocket to the user's session socket. Gets the listening socket and TLS key from the
-│                          monitor; asks the monitor (IPC) to authenticate, and to attach to or start the desktop
-│                          with the ticket it got.
-└── pam-helper session     root, tiny C. pam_open_session (pam_systemd → logind session, XDG_RUNTIME_DIR, user bus),
-    └── session-process    then drops to the user: the server compositor (wlroots), the desktop shell's server side
-                           and the user's apps. Listens on /run/greenfield/sessions/<id>/viewer.sock (dir
-                           uid:webgroup 2750, socket 0660).
+nebula-login               root, Rust (std, libc, libpam). Binds the port. Never reads network data: accepts the
+│                          web process's sign-ins on /run/nebula/login.sock (only from the web user, SO_PEERCRED;
+│                          the login protocol: client address, Begin, Prompt/Answer, Result), at most 16 at a time,
+│                          one forked child per sign-in.
+├── gateway-web            the web user (--web-user, default nebula-web), started with the listening socket (fd 3)
+│                          and where login.sock is. TLS (it reads the key itself), the page, Origin checks, failed
+│                          sign-in throttling per IP, viewer files; relays the helper's prompts (PAM's) to the page
+│                          and, once signed in, the WebSocket over the connection the Result carried.
+└── sign-in child          root. One PAM handle (service "nebula"): pam_authenticate + pam_acct_mgmt with PAM's
+    │                      prompts relayed to the page, PAM_RHOST = the client's IP; refuses root. Then attaches to
+    │                      the user's running desktop (users/<uid>/desktop.sock) or opens the PAM session on the same
+    │                      handle (pam_setcred, pam_open_session: pam_systemd, pam_mount, keyrings get the password)
+    │                      and starts the desktop; it then stays as the desktop's PAM parent: waits for it, then
+    │                      pam_close_session.
+    └── session-process    the desktop, as the user (groups, gid, uid dropped and verified; PAM's environment):
+                           the server compositor (wlroots), the desktop shell's server side and the user's apps.
+                           Accepts Handover records on its inherited desktop.sock (SessionConfig.listenFd). Log out
+                           closes it: the next sign-in starts a new desktop. Started with PR_SET_PDEATHSIG, so a
+                           killed PAM parent ends its desktop.
 ```
 
-Development (the dev login helper, [packages/login](../login/README.md), the dev entry point; the same shape the
-production login helper will have):
+Development (the dev login helper, [packages/login](../login/README.md), the dev entry point; the same shape, without
+PAM or privileges):
 
 ```
 nebula-dev-login           the current user (never root). Binds the port, owns the --dev-* options. Accepts the web
-│                          process's sign-ins on <runtime>/login.sock (the login protocol: client address, Begin,
-│                          Prompt/Answer, Result), one forked child per sign-in.
-├── gateway-web            started with the listening socket (fd 3) and where login.sock is. TLS, the page, Origin
-│                          checks, failed sign-in throttling per IP, viewer files; relays the helper's prompts to the
-│                          page and, once signed in, the WebSocket over the connection the Result carried.
-└── sign-in child          checks the password, then attaches to or starts the user's desktop: flock on
-    │                      <runtime>/users/<uid>/lock, connect to desktop.sock; if nothing listens, bind it and start
-    │                      the desktop with the listening socket inherited. Hands it the connection (a socket pair end
-    │                      and the client's address, a Handover record) and the web process the other end. A child
-    │                      that started a desktop stays as its parent until it exits.
-    └── session-process    the desktop, as the current user: accepts Handover records on its inherited desktop.sock
-                           (SessionConfig.listenFd). Log out closes it: the next sign-in starts a new desktop.
+│                          process's sign-ins on <runtime>/login.sock, one forked child per sign-in.
+├── gateway-web            the same web process, started the same way.
+└── sign-in child          checks the password ($GREENFIELD_DEV_PASSWORD), then attaches to or starts the user's
+    │                      desktop like the production helper: flock on <runtime>/users/<uid>/lock, connect to
+    │                      desktop.sock; if nothing listens, bind it and start the desktop with the listening socket
+    │                      inherited. Hands it the connection (a socket pair end and the client's address, a Handover
+    │                      record) and the web process the other end. A child that started a desktop stays as its
+    │                      parent until it exits.
+    └── session-process    the desktop, as the current user.
 ```
 
 TLS ends in the web process, so users' sessions never have access to the key. There is no plain-HTTP mode: without
 `--cert`/`--key` the web process generates a self-signed certificate. A user's desktop dies when they log out or when the
-gateway stops; closing the browser doesn't affect it.
+login helper stops; closing the browser doesn't affect it.
 
 ## Building
 
@@ -89,34 +93,43 @@ refuses to start on non-loopback addresses, as root, or without a password of at
 (`--help`): the `--dev-*` experiments and test settings (`--dev-time-scale`, `--dev-link-kbps`, `--dev-patch-order`,
 `--dev-patch-shape`), `--encoder` / `--render-device` / `--site-config`, `--runtime-dir` (default
 `$XDG_RUNTIME_DIR/nebula-dev-<port>`), and the web process's `--cert`, `--key`, `--state-dir` (default
-`~/.local/state/greenfield-dev`), `--hide-hostname`, `--allowed-origin`, which it passes on. The gateway's `main.js`
-and the web process take no dev options.
+`~/.local/state/greenfield-dev`), `--hide-hostname`, `--allowed-origin`, which it passes on. The production helper
+(`nebula-login`) and the web process take no dev options.
 
 End-to-end test: `scripts/test-gateway.sh` (runs the scripts in `scripts/e2e/` in parallel; they start the dev login
 helper with `--dev-time-scale 3`, a test-only option that divides the failed-sign-in delay, each with its own runtime
 directory).
 
-## Real mode (PAM, multi-user)
+## Production (PAM, multi-user)
 
-One-time setup (Debian/Ubuntu):
+The entry point is the production login helper, `packages/login/target/release/nebula-login`, started as root. It
+needs no PAM development package (it links `libpam.so.0` directly). One-time setup (Debian/Ubuntu):
 
 ```bash
-sudo apt install libpam0g-dev                      # to build the PAM helper
-yarn build   # builds dist/pam-helper too
+yarn build   # builds packages/login (cargo) too
 sudo cp -a ~/greenfield /opt/greenfield            # readable by the web user and all users (not under a 0750 home)
+sudo chown -R root:root /opt/greenfield            # root runs nebula-login from here: nobody else may change it
 sudo cp "$(command -v node)" /usr/local/bin/node   # a node every user can execute (nvm's lives in your home)
-sudo cp /opt/greenfield/packages/gateway/pam/greenfield /etc/pam.d/greenfield
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin greenfield
+sudo cp /opt/greenfield/packages/login/pam/nebula /etc/pam.d/nebula
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin nebula-web
 ```
 
 Run:
 
 ```bash
-sudo env -u DISPLAY /usr/local/bin/node /opt/greenfield/packages/gateway/dist/main.js --bind-port 443
+sudo env -u DISPLAY /opt/greenfield/packages/login/target/release/nebula-login --bind-port 443 --node /usr/local/bin/node
 ```
 
-Options: `--cert/--key` for a real certificate (default: self-signed in /var/lib/greenfield/tls), `--hide-hostname`,
-`--allowed-origin` (behind a reverse proxy), `--help` lists everything.
+Options (`--help` lists everything): `--bind-ip` / `--bind-port`, `--cert/--key` for a real certificate (readable by
+the web user; default: a self-signed one in `--state-dir`, default `/var/lib/nebula`, which the helper creates for the
+web user and refuses if it belongs to someone else), `--hide-hostname`, `--allowed-origin` (behind a reverse proxy),
+`--web-user` (default `nebula-web`), `--runtime-dir` (default `/run/nebula`), `--gateway-dir` (default: the built
+`packages/gateway/dist` next to the binary), `--node` (default: `node` from `PATH`), and the site settings below.
+
+The PAM service is `nebula` (`/etc/pam.d/nebula`; without it PAM falls back to `other`). Whatever is configured there
+runs on one handle per sign-in: the page shows PAM's prompts (a second hidden prompt, e.g. a one-time code, gets a
+field of its own), `PAM_RHOST` is the browser's IP and `PAM_TTY` is `nebula`. Per-account lockout is PAM's job
+(`pam_faillock`). Root can't sign in.
 
 Site settings (the video encoder and the GPU render node) are in a root-owned file, `/etc/nebula/nebula.conf` (another
 path with `--site-config`); a missing file means the defaults. Format (see `src/site-settings.ts`):
@@ -128,14 +141,13 @@ encoder = auto
 render-device = /dev/dri/renderD128
 ```
 
-Each session reads the file itself and detects the encoder itself (`gst-inspect-1.0` runs as the user, never in the
-privileged monitor). `--encoder` and `--render-device` override the file (the monitor writes a file for the sessions
-from them).
+Each session reads the file itself and detects the encoder itself (`gst-inspect-1.0` runs as the user, never as
+root). `--encoder` and `--render-device` override the file (the login helper writes `<runtime>/nebula.conf` for the
+sessions from them).
 
 A session is started with a `SessionConfig` record on fd 3 (format in `src/session-config.ts`) and has no other
 start-up input; its `devFlags` section (time scale, simulated link, patch order and shape) is what the dev login
-helper's `--dev-*` options fill in. Started by a login helper, it inherits its listening socket (`listenFd`), on which
-connections arrive as Handover records (`src/login-protocol.ts`, layout in `packages/login/protocol`); the fd passing
+helper's `--dev-*` options fill in. It inherits its listening socket (`listenFd`), on which connections arrive as Handover records (`src/login-protocol.ts`, layout in `packages/login/protocol`); the fd passing
 is in the compositor proxy's small poll addon (`native/poll/src/fd_passing.c`).
 
 ## Desktop shell
@@ -165,6 +177,7 @@ state lives in the session process (src/shell), so it survives the browser going
   with the new connection's IP address.
 - The WebSocket must carry a matching `Origin`. Strict CSP, no inline scripts, `frame-ancestors 'none'`,
   `form-action 'none'`, `Cache-Control: no-store` on the page, HSTS.
-- A ticket only reaches its own user's desktop, is used once, right after the sign-in, and expires after a minute;
-  session ids are random.
+- The web process never decides who is signed in: the login helper runs PAM and hands it a connection to the user's
+  desktop only on success. Root runs only the login helper (small, std/libc/libpam, fixed-format records from the
+  web process); the web process runs as `nebula-web`, desktops as their users.
 - No root sessions.

@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–4 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–5 are implemented; the rest is not.
 
 ## Why
 
@@ -268,6 +268,40 @@ without changing how the pieces connect.
 - Delete `monitor.ts`, `ipc.ts`, `pam-helper.c`, the web process's monitor backend and the session's `viewer.sock`.
 - Manual check with real PAM as root (e2e can't run as root): deferred to the end (see "Manual checks"). The rest is
   already covered by step 4.
+- As built:
+  - **The binary** is `packages/login/login` (`nebula-login`). libpam through a hand-written binding (`src/pam.rs`, the
+    crate's only unsafe code, linked against `libpam.so.0` with `+verbatim`, so no PAM dev package is needed); the
+    rest is `forbid(unsafe_code)`: `args.rs`, `relay.rs` (PAM conversation ↔ Prompt/Answer), `attempt.rs` (one attempt
+    behind `Pam` / `Host` traits, unit-tested with fakes; one test drives the real libpam's conversation without
+    root). New system calls (`peer_uid`, `group_list`, `Credentials` / `become_user`, `alarm`) are in
+    `common/src/sys.rs`; `spawn::spawn_as` starts a process as another user (groups, gid, uid, verified that root
+    can't be regained, then `chdir` and `PR_SET_PDEATHSIG`, which a uid change would clear);
+    `common/src/session_config.rs` writes the SessionConfig for both helpers.
+  - **PAM**: service renamed to `nebula` (`packages/login/pam/nebula`, installed as `/etc/pam.d/nebula`; the helper
+    warns when it is missing). `PAM_RHOST` = the client's address, `PAM_TTY` = `nebula`, `XDG_SESSION_TYPE=wayland`,
+    `XDG_SESSION_CLASS=user`, `XDG_SESSION_DESKTOP=nebula` in PAM's environment for pam_systemd.
+    `pam_authenticate` and `pam_acct_mgmt` with `PAM_DISALLOW_NULL_AUTHTOK`; `PAM_NEW_AUTHTOK_REQD` is refused with
+    its own message (step 11 handles it). On create: `pam_setcred(ESTABLISH)`, `pam_open_session`, the desktop's
+    environment is PATH, LANG, PAM's list, then HOME/USER/LOGNAME/SHELL; after it exits `pam_close_session`,
+    `pam_setcred(DELETE)`, `pam_end`. An answer over `PAM_MAX_RESP_SIZE` (512) or with a NUL fails the conversation.
+  - **Refusals without PAM**: a user name that isn't what useradd accepts (≤ 64 bytes; includes the empty name) and a
+    name whose passwd entry is uid 0 get a fake `Password: ` prompt and the same refusal; a canonical PAM user with
+    uid 0 is refused after PAM too.
+  - **Limits** (step 10/11 may tune them): 16 attempts at a time (the main loop counts children whose per-attempt
+    pipe is still open; more are closed at once), `ClientAddress`/`Begin` within 10 s, each answer within 75 s, a
+    whole attempt within 180 s (`alarm`, cancelled once the child becomes a PAM parent), 3 s failure minimum.
+    `login.sock` is `root:<web group>` 0660 plus the `SO_PEERCRED` check (only the web user's uid).
+  - **Entry point**: `nebula-login` as root takes `--bind-ip`, `--bind-port`, `--web-user` (default `nebula-web`),
+    `--runtime-dir` (`/run/nebula`), `--gateway-dir`, `--node`, `--site-config` / `--encoder` / `--render-device`,
+    and passes `--cert`, `--key`, `--state-dir` (default `/var/lib/nebula`; created for the web user, refused if
+    someone else owns it, since the web process generates the self-signed certificate there), `--hide-hostname`,
+    `--allowed-origin` on to the web process, started exactly like the dev helper does
+    (`node web.js --listen-fd 3 --login-socket <runtime>/login.sock ...`), as the web user. `--dev-*` is refused.
+  - **Deleted**: `monitor.ts`, `ipc.ts`, `main.ts`, `config.ts` (its options moved to `nebula-login`),
+    `native/pam-helper.c` and its build, the web process's monitor backend (it is always started by a helper), the
+    session's `socketPath` / `viewer.sock`, IPC ready/`ending`/disconnect handling, and the `X-Client-IP` header
+    (`SessionConfig.listenFd` is now required). `auth.sh` checks that `nebula-login` refuses to run without root and
+    refuses dev options.
 
 ### 6. Listener and per-connection workers
 

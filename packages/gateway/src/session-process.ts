@@ -2,15 +2,12 @@
  * A user's desktop session: the server-side compositor (wlroots, see WlrCompositor in the compositor proxy) plus the
  * user's apps. Runs as the user. Serves the viewer WebSocket; the gateway's web process authenticates browsers and
  * relays to it. The desktop shell's server side (apps, launching, pinned apps, notifications) talks to the viewer over
- * that WebSocket too (shell/service.ts). Viewer connections come one of two ways (SessionConfig, session-config.ts):
+ * that WebSocket too (shell/service.ts). It is started by a login helper (packages/login), with its SessionConfig
+ * (session-config.ts) on fd 3: it inherits its listening socket (`desktop.sock`, `listenFd`) and accepts Handover
+ * records on it, each carrying a connection the web process relays and the client's address.
  *
- *   - started by a login helper (packages/login): it inherits its listening socket (`desktop.sock`, `listenFd`) and
- *     accepts Handover records on it, each carrying a connection the web process relays and the client's address;
- *   - started by the monitor (through the PAM helper in PAM mode): it listens on a Unix socket path itself
- *     (`socketPath`) that only the web process can reach, which tells it the client's address in an `X-Client-IP`
- *     header. (Until the production login helper replaces the monitor.)
- *
- * Lives until the user logs out (`session.logout` from the viewer) or its starter stops it; viewers come and go.
+ * Lives until the user logs out (`session.logout` from the viewer) or its starter stops it (SIGTERM; the helper
+ * starts it with PR_SET_PDEATHSIG, so it gets one when its parent dies); viewers come and go.
  */
 import {
   Apps,
@@ -20,12 +17,10 @@ import {
   SessionController,
   startWlrootsCompositor,
 } from '@gfld/compositor-proxy'
-import { existsSync, unlinkSync } from 'node:fs'
 import { createServer, IncomingMessage, Server } from 'node:http'
 import { Socket } from 'node:net'
 import { AudioService } from './audio/service'
 import { resolveEncoder } from './encoder'
-import { SessionMessage } from './ipc'
 import { fdPassing, Kind, RecordChannel } from './login-protocol'
 import { DEFAULT_SITE_SETTINGS_PATH, DevFlags, readSessionConfig, SessionConfig } from './session-config'
 import { readSiteSettings } from './site-settings'
@@ -40,8 +35,7 @@ process.on('uncaughtException', (e) => {
 
 scrubEnvironment()
 
-// the starter writes the SessionConfig to fd 3 (see session-config.ts); the IPC channel (fd 4) only carries the ready
-// signal and tells us when the starter goes away
+// the starter writes the SessionConfig to fd 3 (see session-config.ts)
 readSessionConfig()
   .then(({ config, devFlags }) => start(config, config.siteSettingsPath ?? DEFAULT_SITE_SETTINGS_PATH, devFlags))
   .catch((e) => {
@@ -54,12 +48,10 @@ async function start(
   siteSettingsPath: string,
   { timeScale, linkKbps, patchOrder, patchShape }: DevFlags,
 ) {
-  if (config.listenFd !== undefined) {
-    // an inherited fd isn't close-on-exec: before we start anything, or it would keep the socket open after we close it
-    fdPassing().setCloseOnExec(config.listenFd)
-  }
+  // an inherited fd isn't close-on-exec: before we start anything, or it would keep the socket open after we close it
+  fdPassing().setCloseOnExec(config.listenFd)
   const settings = readSiteSettings(siteSettingsPath)
-  // GStreamer is only ever run here, as the user (never in the privileged monitor)
+  // GStreamer is only ever run here, as the user (never in the privileged login helper)
   const encoder = resolveEncoder(settings.encoder, (message) => logger.info(message))
   const { audioDir } = setupSessionEnvironment()
 
@@ -89,33 +81,21 @@ async function start(
   process.once('exit', () => audio.cleanUpAtExit())
   const controller = createSessionController(viewerHost)
 
-  // the gateway went away or asked us to stop: don't leave orphaned apps behind
+  // the helper went away or asked us to stop: don't leave orphaned apps behind
   const terminate = () => void endSession(apps, audio, KILL_AFTER_MS / timeScale)
-  process.once('disconnect', terminate)
   // on, not once: a second signal while ending must not kill us before we exit (exiting cleans up after XWayland)
   process.on('SIGTERM', terminate)
   process.on('SIGINT', terminate)
 
   const server = viewerServer(controller)
-  const stopListening =
-    config.listenFd !== undefined ? acceptHandovers(config.listenFd, server) : await listen(config.socketPath!, server)
-  // Log out: stop taking connections and tell the starter first (a sign-in from now on starts a new desktop: a login
-  // helper finds the listening socket closed), then close the viewer and end
+  const stopListening = acceptHandovers(config.listenFd, server)
+  // Log out: stop taking connections first (a sign-in from now on finds the listening socket closed and starts a new
+  // desktop), then close the viewer and end
   viewerHost.onLogout = (done) => {
     stopListening()
-    const ending: SessionMessage = { type: 'ending' }
-    const end = () => {
-      done()
-      terminate()
-    }
-    if (process.send === undefined || !process.connected) {
-      end()
-    } else {
-      process.send(ending, undefined, {}, end)
-    }
+    done()
+    terminate()
   }
-  const ready: SessionMessage = { type: 'ready' }
-  process.send?.(ready)
   logger.info('Session ready.')
 }
 
@@ -195,19 +175,4 @@ function acceptHandovers(listenFd: number, server: Server): () => void {
     stopPoll(poll)
     closeFd(listenFd)
   }
-}
-
-function listen(socketPath: string, server: Server): Promise<() => void> {
-  return new Promise((resolve, reject) => {
-    if (existsSync(socketPath)) {
-      unlinkSync(socketPath)
-    }
-    // rw for us and the gateway's group (inherited from the setgid session dir), nothing for others
-    const previousUmask = process.umask(0o007)
-    server.once('error', reject)
-    server.listen(socketPath, () => {
-      process.umask(previousUmask)
-      resolve(() => server.close())
-    })
-  })
 }

@@ -3,8 +3,8 @@
 # speak the in-band sign-in on the page's WebSocket (see "Sign-in" in libs/scene-protocol).
 #
 # Starts the gateway (the dev login helper, see lib.sh) on $GATEWAY_PORT, then checks:
-#   - unsafe flag combinations are refused, and there is no plain-HTTP mode; the production entry point (main.js) and
-#     the web process take no dev options;
+#   - unsafe flag combinations are refused, and there is no plain-HTTP mode; the production login helper (nebula-login,
+#     which refuses to run without root) and the web process take no dev options;
 #   - the sign-in page leaks nothing: no product names, no cookies;
 #   - an unknown user and a wrong password look the same: the same message and timing, at least the minimum failure
 #     time;
@@ -32,13 +32,15 @@ GREENFIELD_DEV_PASSWORD=short "$LOGIN_HELPER" --bind-ip 127.0.0.1 --bind-port "$
   fail "the dev login helper started with a weak password"
 gateway --dev-time-scale 0 --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
   fail "an invalid time scale was accepted"
-# the production entry point (the monitor) has no dev mode any more, and needs root
-node "$REPO/packages/gateway/dist/main.js" --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
-  fail "PAM mode started without root"
-node "$REPO/packages/gateway/dist/main.js" --dev-auth --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
-  fail "the production gateway accepted --dev-auth"
-node "$REPO/packages/gateway/dist/main.js" --dev-time-scale 3 --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>&1 &&
-  fail "the production gateway accepted a dev option"
+# the production login helper has no dev options, and needs root
+PRODUCTION_HELPER="$REPO/packages/login/target/release/nebula-login"
+[ -x "$PRODUCTION_HELPER" ] || fail "build the login helpers first: (cd packages/login && yarn build)"
+OUTPUT="$("$PRODUCTION_HELPER" --bind-ip 127.0.0.1 --bind-port "$PORT" 2>&1)" &&
+  fail "the production login helper started without root"
+[[ "$OUTPUT" == *"must be started as root"* ]] || fail "the production login helper didn't refuse for want of root"
+OUTPUT="$("$PRODUCTION_HELPER" --dev-time-scale 3 --bind-ip 127.0.0.1 --bind-port "$PORT" 2>&1)" &&
+  fail "the production login helper accepted a dev option"
+[[ "$OUTPUT" == *"dev login helper"* ]] || fail "the production login helper didn't refuse a dev option"
 # the web process takes no dev options either
 node "$REPO/packages/gateway/dist/web.js" --listen-fd 3 --login-socket /nonexistent --dev-time-scale 3 >/dev/null 2>&1 &&
   fail "the web process accepted a dev option"

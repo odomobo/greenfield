@@ -1,5 +1,0 @@
-# PAM service for the Greenfield gateway. Install as /etc/pam.d/greenfield.
-# Debian/Ubuntu layout; on other distributions mirror what /etc/pam.d/login (or sshd) uses.
-@include common-auth
-@include common-account
-@include common-session

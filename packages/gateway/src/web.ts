@@ -3,16 +3,11 @@
  * throttling, the viewer's static files, the sign-in conversation on the page's WebSocket, and relaying that same
  * WebSocket to the user's session process over a Unix socket once signed in.
  *
- * It is started one of two ways, each with its own sign-in backend (until step 5 of SIGNIN-ROADMAP.md removes the
- * monitor):
- *
- *   - by a login helper (packages/login; the dev helper for now), with options (see `usage`): the listening TCP
- *     socket as an inherited fd and the helper's `login.sock`. Each sign-in is a connection to login.sock speaking
- *     the login protocol (login-protocol.ts): the client's address, Begin, the helper's prompts relayed to the page and
- *     its answers back, and a Result that carries, on success, our end of a connection to the user's desktop;
- *   - by the monitor (main.js, PAM mode), without options: its `start` message (IPC) brings the listening socket and
- *     the TLS key. It knows users only through tickets the monitor hands out on successful authentication, and uses
- *     each ticket once, right away, to attach to (or start) the user's desktop, whose socket path it connects to.
+ * It is started by a login helper (packages/login: nebula-login, as the web user, or the dev helper), with options
+ * (see `usage`): the listening TCP socket as an inherited fd and the helper's `login.sock`. Each sign-in is a
+ * connection to login.sock speaking the login protocol (login-protocol.ts): the client's address, Begin, the helper's
+ * prompts relayed to the page and its answers back, and a Result that carries, on success, our end of a connection to
+ * the user's desktop.
  *
  * Signing in works like unlocking a screen: the page's one WebSocket (`/ws`) is the sign-in. The page signs in on it
  * (in-band, see "Sign-in" in libs/scene-protocol) and the same WebSocket then carries the desktop. There are no
@@ -24,7 +19,7 @@ import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
 import { IncomingMessage, ServerResponse } from 'node:http'
 import { createServer as createHTTPSServer } from 'node:https'
 import { hostname } from 'node:os'
-import { connect, Server as NetServer, Socket } from 'node:net'
+import { Socket } from 'node:net'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 import {
@@ -33,7 +28,6 @@ import {
   SignInClientMessage,
   SignInServerMessage,
 } from '@gfld/scene-protocol'
-import { MonitorReply, MonitorReplyEnvelope, WebRequest, WebStart } from './ipc'
 import { log } from './log'
 import { fdPassing, Kind, MAX_ANSWER, MAX_USERNAME, Outcome, PromptStyle, RecordChannel } from './login-protocol'
 import { errorPage, escapeHTML } from './pages'
@@ -42,58 +36,31 @@ import { loadTLS } from './tls'
 
 process.title = 'gateway-web'
 
-/** (monitor backend; a login helper keeps the minimum itself) */
-const MIN_FAILED_LOGIN_MS = 3000
 /** the page sends its `begin` right after the upgrade */
 const BEGIN_TIMEOUT_MS = 10_000
 /** a person answers each prompt (a password now, a one-time code later) within this time */
 const ANSWER_TIMEOUT_MS = 60_000
-/** the monitor backend's limits (a login helper's are the protocol's) */
-const MONITOR_MAX_USERNAME = 64
-const MONITOR_MAX_ANSWER = 1024
 /** a login helper answers within its own limits (the failure delay, starting a desktop) */
 const HELPER_TIMEOUT_MS = 90_000
 const TOO_MANY_FAILURES = 'Too many failed attempts. Try again in a few minutes.'
-/** the prompt the password is asked with (the only one until PAM's own prompts are relayed) */
+/** the prompt a throttled address is asked (as if the helper asked it) */
 const PASSWORD_PROMPT = 'Password: '
 const TCP_NOTSENT_LOWAT_BYTES = 32 * 1024
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 const staticDir = path.resolve(__dirname, '../static')
 
-/** What the web process serves with; `loginSocket` is set when a login helper started it. */
-type WebSettings = Omit<WebStart, 'type'> & { loginSocket?: string }
+/** What the web process serves with. */
+type WebSettings = {
+  tls: { cert: string; key: string }
+  hostname: string | undefined
+  allowedOrigins: string[]
+  viewerDir: string
+  loginSocket: string
+}
 let start!: WebSettings
 // per IP, generously, since many users may share an address (NAT). No per-user throttling: per-account lockout is
 // PAM's job (pam_faillock)
 const ipFailures = new RateLimiter(20)
-
-// --- monitor RPC ---
-
-let nextSerial = 1
-const pending = new Map<number, (reply: MonitorReply) => void>()
-
-function monitor(request: WebRequest): Promise<MonitorReply> {
-  return new Promise((resolve) => {
-    const serial = nextSerial++
-    pending.set(serial, resolve)
-    process.send!({ serial, request })
-  })
-}
-
-process.on('message', (message: any, handle: unknown) => {
-  if (message?.type === 'start') {
-    start = message as WebStart
-    serve(handle as NetServer)
-    return
-  }
-  const envelope = message as MonitorReplyEnvelope
-  const resolve = pending.get(envelope.serial)
-  if (resolve) {
-    pending.delete(envelope.serial)
-    resolve(envelope.reply)
-  }
-})
-process.on('disconnect', () => process.exit(0))
 
 // --- started by a login helper ---
 
@@ -145,12 +112,10 @@ async function startFromHelper(argv: string[]) {
   serve({ fd })
 }
 
-if (process.argv.length > 2) {
-  startFromHelper(process.argv.slice(2)).catch((e) => {
-    log.error(e.message)
-    process.exit(2)
-  })
-}
+startFromHelper(process.argv.slice(2)).catch((e) => {
+  log.error(e.message)
+  process.exit(2)
+})
 
 // --- helpers ---
 
@@ -446,62 +411,7 @@ async function handleWebSocket(request: IncomingMessage, socket: Socket, head: B
   }
   // (an unusable name is asked for its password like any other, and fails like a wrong password)
   const username = begin.username.trim()
-  if (start.loginSocket !== undefined) {
-    await signInWithHelper(socket, reader, ip, username, start.loginSocket)
-    return
-  }
-  sendFrame(socket, { type: 'prompt', text: PASSWORD_PROMPT, echo: false })
-  const answer = parseSignInMessage(await reader.next(ANSWER_TIMEOUT_MS))
-  if (answer?.type !== 'answer') {
-    refuse()
-    return
-  }
-
-  // a monotonic clock: wall clock adjustments mustn't shorten the minimum failure time
-  const startedAt = performance.now()
-  const fail = async (message: string) => {
-    // failures take the same minimum time whatever the reason
-    const wait = MIN_FAILED_LOGIN_MS - (performance.now() - startedAt)
-    if (wait > 0) {
-      await new Promise((resolve) => setTimeout(resolve, wait))
-    }
-    sendFrame(socket, { type: 'result', ok: false, message })
-    refuse()
-  }
-  if (ipFailures.blocked(ip)) {
-    await fail(TOO_MANY_FAILURES)
-    return
-  }
-  const password = answer.text
-  const reply =
-    username.length > 0 &&
-    username.length <= MONITOR_MAX_USERNAME &&
-    password.length > 0 &&
-    password.length <= MONITOR_MAX_ANSWER
-      ? await monitor({ type: 'auth', username, password, ip })
-      : ({ ok: false, error: 'auth-failed' } as const)
-  if (!reply.ok || reply.type !== 'auth') {
-    ipFailures.fail(ip)
-    log.info(`Failed sign-in from ${ip}.`)
-    await fail('The username or password is incorrect.')
-    return
-  }
-  if (socket.destroyed) {
-    return
-  }
-
-  // attach or create
-  const desktop = await monitor({ type: 'desktop', ticket: reply.ticket })
-  if (!desktop.ok || desktop.type !== 'socket') {
-    sendFrame(socket, { type: 'result', ok: false, message: 'The desktop could not be started.' })
-    refuse()
-    return
-  }
-  if (socket.destroyed) {
-    return
-  }
-  // the session learns the client's IP (for the takeover message of the page it replaces) from a header
-  relay(socket, reader, connect(desktop.path), ip, reply.username, `X-Client-IP: ${ip}\r\n`)
+  await signInWithHelper(socket, reader, ip, username, start.loginSocket)
 }
 
 /**
@@ -583,7 +493,7 @@ async function signInWithHelper(
         continue
       }
       if (record.kind === Kind.Result && record.outcome === Outcome.SignedIn && next.fd !== undefined) {
-        relay(socket, reader, new Socket({ fd: next.fd, readable: true, writable: true }), ip, record.text, '')
+        relay(socket, reader, new Socket({ fd: next.fd, readable: true, writable: true }), ip, record.text)
         return
       }
       if (next.fd !== undefined) {
@@ -609,16 +519,9 @@ async function signInWithHelper(
 
 /**
  * Connect the signed-in page to its desktop over `upstream` (connecting, or connected already): a WebSocket handshake
- * with the session (with `extraHeaders`), then the result frame, then bytes both ways.
+ * with the session, then the result frame, then bytes both ways.
  */
-function relay(
-  socket: Socket,
-  reader: SignInReader,
-  upstream: Socket,
-  ip: string,
-  username: string,
-  extraHeaders: string,
-) {
+function relay(socket: Socket, reader: SignInReader, upstream: Socket, ip: string, username: string) {
   const destroyBoth = () => {
     socket.destroy()
     upstream.destroy()
@@ -644,7 +547,7 @@ function relay(
     upstream.write(
       'GET /viewer HTTP/1.1\r\nHost: session\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
         `Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\n` +
-        `${extraHeaders}\r\n`,
+        '\r\n',
     )
     let response = Buffer.alloc(0)
     const onResponse = (chunk: Buffer) => {
@@ -721,7 +624,7 @@ function tuneSocket(socket: Socket) {
   }
 }
 
-function serve(listener: NetServer | { fd: number }) {
+function serve(listener: { fd: number }) {
   // the host name is shown on the sign-in form without needing scripts or a request
   indexHTML = readFileSync(path.join(start.viewerDir, 'index.html'), 'utf8').replace(
     '<!--hostname-->',

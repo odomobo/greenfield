@@ -885,8 +885,6 @@ __metadata:
     rimraf: "npm:^5.0.7"
     typescript: "npm:^5.5.2"
     ws: "npm:^8.17.1"
-  bin:
-    gateway: dist/main.js
   languageName: unknown
   linkType: soft
 

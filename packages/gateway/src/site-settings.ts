@@ -74,7 +74,7 @@ export function readSiteSettings(file: string): SiteSettings {
   }
 }
 
-/** The file text for settings (the monitor writes one for --encoder and --render-device). */
+/** The file text for settings (the format the login helpers write for --encoder and --render-device). */
 export function formatSiteSettings(settings: SiteSettings): string {
   return `encoder = ${settings.encoder}\nrender-device = ${settings.renderDevice}\n`
 }

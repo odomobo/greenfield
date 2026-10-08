@@ -1,10 +1,9 @@
 {
   "name": "@gfld/gateway",
   "version": "0.1.0",
-  "description": "Login gateway and per-user session manager.",
+  "description": "The web process (TLS, the page, the sign-in relay) and the per-user desktop session process.",
   "type": "commonjs",
   "private": true,
-  "bin": "dist/main.js",
   "engines": {
     "node": ">=18"
   },
@@ -12,9 +11,7 @@
     "linux"
   ],
   "scripts": {
-    "build:native": "sh ./native/build.sh",
-    "build": "yarn run rimraf dist && yarn run tsc && node dist/build-dconf.js && node dist/build-audio.js && yarn build:native",
-    "run": "yarn node dist/main.js",
+    "build": "yarn run rimraf dist && yarn run tsc && node dist/build-dconf.js && node dist/build-audio.js",
     "test": "node --test --test-force-exit dist/test/",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write 'src/**/*.ts'"

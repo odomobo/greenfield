@@ -1,7 +1,7 @@
 /**
  * What a session process is started with: the `SessionConfig` record, passed on an extra pipe at fd 3 (the session
- * reads it once at startup, then closes the fd). Written by whatever starts the session: the monitor now, the dev and
- * production login helpers (Rust) later. The session has no other start-up input and no dev mode of its own.
+ * reads it once at startup, then closes the fd). Written by the login helper that starts the session (packages/login:
+ * nebula-login, or the dev helper). The session has no other start-up input and no dev mode of its own.
  *
  * Wire format (version 1):
  *
@@ -10,12 +10,9 @@
  *   - keys (unknown keys are ignored, so a later writer may add some):
  *
  *       version             number, required, must be 1
- *       listenFd            number: the fd of the session's inherited listening socket (`desktop.sock`, bound by a
- *                           login helper), on which it accepts Handover records, each carrying a viewer connection
- *                           (see packages/login/protocol). Written by the login helpers.
- *       socketPath          string: where the session listens for the viewer connection itself (a Unix socket path),
- *                           the monitor's way until the production login helper replaces it. Exactly one of
- *                           listenFd and socketPath is required.
+ *       listenFd            number, required: the fd of the session's inherited listening socket (`desktop.sock`,
+ *                           bound by the login helper), on which it accepts Handover records, each carrying a viewer
+ *                           connection (see packages/login/protocol).
  *       siteSettingsPath    string, optional: the site settings file the session reads itself (see site-settings.ts).
  *                           Missing: the default path, /etc/nebula/nebula.conf. A missing file means all defaults.
  *       devFlags            object, optional, written only by the dev helper. Missing: production behavior. Keys, all
@@ -25,12 +22,9 @@
  *         patchOrder        'oldest' (default) or 'random': the order a window's queued patches are sent in
  *         patchShape        'bands' (default) or 'tiles': how a window's large damage is split into patches
  *
- * The session process finds it on fd 3; the starter must keep fd 3 open across any exec in between (the PAM helper
- * execs the command with its fds intact). Started by the monitor, fd 4 carries the Node IPC channel (ready signal; the
- * session ends when the starter goes away), until the login helper replaces the monitor. Started by a login helper,
- * there is no IPC channel: the listening socket is at `listenFd` (4 by the helpers' convention), a connection queues
- * in its backlog until the session accepts it (no ready signal), and the session ends on SIGTERM (the helper starts
- * it with PR_SET_PDEATHSIG, so it gets one when its parent dies).
+ * The session process finds it on fd 3. The listening socket is at `listenFd` (4 by the helpers' convention), a
+ * connection queues in its backlog until the session accepts it (no ready signal), and the session ends on SIGTERM
+ * (the helper starts it with PR_SET_PDEATHSIG, so it gets one when its parent dies).
  */
 import { createReadStream } from 'node:fs'
 
@@ -49,8 +43,7 @@ export const DEFAULT_DEV_FLAGS: DevFlags = { timeScale: 1, linkKbps: 0, patchOrd
 
 export type SessionConfig = {
   version: 1
-  listenFd?: number
-  socketPath?: string
+  listenFd: number
   siteSettingsPath?: string
   devFlags?: Partial<DevFlags>
 }
@@ -69,14 +62,8 @@ export function parseSessionConfig(text: string): { config: SessionConfig; devFl
   if (value.version !== 1) {
     throw new Error('unsupported version')
   }
-  if (value.listenFd !== undefined && !(Number.isInteger(value.listenFd) && value.listenFd >= 3)) {
-    throw new Error('invalid listenFd')
-  }
-  if (value.socketPath !== undefined && (typeof value.socketPath !== 'string' || value.socketPath.length === 0)) {
-    throw new Error('invalid socketPath')
-  }
-  if ((value.listenFd === undefined) === (value.socketPath === undefined)) {
-    throw new Error('exactly one of listenFd and socketPath is required')
+  if (!(Number.isInteger(value.listenFd) && value.listenFd >= 3)) {
+    throw new Error('invalid or missing listenFd')
   }
   if (value.siteSettingsPath !== undefined && typeof value.siteSettingsPath !== 'string') {
     throw new Error('invalid siteSettingsPath')
