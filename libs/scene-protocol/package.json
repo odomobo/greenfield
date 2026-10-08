@@ -2,6 +2,7 @@
   "name": "@gfld/scene-protocol",
   "version": "0.1.0",
   "description": "Wire protocol between the browser viewer and a session (window scene, frames, control messages).",
+  "main": "dist/index.js",
   "module": "dist/index.js",
   "typings": "types/index.d.ts",
   "files": [
