@@ -72,15 +72,21 @@ Improvement: power menu should allow: lock screen, log out, power down, restart.
 
 Improvement?: app groups??? Is this already implemented? Need to look at menu? I think this needs more thought...
 
-Improvement: we need a system tray. It's on the roadmap.
-
-Improvement: There should't be multiple sessions per user. Instead, there should be a single session per user. If a user logs in multiple times, the later log ins can't click on any windows. If they want to interact, they have to select from some dialog that allows for it, but then it removes interaction ability from the other session.
-
-That means we don't need the session picker anymore.
-
-Improvement: in session menu in apps menu, instead of "disconnect", it should say "Sessions".
+Improvement: in session menu, options should be "Lock screen", "Log out", "Shut down", and "Restart"
 
 Improvement: if the server goes down, then in addition to bringing you back to the main login page, it should tell you that it can't access the server.
+
+Improvement: When logging in, it should animate out the login, and animate in the desktop (maybe)
+
+Improvement: when opening the login page, it should animate in the login
+
+Nice to have: on login rejection, it should shake.
+
+Improvement: needs its own canonical port (use port gen)
+
+Improvement: need to properly mark data as cached.
+
+Improvement maybe: automatic reconnect
 
 Bug: when there are too many apps icons on the task bar, some of them get inaccessible.
 
@@ -88,8 +94,6 @@ Nice to have: when hovering a window in the task bar, that window should briefly
 
 Nice to have: right click never allows browser default.
 
-Nice to have: file download/upload.
+Nice to have: file download/upload (depends on QoS modularization)
 
-Nice to have: native code written in rust. Maybe another language for server code???
-
-Necessary eventually: hardening against potential threats.
+Necessary: perform security audit and code audit
