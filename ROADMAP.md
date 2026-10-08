@@ -1,9 +1,7 @@
-# Roadmap
+# Nebula
 
-This project started as a fork of [Greenfield](https://github.com/udevbe/greenfield) and is becoming something different: a
-multi-user remote desktop for managing a Linux server from the browser, as an alternative to SSH. (It will be renamed.)
-
-This document records the design decisions made so far and the order of the remaining work.
+A multi-user remote desktop for Linux servers, in the browser. This document covers the design decisions and the
+remaining work. For completed work, see [HISTORY.md](HISTORY.md).
 
 ## Vision
 
@@ -45,7 +43,7 @@ This document records the design decisions made so far and the order of the rema
   before authentication.
 - Sign-in page, session list and desktop are a single page. The sign-in page is plain HTML, not Wayland.
 - **Signing in is per page, like a lock screen.** The login token lives only in that page's memory (no cookies, no
-  browser storage). The page keeps a connection to the gateway open, and the token is revoked when it closes (after a
+  browser storage). The page keeps a connection to the gatekeeper open, and the token is revoked when it closes (after a
   few seconds' grace for network hiccups). So another tab, a reload, or closing and reopening the browser all require
   signing in again. Desktop sessions keep running regardless.
 - After sign-in: the user's own sessions, attach to one or start a new one.
@@ -59,7 +57,7 @@ This document records the design decisions made so far and the order of the rema
   takes it over (the first page is told).
 - **Disconnect** signs out and returns to the sign-in page; the desktop keeps running. **Log out** ends the desktop and
   returns to the sign-in page.
-- Sessions do **not** survive a gateway restart (or a reboot). Decided not worth the complexity.
+- Sessions do **not** survive a server restart (or a reboot). Decided not worth the complexity.
 - Background services a desktop session needs (D-Bus session bus, xdg-desktop-portal, keyring) start automatically.
   No configuration needed.
 
@@ -137,7 +135,7 @@ Drawn by the browser in HTML/CSS. The visual design (theme, window frames, anima
   2. Search.
   3. Pinned apps and all apps from the user's and the system's `.desktop` files.
 - Apps come only from installed `.desktop` files (launched from their `Exec` line in the session's environment). The
-  gateway's old `--applications` option was removed.
+  session's old `--applications` option was removed.
 - Pinned apps are stored on the server, per user, in `$XDG_CONFIG_HOME/greenfield/pinned.json`.
 - **Notifications** via `org.freedesktop.Notifications`, served by the session process on the session's D-Bus bus
   (it starts a bus if the user has none): pop-ups at the top right below the taskbar, plus a history list (last 50,
@@ -187,10 +185,10 @@ doesn't need to know a surface's class; nothing about it is in the scene protoco
   surfaces included, best effort. No H.264 at all, not even x264.
 - With GPU acceleration, streaming surfaces (that aren't small, below) are sent as video by a hardware encoder
   (`nvh264`, `vaapih264`). There is no x264 fallback.
-- The gateway option `--encoder <auto|none|nvh264|vaapih264>` (default `auto`, replacing today's default `x264`;
-  `x264` is no longer accepted). `auto`: at gateway start, use `vaapih264` if a render node (`/dev/dri/renderD*`)
+- The session option `--encoder <auto|none|nvh264|vaapih264>` (default `auto`, replacing today's default `x264`;
+  `x264` is no longer accepted). `auto`: at session start, use `vaapih264` if a render node (`/dev/dri/renderD*`)
   can be opened and GStreamer has the `vaapih264enc` element, else `nvh264` if it has `nvh264enc` and an NVIDIA
-  device is present, else `none`. The gateway logs the choice. An explicit encoder that then fails to create (no
+  device is present, else `none`. The session logs the choice. An explicit encoder that then fails to create (no
   device, missing element) is logged once and the session continues as `none`.
 - `none` means no video encoder is ever created: the encoder pool has size 0 and the GStreamer video pipelines are
   never built. **There is no video on the CPU** (decided 2026-10-05, done in item 5b phase 2): the x264 encoder and
@@ -479,12 +477,12 @@ state, on any link speed and latency, without starving throughput on fast high-l
 
 What exists today: TCP's own backpressure keeps every queue bounded, so nothing runs away or disconnects. The
 transport hands one data message at a time to the socket; `TCP_NOTSENT_LOWAT` is 32 KB on direct TCP; the session's
-Unix socket to the gateway has a 32 KB send buffer; the web worker relays with backpressure (it reads from the
+Unix socket to the gatekeeper has a 32 KB send buffer; the web worker relays with backpressure (it reads from the
 desktop only once TLS has sent everything, at most 64 KB at a time) and sets `TCP_NOTSENT_LOWAT` on the browser's socket
 (`packages/gatekeeper/web/src/bin/worker.rs`). But those bounds are in bytes, not time
 (about 150 KB in all: ~120 ms at 10 Mbit/s), and the kernel's usual congestion control (cubic) keeps filling the
 router buffer at the bottleneck until packets drop (bufferbloat: often hundreds of milliseconds). A reverse proxy in
-front of the gateway would add its own buffer. And the browser's WebSocket API has no backpressure at all: the
+front of the gatekeeper would add its own buffer. And the browser's WebSocket API has no backpressure at all: the
 browser reads everything off the socket and queues it as message events, so a viewer that decodes too slowly builds
 an unbounded queue in the page.
 
@@ -495,7 +493,7 @@ Not designed for very slow links: at least a lower-end broadband connection is e
 A congestion controller in the session process, on top of whatever TCP the kernel runs (QUIC stacks do the same in
 user space). If we pace our sends at the measured bottleneck rate and keep the kernel's unsent queue small
 (`TCP_NOTSENT_LOWAT`), TCP never has more data than the path can carry, so the network's queues stay short whatever
-the kernel's congestion control is, and through any relay or proxy (the gateway, nginx), since everything is measured
+the kernel's congestion control is, and through any relay or proxy (the gatekeeper, nginx), since everything is measured
 end to end.
 
 It follows BBRv3 as specified in the IETF draft draft-ietf-ccwg-bbr (revision 06, July 2026; the constants below are
@@ -702,7 +700,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
   estimation with ad-hoc fixes for base-delay drift (whack-a-mole; BBR's model covers it); acks after applying
   (they'd measure decoding, not the network; the backlog report covers decoding).
 - **On the table for later: kernel BBR** (`net.ipv4.tcp_congestion_control=bbr` system-wide, or per socket by the
-  gateway when `bbr` is in `tcp_allowed_congestion_control`; Ubuntu kernels ship `tcp_bbr`). Not used for now, to keep
+  gatekeeper when `bbr` is in `tcp_allowed_congestion_control`; Ubuntu kernels ship `tcp_bbr`). Not used for now, to keep
   installation simple. It would complement our controller, not replace it, and would belong in the install script.
 
 ## Audio (playback only)
@@ -717,779 +715,75 @@ single large item never stalls the link. Initial window before any estimate: 64 
 - Mute only (no volume slider); mute tells the server to stop sending audio.
 - Out of scope: microphone, A/V sync.
 
-## Remaining work, in order
 
-### Done
+## Remaining work
 
-- Server-side compositor and window scene protocol with reattach, takeover and frame pacing.
-- GPU (dmabuf) buffer sizes fixed (untested on real GPU hardware).
-- Sign-in gateway with privilege separation, per-user sessions, per-page sign-in, one desktop per user.
-- Instant resizing, left/top anchoring, windows kept on screen.
-- Back-navigation protection.
-- Desktop shell: top taskbar, Apps menu, hover previews, pinned apps, notifications, window animations.
-- Smart encoding: per-surface video/patch modes with encoder and decoder pools (hardware encoders and dmabuf
-  readback untested).
-- Input regions, child windows (dialogs) that move, stack and minimize with their parent, and viewer-side HiDPI (see
-  [Window management](#window-management)). Detecting a pixel ratio change without a resize (moving the browser to
-  another monitor) is unverified: headless Chrome's emulation doesn't fire the events real browsers do.
-- wlroots prototype: **go**. wlroots 0.17.4 (submodule, built against Ubuntu 24.04's packages) runs foot and
-  gtk4-demo in the existing viewer through the existing scene protocol, transport and encoders: typing, pointer and
-  cursors, resize, maximize, popups, dialogs, patches and video, reattach. Findings and gotchas in
-  `packages/session/native/wlr-core/README.md`.
-- wlroots migration, wave 1: every session runs on wlroots, with the desktop shell (Apps menu, launching, pinned apps,
-  notifications; app processes tracked from client credentials). Built by `yarn build` (submodule + meson; CI on
-  Ubuntu 24.04); `scripts/test-gateway.sh` passes on it; unit tests for `WlrCompositor` (fake core) and `Apps`. The
-  old stack stayed selectable with `GFLD_LEGACY_COMPOSITOR=1` until wave 2 C deleted it.
-- wlroots migration, wave 2 B: X11 apps through XWayland. An X11 display per session (`DISPLAY` for launched apps,
-  Xwayland started on the first X11 connection); X11 windows are desktop windows with their title, WM_CLASS app id and
-  transient parent, told where the viewer puts them; their move, resize, maximize and minimize requests go through the
-  same policy; override-redirect menus and tooltips show with their window; X11/Wayland clipboard sync is wlroots'
-  (untested). `scripts/e2e/x11.sh` (xev, xfontsel) runs in `scripts/test-gateway.sh`; gtk4-demo under X11 checked by
-  hand. Works on WSL (read-only `/tmp/.X11-unix`) and with several users. Details:
-  `packages/session/native/wlr-core/README.md`.
-- Sticky modifiers fixed (Ctrl stayed held in foot after a key-up the page never saw). The browser is the truth about
-  modifiers: every key, pointer, button and axis message carries `getModifierState()` (scene protocol v6 `Modifiers`;
-  AltGr reported alone, without the Ctrl+Alt Windows adds), and the native core makes its xkb state agree before the
-  event: modifier keys the browser doesn't hold are released for real, modifiers it holds without a key we saw are set
-  in the mask only, nothing is sent when they agree (Ctrl+A, Ctrl+B stays one Ctrl press). Caps Lock and Num Lock
-  follow the browser the same way. Losing page focus (blur, hidden tab) or the viewer releases every held key.
-  `scripts/e2e/desktop.sh` checks foot's protocol log for all four cases.
-- Core 2 (2026-10-04, merged into master): normal and streaming priority classes by the relentless measure,
-  per-surface slots, streaming patches encoded on nice-19 worker threads, byte-weighted scheduler between the classes,
-  lossless patches only without GPU acceleration (`--encoder auto|none|nvh264|vaapih264`, no x264), and our own
-  BBRv3-style congestion control with viewer acks and the backlog hold (scene protocol 11). See Core items 2a and 2b.
+### Next
 
-### Core
+1. **Replace `dbus-next` with an `sd_bus` C addon.** The `dbus-next` npm package (unmaintained since 2021) is the
+   session's only runtime npm dependency with a significant transitive tree (17 packages, including `event-stream`).
+   Replace it with a small C addon wrapping `sd_bus` (libsystemd), which is already on every target machine. The
+   session uses D-Bus only for the notification server (`src/shell/notifications.ts`): connect to the session bus,
+   request a name, export an interface, handle method calls, emit signals. A ~200 line addon in the existing
+   CMake/Ninja build eliminates the entire tree. The notification server's TypeScript stays largely the same.
 
-1. **Migrate the server-side compositor to wlroots 0.17.4.** wlroots implements the Wayland protocols; we supply only
-   the policy, which is thin because window management happens in the browser.
-   - wlroots is a git submodule pinned to the 0.17.4 tag, built with meson as a static library with only what we use
-     (headless backend, pixman and GLES2 renderers, XWayland), and linked into the native addon. Its API changes
-     between 0.x releases, so upgrades are deliberate, like today's libwayland fork.
-   - 0.17.4 is the newest release whose dependencies (libwayland, wayland-protocols, libdrm, pixman, libxkbcommon,
-     xcb) are all satisfied by Ubuntu 24.04's packages, so nothing else is built from source. 0.18 would need a newer
-     libwayland, 0.19 also a newer pixman, 0.20 four newer libraries. Not having 0.18's explicit sync
-     (`linux-drm-syncobj`, mostly for NVIDIA) is accepted; upgrade when the supported distros catch up.
-   - A narrow C core (wlroots wiring) exposes high-level events and calls to TypeScript: window created, updated or
-     gone; buffer committed with damage; inject input; configure and resize. The buffer-to-encoder path stays native.
-   - Keeps: the viewer, the scene protocol, the gateway, the transport, the encoding policy (`SurfaceEncoder`, patches,
-     region math, encoder pool) and the GStreamer encoder.
-   - Removes: the libwayland fork, the TypeScript protocol implementation (`packages/compositor`),
-     `@gfld/compositor-wasm` (system pixman and libxkbcommon instead), `@gfld/xtsb`, and the code generators and
-     interceptors that only they use.
-   - Included in this item, now that wlroots does the hard parts:
-     - X11 apps through XWayland (`wlr_xwayland`, which includes the X window manager).
-     - Clipboard between remote apps and the local machine (text first, images if cheap), primary selection, and
-       clipboard sync between X11 and Wayland apps. Browsers only read the local clipboard after a click or key press,
-       so pasting from the local machine happens on Ctrl+V.
-     - Drag and drop between remote apps, then local files into remote apps.
-     - HiDPI, server side: output scale and fractional scaling (`wp_fractional_scale_v1`).
-   - **The server is the single source of truth for window state** (position, size, stacking, minimized, maximized).
-     The viewer still moves and resizes windows optimistically during a drag, and reconciles with sequence numbers so a
-     late echo of an old move can never pull a window back:
-     - The viewer numbers its window changes per window; every move or resize it sends carries the next number.
-     - Every window update from the server carries the last number it applied for that window.
-     - While a window has unconfirmed changes (the server's number is behind the last one sent) or is being dragged,
-       the viewer keeps its own position and size and ignores the server's for that window.
-     - Once the server's number catches up, the server's state wins as-is, including its corrections (e.g. clamping
-       a window back on screen).
-     - Server-initiated changes (an app maximizing itself, a dialog following its parent, another viewer moving a
-       window) need no special case: they apply as soon as the viewer has nothing unconfirmed for that window.
-     - This replaces today's "keep the local position until the server reports the same coordinates", which gets stuck
-       when the server corrects a position and ignores legitimate server moves meanwhile.
-   - **Starting point: the prototype** (done, verdict go), the default since wave 1: `yarn build` builds it, every
-     session runs on it, apps start from the Apps menu. `GFLD_WLR_TRACE=1` logs events. Layout:
-     - `native/wlr-core/src/wlr_core.c` (~1.1k lines): the wlroots wiring as a Node addon. It reports surfaces,
-       commits (buffer damage, input region), toplevels and their requests, and cursors to JavaScript, and takes
-       input, configures and frame callbacks from it. `wlr_core_encoder.c` compiles the existing GStreamer encoder into
-       the same addon against the system libwayland.
-     - `src/wlroots/WlrCompositor.ts` (~0.7k lines): the policy, like today's `server/scene.ts`: placement, stacking,
-       focus, minimize, maximize, child windows centred on their parent, frame pacing, one `SurfaceEncoder` per
-       surface. Frame pacing moved to `src/FramePacing.ts`, free of native code.
-     - `src/wlroots/Apps.ts`: the session's app processes (launched, or connected on their own, by client pid).
-     - `packages/session/src/session-process.ts`: the session process.
-     - Detailed notes: `packages/session/native/wlr-core/README.md`.
-   - **Verified in the prototype** (headless Chrome through the gateway): foot (typing, focus, its own decorations,
-     cursor shapes, resizing by its edge, its maximize button); gtk4-demo (its shadow and input region, its own
-     cursor, menus as popups, the About dialog centred and stacked above its parent); small surfaces as patches and
-     busy ones as video; reattach with identical pixels; no regressions on the default path. Clipboard between Wayland
-     apps should already work (wlroots' data device and primary selection) but wasn't tested.
-   - **Gotchas the prototype found** (all handled there; keep them in mind):
-     - wlroots releases each committed buffer right after the commit event, so the core keeps its own reference until
-       the next commit (video encodes hold it until encoded, like `whenIdle` today). Its per-surface "committed" flags
-       accumulate across commits, so a new buffer is detected by `current.buffer` being set.
-     - No renderer: `wlr_compositor_create(display, 5, NULL)` and `wlr_shm_create` with explicit formats, so wlroots
-       doesn't copy shared-memory buffers into textures; the headless output is enabled without
-       `wlr_output_init_render`. GPU buffers will need the GLES2 renderer.
-     - Re-entrancy: events go to JavaScript synchronously and JavaScript calls back in. Flushing clients inside an event
-       double-freed a client on app exit, so only the outermost call flushes.
-     - Event loop: wlroots' `wl_event_loop` fd is polled by the existing poll addon. Configures are scheduled as idle
-       sources, so every call from JavaScript ends with `wl_event_loop_dispatch_idle` + `wl_display_flush_clients`.
-     - Frame callbacks: wlroots sends none itself; `wlr_surface_send_frame_done`, driven by our frame pacing.
-     - One libwayland per process: the fork and the system libwayland share the `libwayland-server.so.0` name, which is
-       why the prototype is a separate session process. The migration deletes the fork, so this goes away.
-     - Build: wlroots 0.17 needs `werror=false` (assert-only variables with `b_ndebug`); its Wayland and X11 backends
-       can't be disabled in 0.17, so the addon also links libwayland-client (harmless).
-     - The encoder owns `frame_buffer.user_data` (its reference count); the held buffer travels alongside it.
-     - Wave 1: the session process must not have its own display in `WAYLAND_DISPLAY`, or GStreamer's GL (the
-       encoder) connects to it as a client. Apps get it when launched.
-     - Wave 1 (done in 2 C): the addon compiled three files from the fork's directory (`native/wayland/src/westfield-egl.c`,
-       `westfield-dmabuf.c`, `drm_format_set.c`, with their headers, used by the encoder): wave 2 C must move them (into
-       `native/encoding/src` or `native/wlr-core/src`) before deleting `native/wayland`, and drop `legacy.ts`,
-       `session-process-legacy.ts` and `GFLD_LEGACY_COMPOSITOR`.
-     - Wave 1: the prototype left nothing focused when the active window closed; now a dialog's parent, else the
-       topmost shown window, is activated. Wave 2 A (server-owned state) should keep this.
-     - Wave 2 B: wlroots' X11 socket code fails on WSL (read-only `/tmp/.X11-unix`), breaks multi-user servers (it
-       creates `/tmp/.X11-unix` 0755 as the first user) and can unlink a live X server's socket; our
-       `xwayland_sockets.c` replaces it at link time (keep it in sync with wlroots' `xwayland/sockets.h` on upgrades).
-     - Wave 2 B: X11 windows have absolute positions; `WlrCompositor` tells them where the scene shows them
-       (`setPosition`, via `X11.ts`). Wave 2 A should keep calling it wherever the scene's positions are decided.
-     - Wave 2 B: X11 apps without their own decorations (xev, xterm, xclock) can't be moved by the user until the
-       window menu's Move (wave 3 D) or the viewer's own title bars (Core item 4). Most classic X11 apps (x11-apps)
-       ship no `.desktop` file, so they aren't in the Apps menu (as on any desktop); a user's own `.desktop` file in
-       `~/.local/share/applications` adds them.
-   - **Work plan: four waves.** A wave's tasks are independent of each other (none needs another's result), so they run in parallel, each on its own branch and worktree; a wave
-     starts once the previous one is merged and tested. At most about three branches at once: wave 2 and 3 tasks all
-     add to `wlr_core.c` and `WlrCompositor.ts`, so more means painful merges (and each branch needs hands-on testing).
-     Agents: Sonnet subagents by default; an Opus fork only for the tricky tasks (marked), as opposed to wiring
-     straightforward code together. Lines are back of the envelope; the prototype's estimate was 2-3 weeks of
-     human-paced work in total, likely a few days of wall-clock time with agents.
+2. **System tray (StatusNotifierItem host).** Apps like Discord, Steam, chat clients and network applets put an icon
+   in the system tray and keep running when their window closes. The session provides the
+   `org.kde.StatusNotifierWatcher` (if none is on the bus) and registers as the host; it forwards the items to the
+   viewer over the session WebSocket.
+   - The viewer shows each item's icon in the taskbar's tray area (left of the mute toggle), with its tooltip;
+     `Status: Passive` items are hidden, `NeedsAttention` uses its attention icon.
+   - Clicks: left click `Activate`, middle click `SecondaryActivate`, wheel `Scroll`. Right click (or `ItemIsMenu`)
+     shows the item's `com.canonical.dbusmenu` menu as one of our own animated context menus.
+   - Legacy XEmbed tray icons (old X11 apps) are not supported.
+   - e2e: a small test item registering an icon and a menu; check the icon shows, a click activates, a menu entry is
+     delivered, and the icon goes when the item's bus name goes.
 
-     | Wave | Task | Agent | Lines added |
-     |---|---|---|---|
-     | 1 | **Done.** **Make wlroots the default**: the session process on `WlrCompositor`; the desktop shell on it (Apps menu, launching, notifications; client PIDs from `wl_client_get_credentials`); CI and build docs get meson (the XWayland packages come with B); unit tests for `WlrCompositor` with the addon mocked; `scripts/test-gateway.sh` passes on it. Everything else builds on this. | Fork (tricky: session lifecycle, the prototype's gotchas) | ~1k |
-     | 2 | **Done.** **A. Window-state sync**: the server owns window state; sequence-number reconciliation (above) in the viewer, the scene protocol and `WlrCompositor`. Scene protocol v5: `seq` on every `window.*` change but `window.close`, echoed per scene window (a change that changes nothing is still echoed). The viewer side is `packages/viewer/src/window-sync.ts` (unit tested); the e2e test drags a window with every scene held back 300 ms (`__viewerTest.delayScenes`) and checks it never jumps back. (The legacy fallback was dropped after C.) | Fork (tricky: ordering and races) | 300-500 |
-     | 2 | **Done.** **B. XWayland**: `wlr_xwayland` with its window manager; X11 windows (including override-redirect menus and tooltips) become scene windows. | Fork (tricky: X11 quirks) | 400-700 (about 700 in C and TypeScript, plus tests) |
-     | 2 | **C. Done.** **Delete the old stack**: the libwayland fork and its addons, `packages/compositor`, `@gfld/compositor-wasm`, `@gfld/xtsb`, `@gfld/common`, the compositor generators and protocol libs, `protocol/*.xml`, the proxy's interceptors, `legacy.ts`, `session-process-legacy.ts` and `GFLD_LEGACY_COMPOSITOR`; the encoder's EGL/dmabuf helpers moved into `native/wlr-core/src`. About 90k lines deleted. | Sonnet | ~0 |
-     | 3 | **D. Done.** Fullscreen (the window fills the output, which excludes the taskbar: the taskbar always stays visible; protocol unchanged), popups unconstrained to the output, `repeat_info` 25/600, keyboard layout from `/etc/default/keyboard`, the cheap globals (viewporter, presentation-time, xdg-activation, single-pixel-buffer, idle-inhibit, xdg-output), the window menu with Move and Size, preview cards with title and close only; no Alt+drag. Details: wlr-core README. Original plan: **Polish**: fullscreen, popups kept on screen, key repeat, keyboard layout from the locale (Caps/Num Lock sync is done: it follows the browser's modifier state); cheap globals (viewporter, presentation time, xdg-activation, single-pixel buffer, idle inhibit, xdg-output). **Window menu with Move and Size** (Windows' window menu; how a window without a reachable title bar is moved, e.g. xclock): one shared menu, `windowMenuItems` in `packages/viewer/src/shell/menus.ts`: Restore/Minimize, Maximize/Restore down, Move, Size, Close window. Move: the four-way move cursor, the window follows the pointer, a click drops it, Escape puts it back, arrow keys nudge it. Size: the edge or corner nearest the pointer (or picked by the first arrow key) follows the pointer, a click finishes, Escape cancels. Both reuse the drag code and the window-state sync (no server changes). Taskbar preview cards show only the title and a close button (no minimize and maximize controls); right-clicking anywhere on a card opens the window menu, as does the taskbar button of a single-window group (as today); our own title bars (Core item 4) open the same menu. No Alt+drag: undiscoverable, and host desktops (KDE, Xfce) and apps (GIMP, Inkscape, Blender) use Alt+click. | Sonnet | 600-900 |
-     | 3 | **Done.** Text clipboard both ways (a remote app's selection is read through a pipe and written to the browser's clipboard, retried at the next input if the browser refuses; Ctrl+V, Ctrl+Shift+V and Shift+Insert send the browser's text first, then the key; the primary selection stays between remote apps); drag and drop between remote apps with the icon shown by the viewer; files from the user's computer dropped on a window are uploaded (chunks over the WebSocket, `FILE` envelopes) into `~/.cache/greenfield/drops/<random>/` and offered as `text/uri-list` through a drag of ours (hovering shows apps' drop targets). Scene protocol v7; native `wlr_core_clipboard.c` and `wlr_core_dnd.c`; e2e `scripts/e2e/clipboard.sh` (foot, OSC 52) and `dnd.sh` (a small Wayland client). Not done: images and files in the clipboard, X11 apps' drags with the browser (untested), a progress indicator for big uploads. **E. Clipboard with the browser, then drag and drop** (in that order, one agent: drag and drop reuses the clipboard's data plumbing). Clipboard: a server-side data source for text from the browser (on Ctrl+V), the selection read through a pipe and sent to the viewer, primary selection the same way; X11/Wayland sync comes with `wlr_xwayland`. Drag and drop: between remote apps via wlroots' seat drags with the drag icon shown by the viewer, then local files into remote apps (uploaded, offered as `text/uri-list`). | Sonnet | 1.1-1.6k |
-     | 3 | **Done.** **F. HiDPI, server side**: output scale and `wp_fractional_scale_v1` from the viewer's reported scale (notes in the wlr-core README, "HiDPI"; protocol 8 adds the cursor surface's logical `size` (7 on its branch; E took 7); checked with foot at 1, 1.5 and 2 by `scripts/e2e/hidpi.sh`, GTK/Qt/browsers unchecked; X11 apps stay 1x and are upscaled, but see the right screen size through xdg-output). | Sonnet | 100-200 |
-     | 3 | **Done.** **H. Input and X11 gaps** (details: wlr-core README, wave 3 H; scene protocol v9 after merging; v7 on its branch). Browser shortcuts and Keyboard Lock: dropped: shortcuts the browser takes don't reach apps (user decision). Pointer lock and relative motion, X11 `_NET_WM_ICON` taskbar icons, X11 apps from a terminal ended at logout, touch (wl_touch from touch pointer events; pen stays a pointer, no tablet protocol) and v120/smooth scrolling are done; pointer lock, touch and the browser side of confinement are only unit tested (no headless way). Original plan: browser shortcuts reach the app (Ctrl+W/T/N, Alt+Tab, ...) through the browser's Keyboard Lock API in fullscreen, with a hint on how to enter it; pointer lock and relative motion (`pointer-constraints-v1`, `relative-pointer-v1`) from the browser's Pointer Lock API, for games and 3D apps; taskbar icons for X11 windows from `_NET_WM_ICON` when there's no `.desktop` icon; X11 apps started from a terminal in the session are closed at logout like Wayland ones (wave 2 B gap); touch and pen input from pointer events if cheap (otherwise its own item); check that the viewer sends high-resolution scrolling (`axis_value120`). | Sonnet | 400-700 |
-     | 3 | **Done.** **I. Cheaper H.264 encoding** (knobs: the `X264_*` defines at the top of `gst_frame_encoder.c`; notes in the wlr-core README; not benchmarked, the user tunes) (`native/encoding/src/gst_frame_encoder.c`; video is only used for busy surfaces, so it should be cheap to encode and low in bitrate, not high quality). x264: `speed-preset=superfast` with `tune=zerolatency`, dropping the upstream overrides that make it expensive (`me=2` UMH search, `analyse=51`, `dct8x8`, `cabac`, `psy-tune=2`; no speed preset meant `medium`); quality-based rate control under a bitrate cap instead of 12 Mbps CBR (1.2 Mbps for alpha). Pad coded sizes to 16 instead of 128 (128 saved new streams on small resizes, which matters little since most updates are PNG patches); check the browser's decoder accepts it. Two paths: shared-memory buffers to x264 go through a CPU pipeline (`appsrc ! videoconvert ! (padding) ! x264enc`; the alpha stream built by our C code writing the alpha bytes as a gray frame, no GL), the GL pipeline (upload, shader, convert, download) stays for GPU (dmabuf) buffers and hardware encoders (nvh264, VA-API), where it's the cheap path. The agent doesn't benchmark: the user measures and tunes the preset (up or down from superfast) and rate control by hand. | Sonnet | 200-400 |
-     | 3 | **Done.** **Resize and move on release**: window moves work the same way (the window follows the pointer, one `window.move` on drop, none on Escape; the 50 ms throttled sends are gone; server-initiated moves unchanged). An interactive resize (an app's border, the window menu's Size) sends nothing to the app while dragging: the viewer stretches the shown content into the dragged rectangle (fixed edges in place) and sends one `window.resize` (`done: true`) on release (click or Enter in Size; Escape sends nothing), staying stretched until the app commits the size. No intermediate encoder restarts. The scene carries each window's size limits (`minWidth`, `minHeight`, `maxWidth`, `maxHeight`, window geometry pixels, absent: unbounded; xdg_toplevel min/max size, X11 from WM_NORMAL_HINTS) and the viewer clamps the drag to them (`packages/viewer/src/resize.ts`). Scene protocol v10. The server still handles `done: false`. | Sonnet | 150 |
-     | 4 | **Deferred** (revisit GPU acceleration later; servers are mostly VPSes without GPUs). **G. GPU buffers**: linux-dmabuf with the GLES2 renderer, dmabuf readback for patches and import for video, ported from `native/encoding/src/pixels.c`. Depends on I (both change the encoder's GL path, which I restructures). Can't be verified on the development machine (WSL has no `/dev/dri` render node, so apps can't allocate GPU buffers); it's only tested on real hardware. | Sonnet | 200-400 |
+### Later
 
-     Wave 1 alone gives today's features on wlroots. In total about 3.5-5.5k lines added and 60k+ deleted (much of
-     the deleted code is generated or vendored).
-   - **Packages**: the build needs `meson` (and ninja). XWayland needs `xwayland` (also at run time), `libxcb1-dev`,
-     `libxcb-composite0-dev`, `libxcb-ewmh-dev`, `libxcb-icccm4-dev`, `libxcb-render0-dev`, `libxcb-res0-dev`,
-     `libxcb-xfixes0-dev` (in CI and the build docs since wave 2 B); its end-to-end test needs x11-utils.
-     `libxcb-errors-dev` (nicer X11 error messages, optional) isn't packaged for Ubuntu 24.04. Clones need
-     `git submodule update --init`.
-   - Must still pass `scripts/test-gateway.sh` and the unit tests; GPU (dmabuf) buffers stay untested without
-     hardware.
-2a. **Streaming class, scheduler and PNG-only without GPU acceleration.** **Done** (branch `core2a`, 2026-10-04). The
-    spec is [Encoding policy](#encoding-policy); this lists the work. Sonnet, own branch and worktree. Works without 2b.
-    No scene protocol change.
-    - **Implemented as listed below**, with these notes and deviations:
-      - `auto` looks for `/dev/nvidia<N>` (not `/dev/nvidiactl`, which WSL has without a GPU device), and for the
-        elements with `gst-inspect-1.0 --exists`; the logic is in `packages/session/src/encoder.ts` (unit tests with
-        mocked probes). `EncoderPool` reports a creation failure once and then behaves as size 0.
-      - Video frames take slots like patches (the sink's `sendFrame` got a `done` callback, and both sink calls carry
-        the surface's class). When no slot is free, the wanted frame (a key frame, or a delta of the latest content) is
-        encoded when one frees up. Dropped unsent items (key frame replacing a chain, `dropPatches`, closing) free
-        their slots through `done(false)`.
-      - The streaming pool (`StreamingEncoder.ts`, worker in `png-worker.ts`) has one shared FIFO queue that an idle
-        worker takes from, instead of assigning to workers round-robin; capture is allowed while fewer than 2 x workers
-        patches are encoding or waiting. `setThreadNice` returns the thread id (or minus errno).
-      - The frame clock got a testable queue class (`FrameCallbackQueue`); `ProcessingDuration` is gone.
-      - The relentless measure was changed after the first version, see "Classes" (periods of 750 ms, busy and
-        backlogged fractions). Class changes are logged with the last period's fractions. Video (GPU) paths are
-        untested here as before.
-      - Checked by hand after merging (2026-10-04, at the user's request; not part of the e2e suite): two 640x480
-        busy clients at once. A single one keeps up (about 42% busy) and stays normal, but two make each other wait
-        for the encoder: both were promoted in every one of 5 runs (last period 75-92% backlogged, within about 1.5 s),
-        after which the session used about 190% of a core at nice 19 and about 13% at normal priority.
-      - New e2e script `scripts/e2e/busy.sh` (with `busy-client.c`): a busy client is shown as patches and paced, and
-        foot stays responsive while it runs; it also waits for the busy surface to be promoted to streaming and for the nice-19
-        workers to use CPU. The e2e gateways run `--encoder none`; the viewer's video decoding has no
-        e2e coverage now (its unit tests stay). The viewer test hook got `__viewerTest.patches()`.
-    - Gateway: `--encoder <auto|none|nvh264|vaapih264>`, default `auto`, `x264` removed (`config.ts`, `ipc.ts`,
-      `monitor.ts`, `session-process.ts`, docs and `--help`). Detection in the gateway at start, logged. The session
-      gets `none` or a hardware encoder; with `none`, `startWlrootsCompositor` makes an encoder pool of size 0 and
-      never creates a `WlrEncoder`. A hardware encoder that fails to create is logged once and treated as `none`.
-    - `encoding/policy.ts`: remove `DamageMeter`, `nextMode`, `EncodingMode`, `FAST_ABOVE_...`, `SLOW_BELOW_...`,
-      `INITIAL_FAST_MS`; add the relentless measure (a pure class: `markBackloggedStart(now)`,
-      `markBusyStart/End(now)`, the period fractions, plus the promote/demote decision with its constants), keeping
-      `planPatches` and the patch constants.
-    - `encoding/SurfaceEncoder.ts`: class (`'normal' | 'streaming'`) instead of mode; video only when streaming, an
-      encoder is available and the surface isn't small (or its pixels can't be read). Track unsent work and the
-      backlogged state as defined in the spec. Class changes as specified (with video: drop patches + key frame /
-      crisp full render; without: priority only). `refresh()` (viewer attached, key frame needed) unchanged in
-      effect.
-    - Replace `PatchPump`'s single round-robin set with per-surface slots (`SURFACE_SLOTS` = 2) and the two encode
-      pools: normal on libuv as today (`MAX_NORMAL_ENCODES` = 4), streaming on `STREAMING_ENCODE_WORKERS` = 2
-      `worker_threads` at nice 19 (new `setThreadNice` in the `poll` addon; the worker runs the existing `png.ts`
-      code with `deflateSync`). Keep capture-order sending per surface (`sendTails`) and the epoch check for stale
-      results.
-    - `viewer/ViewerTransport.ts`: `OutgoingMessage` for patches and frames carries the class (`'normal' |
-      'streaming'`); replace the single `pendingFrames` round-robin with the byte-weighted deficit round-robin between
-      the classes (`DRR_QUANTUM` = 16 KB, quanta 3:1), round-robin between surfaces within a class. Control first as
-      today; key frame and delta frame rules as today. The send gate stays as today (one data message at a time,
-      `bufferedAmount` ≤ 64 KB). A patch's `done(true)` (slot freed) when it's handed to the socket, as today.
-    - Frame callbacks (`WlrCompositor.ts`, `FramePacing.ts`): held while both slots are taken, released at the next
-      frame-clock tick once one is free; remove the `ProcessingDuration` delay; keep the viewer decode-time delay and
-      the detached throttle.
-    - All constants named and grouped at the top of their files, so they're easy to tune.
-    - Unit tests: the measure (a one-off big repaint never promoted, even when it drains over several periods; a
-      callback-paced relentless client promoted at the end of its second period; a needy one under 60% busy stays
-      normal; demotion after one period under 15%; nothing before two completed periods); the encode pools (streaming
-      patches go to the workers and normal ones to libuv, at most 4 normal encodes, slots respected, a worker's
-      thread really runs at nice 19: read its nice value from `/proc/self/task/<tid>/stat`, with the tid returned by
-      the native helper; worker PNGs identical to `png.ts` output); the send scheduler (byte-weighted 3:1 with mixed sizes,
-      work-conserving when one class is empty, per-surface order kept, control first); frame callbacks held and
-      released by slots; `none` never creates a video encoder; `auto` detection with mocked probes.
-    - `scripts/test-gateway.sh` passes (WSL has no render node, so it runs `none`: e2e checks that expect video
-      must be changed to expect patches; the viewer's video decoding then has no e2e coverage on this machine, so
-      keep its unit tests). If cheap, an e2e check that a client committing full damage on every frame
-      callback keeps an interactive window (foot) responsive: foot's keystroke reaches the screen within the usual
-      wait while the busy client runs.
-    - Report: CPU use and the busy client's frame rate with and without a busy client, by hand, not asserted.
-2b. **Done** (branch `core2b`). The controller (`viewer/congestion.ts`, deviations from the draft at its top and in
-    [Testing](#testing)) and its simulated-link test (the eleven scenarios, three seeds each, about 0.5 s); scene
-    protocol 11 (ACK envelope, `BACKLOG_HOLD_BYTES`, `feedback` without `decodeDuration`); the viewer acks every data
-    envelope on arrival and reports its backlog (`viewer/src/acks.ts`); the transport gates data items with the
-    controller inside 2a's scheduler, with a pacing timer and the 256 KB safety limit instead of the one-in-flight /
-    64 KB gate; frame callbacks depend only on the slots. Transport-level tests: control messages are never held by
-    the window, the backlog hold or the safety limit; an ack releases data; paced items go out by timer. On the local
-    e2e link the controller stays out of the way: `scripts/test-gateway.sh` takes ~23 s as before, the busy client runs
-    at ~8.5–8.8 frames/s and foot's typing shows after ~335–360 ms (driver delays included) with and without it.
-    Untested: real slow or distant links (WSL can't shape traffic without root). User decisions (2026-10-04): the
-    deviations from the draft are accepted as they are. Five adapt BBRv3 to messages and to a delay signal; two have
-    no counterpart in the draft (restarting on a path change, detecting a capacity drop), both needed because a delay
-    signal can't tell a slower or longer path from a queue. They needn't be separated in the code, and the controller
-    isn't to be changed further without a concrete problem. The spec is
-    [Transport and congestion control](#transport-and-congestion-control); this lists the work. Opus fork (subtle:
-    bugs show up as random latency spikes), own branch and worktree, after 2a is merged (it plugs into 2a's send
-    scheduler).
-    - The controller as a pure module with an injected clock (`viewer/congestion.ts` or similar), following the
-      draft's pseudocode closely (keep the draft's names in comments so it can be checked against it).
-    - Scene protocol: `EnvelopeKind.ACK`, `BACKLOG_HOLD_BYTES`, `feedback` loses `decodeDuration`; version bump.
-    - Viewer: ack on arrival for every data envelope, track backlog bytes and the largest pending item, fresh ACK
-      after applying while the last report was over the hold threshold.
-    - Transport: the controller and the backlog hold gate data items; pacing timer; the 256 KB local safety limit;
-      app-limited notifications.
-    - Frame callbacks: drop the decode-time delay (slots only).
-    - The simulated-link test harness and the scenarios listed in the spec; `scripts/test-gateway.sh` passes.
-    - Report: how the scenarios came out (numbers), anything in the draft that didn't map cleanly onto messages.
-3. **Done** (branch `core3-dom-viewer`). **Viewer: one DOM element per window instead of one WebGL canvas.** Each window
-   is a positioned element (`window-view.ts`) with a canvas per surface (`surface-view.ts`; foot has nine, its client
-   side decorations are subsurfaces), stacked in DOM order, so the browser does stacking, clipping, hit testing and
-   compositing, and window decorations and shadows can be HTML/CSS inside the window's element, next to its canvases.
-   - The desktop (`#output`, a focusable div, no longer a canvas) holds a layer of window elements and a layer for the
-     client cursor and drag icon (above, `pointer-events: none`). Content is drawn into a surface's canvas as it
-     arrives; nothing is re-rendered per frame. The canvas has the app's buffer size in pixels (at a pixel ratio of 2 an
-     app renders at twice the surface's CSS size) and a CSS size of the surface, `image-rendering: pixelated` when each
-     image pixel covers whole device pixels (the old NEAREST rule), and window positions are snapped to device pixels
-     when unstretched, so HiDPI stays as sharp as before.
-   - Patches: `clearRect` + `drawImage` of the decoded bitmap (a patch replaces pixels, also transparent ones). Opaque
-     video: `drawImage(VideoFrame)` of the bottom right corner of the padded frame, no copy through JavaScript memory
-     (`decoder.ts` hands on the `VideoFrame`s, which are closed right after drawing; hardware decoding is no longer
-     excluded). Video with alpha: one shared offscreen WebGL context (`alpha-video.ts`) draws the color and alpha
-     frames (both converted to RGB by the browser) into one premultiplied image, handed over with
-     `transferToImageBitmap` and drawn into the window's 2D canvas (so the canvas can switch between video and patches).
-     The page has exactly one WebGL context, however many windows. Without WebGL the color stream is shown without alpha.
-   - Moves, resizes and the state animations are transforms on the window's element (`translate` + `scale`, origin at
-     the window's surface origin, so every surface of a window stretches together; opacity on the same element), applied
-     in one `requestAnimationFrame` callback (`Desktop.layout`) when something changed. The animation timing stays in
-     `desktop.ts`; the interaction and animation logic is unchanged. Live resize stretching is that scale.
-   - Input: the container takes all pointer, wheel, key and drop events (they bubble up from the window elements) and
-     has the pointer capture, the lock and the keyboard focus, so drags, locks and touch behave as before. The browser
-     hit tests: `pick` takes `document.elementsFromPoint`, top first, and skips surfaces whose input region doesn't
-     cover the point (input falls through to what's below). Minimized windows are `display: none`, minimizing and
-     restoring ones `pointer-events: none`. Coordinates are still computed from the pointer's client position and the
-     model's rect of the surface (so surface-local coordinates are right at any pixel ratio and while stretched).
-     File drags moving between window elements don't count as leaving.
-   - Taskbar preview cards are drawn straight from the surface canvases into the card's canvas (`Desktop.drawPreview`,
-     no readback), also for minimized windows.
-   - `scripts/e2e`: the pixel hooks moved to the canvases. `readLuma` composites the visible windows' canvases in output
-     coordinates as they are laid out (same sampling as before), `contentSize` is the canvas's size, `surfacePixels`
-     reads one surface's canvas, `injectFrame` and `injectPatch` feed the viewer as if the server had sent them. One
-     selector changed (`desktop.sh` took the output's offset from `document.querySelector('canvas')`, now
-     `#output`). New `scripts/e2e/video.sh` (in `test-gateway.sh`): x264enc-encoded frames (as the server's CPU path
-     does) go through the real decoder, checking cropping, colors (red/blue), transparency, half transparency, patches
-     over video and size changes, in about a second. The video decoding path now has coverage on a machine without a
-     GPU encoder.
-   - Not done / untested: the GPU encode path and hardware decoding (no GPU here); many windows at once (each window is
-     a few canvases; nothing was measured); the pixel ratio change on a real second monitor (as before); touch and
-     pointer lock were reasoned about, not driven (no hook in the browser driver; their code only changed in how the
-     pointer position is derived).
-4. **Browser-drawn window decorations (our own title bars)**, right after Core item 3 (moved up from lower priority:
-   classic X11 apps such as xclock and xterm draw no title bar, as X11 window managers draw them, so today they can't
-   be moved except with the window menu's Move; Qt/KDE apps prefer them too). With one DOM element per window, a frame is HTML/CSS
-   around the window's canvas: title, minimize, maximize and close buttons, move by dragging the title bar, resize
-   from the frame's edges; right-clicking the title bar opens the shared window menu (wave 3 D: the taskbar's). Offered through `xdg-decoration` (wlroots provides it) to Wayland apps that ask for
-   server-side decorations, and drawn for X11 windows the app doesn't decorate itself (`_MOTIF_WM_HINTS`); GTK apps
-   keep drawing their own. The window geometry the server reports grows by the frame, and the frame follows the
-   window's activated, maximized and minimized state.
-   **Done** (branch `core4-decorations`, scene protocol 12).
-   - Native core: `wlr_xdg_decoration_manager_v1`; a toplevel's decoration object (new, or any `request_mode`) is
-     answered with client side mode if the app asked for it (Chrome with its own title bar keeps it, like GTK, which
-     has no decoration object), server side mode otherwise (wlroots sends the configure that must follow), and the object's destruction
-     reports the window undecorated again. X11: managed windows are decorated unless `_MOTIF_WM_HINTS` has no title
-     (`wlr_xwayland_surface.decorations`, `set_decorations` re-reports); override-redirect windows are never toplevels.
-     Both report `toplevel-decorated(sid, bool)`; the server turns it into the scene's `decorated` flag (absent: false).
-   - Geometry (decided: **the scene keeps the app's geometry, both sides add the frame**). `x`, `y`, `geometry`,
-     surfaces, input and `window.move`/`window.resize` keep meaning the app's window geometry, so nothing about surfaces,
-     popups, X11 positions or `window.resize` changed; the outer rectangle is the geometry plus `frameInsets(window)`
-     from `@gfld/scene-protocol` (`FRAME_TITLE_HEIGHT` 32, `FRAME_BORDER` 1; maximized: title bar only; fullscreen: none),
-     the one definition both use. Server: maximize configures the output minus the title bar and puts the window at
-     y = title bar height (never under the taskbar); a window turning decorated while maximized is reconfigured; dialogs
-     are centered on their parent counting both frames. Viewer: `keepOnScreen` (80 px of the outer rectangle, top edge
-     >= output top), the maximize animation's target, first placement (the cascade is where the frame starts), the menu
-     Size's nearest edge. Size limits and resize rects stay in geometry pixels (the frame has a constant size, so a drag
-     of an edge changes the geometry by the same amount; `resize.ts` didn't change). `window-sync.ts` needed nothing: it
-     reconciles window positions, which are still surface origins.
-   - Viewer: `window-frame.ts` (the DOM: icon, title, minimize/maximize/close, border, 8 resize grabs of 8 px outside the
-     border, imperative like the rest), `frame-geometry.ts` (pure, unit tested), the frame is a child of the window's
-     element placed by `WindowView.layout` and drawn at its real size while the content is stretched by a resize or the
-     maximize animation (minimize/restore shrink it with the window image). Title bar: drag moves (one `window.move` on
-     the drop, Escape cancels), double click maximizes/restores (not while fullscreen or for fixed-size apps), right
-     click opens the shared window menu, buttons call the same actions (dialogs have only close, fixed-size apps have
-     maximize disabled), press anywhere on the frame activates. Resize margin: the existing stretch-and-release resize,
-     none when maximized. Frame input never reaches the app (`pick` stops at frame parts). App icon: the desktop entry's,
-     else the window's own, else a generic glyph. Colors are custom properties in `theme.css` (light and dark).
-   - Previews: the cards keep showing the content only (they have their own header with title and close); the frame
-     isn't drawn into them. Square corners and no shadow (shadows are item 11; the frame's element is where they'd go).
-   - Not done: dragging a maximized window's title bar doesn't restore-and-drag (it does nothing); touch uses the same
-     gestures but wasn't driven; no rounded corners; GTK apps keep their own decorations as designed (gtk4-demo checked).
-   - Tests: unit (`WlrCompositor` with a fake core: decorated flag, maximize minus the title bar, reconfigure, dialog
-     centering; viewer `frame-geometry`), `scripts/e2e/decorations.sh` (in `test-gateway.sh`, ~12 s). Changed
-     `desktop.sh` checks: maximize expects the content below the title bar (title bar on screen under the taskbar);
-     the title-bar move and top/left resize presses use our title bar and margin instead of foot's own subsurfaces;
-     the "window back into view" check measures the outer rectangle (title bar above the geometry, border).
-     `browser-driver.js` got `screenshot-device`.
-4b. **Desktop integration for apps' own title bars: what we support, and the desktop's settings.** GTK4 and Chrome
-   (client-side decorations) show only a close button because they follow the desktop's button layout, and this
-   machine's is upstream GNOME's `appmenu:close` (desktop Ubuntu overrides it to `:minimize,maximize,close` through
-   `ubuntu-settings`, which WSL doesn't have). Our sessions are the desktop environment for their apps, so we supply
-   the settings, the standard way. The shell is called **nebula**: anything new is named that (not "greenfield").
-   **Status:** xdg-shell 6 **done** (branch `core4b-desktop-integration`, scene protocol 14): bounds (output minus our
-   frame, from a toplevel's first commit, again when the output or its decoration changes; X11 windows never),
-   wlroots' default capabilities (all four work), `show_window_menu` opens our window menu at the pointer
-   (`window-menu-requested`); `suspended` unused. Checked in `decorations.sh` (foot's bounds and `wm_capabilities`
-   from its Wayland log, the menu from a foot drawing its own title bar) and unit tests. The Settings backend is
-   **on hold**: GTK reads settings through the portal only from 4.21 on ("The Wayland backend relies on the portal
-   for settings", GTK NEWS 4.21.0); before that (Ubuntu 24.04 has 4.14) only inside Flatpak or with
-   `GDK_DEBUG=portals` (`gdk_should_use_portal`, checked in 4.14.5's source and with `dbus-monitor`: gtk4-demo never
-   calls `org.freedesktop.portal.Settings`, it reads GSettings). So here the backend would only reach Flatpak apps and
-   newer GTK; gtk4-demo and Chrome (GTK 3/4 settings) keep `appmenu:close` from GSettings. Decide how to supply the
-   button layout to non-portal GTK (e.g. GSettings defaults for our sessions) before building it.
-   - **xdg-shell version 6** (`wlr_xdg_shell_create`, today 3; wlroots 0.17.4 supports 6). Backwards compatible: each
-     client binds the lower of its version and ours, and v4-6 only add things. What newer clients then act on must be
-     accurate:
-     - v4 `configure_bounds` (`wlr_xdg_toplevel_set_bounds`): the largest sensible window, the output minus the
-       taskbar and, for decorated windows, our title bar. Apps may pick different initial sizes (intended); e2e checks
-       that assume today's sizes may need adjusting.
-     - v5 `wm_capabilities`: wlroots advertises window menu, maximize, fullscreen and minimize by default, and apps
-       believe it, so all four must work. New: `show_window_menu` (an app's title bar right-clicked) opens our shared
-       window menu (`windowMenuItems`) at the pointer. Keep it honest per window (e.g. no maximize for fixed-size
-       windows, if toolkits use it).
-     - v6 `suspended`: only sent if we set it; nothing changes now. For later (Lower priority item 6, don't send what
-       can't be seen): if minimized or covered windows are suspended, it must reliably be cleared when they show.
-   - **A nebula Settings backend for `xdg-desktop-portal`** (`org.freedesktop.impl.portal.Settings`, D-Bus name
-     `org.freedesktop.impl.portal.desktop.nebula`), with `nebula-portals.conf` choosing it for Settings and `gtk`, then
-     `kde`, for the rest, and `XDG_CURRENT_DESKTOP=nebula` in our sessions. Apps only talk to the portal; the portal
-     asks the backends the desktop's config names (as GNOME and KDE plug in theirs). It provides
-     `org.gnome.desktop.wm.preferences` `button-layout = ':minimize,maximize,close'` (Windows style, like our frames),
-     and later `org.freedesktop.appearance` (color scheme, accent: read by GTK, Qt and Chromium). First check that
-     GTK4 takes the button layout from the portal. No impersonating the portal frontend, no dconf tricks.
-   - Dependencies: `xdg-desktop-portal` (an installed nebula depends on it), `xdg-desktop-portal-gtk` recommended
-     (file chooser and other dialogs for apps using the portal). Settings work with either, or neither, of the GTK and
-     KDE backends: they're ours. Without the portal, apps fall back to GSettings (today's behaviour).
-   - Verify: the full e2e suite, and by hand gtk4-demo, Chrome and foot (initial sizes, buttons, right-click menu).
-4c. **Next steps after 4b** (to be done by an agent, in this order; the user agreed to them on 2026-10-04):
-   1. **Done** (merged as a02d4d6: session 156 and viewer 79 unit tests, `test-gateway.sh` 23 s;
-      `decorations.sh` also checks our window menu from gtk4-demo's header bar when gtk4-demo is installed). Was:
-      **Merge branch `core4b-desktop-integration`** (xdg-shell 6: bounds, capabilities, our window menu for apps'
-      own title bars; scene protocol 14) into master. It was verified on its branch (session 155 and viewer
-      79 unit tests, `test-gateway.sh` 22.8 s); master got the 30 Hz frame clock meanwhile (`FramePacing.ts` only).
-      Its ROADMAP edit adds a status paragraph to 4b. After merging: `yarn build`, both unit suites (compare counts:
-      `yarn test` runs compiled `dist/`), `test-gateway.sh`.
-   2. **Done** (`XDG_CURRENT_DESKTOP` and `XDG_SESSION_DESKTOP` are `nebula` in `session-environment.ts` and
-      `pam-helper.c`; `greenfield-portals.conf` renamed to `nebula-portals.conf`, still `default=gtk`; no installed
-      desktop entry on the dev machine has `OnlyShowIn`/`NotShowIn` and none mentions greenfield or nebula, so no
-      visibility changed; autostart is not run by us; new gateway test `desktop-entries.test.ts`; compositor-proxy
-      156, viewer 79, gateway 9 unit tests, `test-gateway.sh` 22 s). Was: **`XDG_CURRENT_DESKTOP=nebula`** in our sessions (today `greenfield`; find where the session sets it). Check
-      what reads it: `portals.conf` lookup (`nebula-portals.conf` later), `OnlyShowIn`/`NotShowIn` in desktop entries
-      (the Apps menu), autostart. Desktop entries limited to `GNOME` or `KDE` shouldn't start showing or vanish by
-      accident: say what changed.
-   3. **Done** (`nebula-settings.ts` is the one place for the desktop's settings; the build
-      (`build-dconf.js`) writes a dconf profile `user-db:user` + `file-db:<abs path>` and a defaults database to one
-      place for all users, `packages/session/dist/dconf/`, and `session-environment.ts` sets `DCONF_PROFILE` to it. dconf 0.40 (Ubuntu 24.04) supports `file-db:` and an absolute `DCONF_PROFILE`, so no
-      root; `dconf-cli` isn't installed by default, so the database (GVDB) is written by our own
-      code, checked against `dconf compile`'s output and read by libdconf/`gsettings`. `DCONF_PROFILE` is not in
-      `dbus-update-activation-environment` (the bus is the user's, shared with their other desktops). For the install
-      script: run `node dist/build-dconf.js` where nebula is installed (the profile holds the database's absolute path;
-      a session refuses a profile naming another database); `toKeyfile()` gives a keyfile if dconf's own system
-      databases are ever wanted. Checked in `decorations.sh`
-      (gsettings in a session; screenshot of gtk4-demo: minimize, maximize, close) and unit tests
-      (`nebula-settings.test.ts`); outside our sessions the user's value is still `'appmenu:close'`; compositor-proxy
-      156, viewer 79, gateway 16 unit tests, `test-gateway.sh` 23 s; Chrome by hand). Was: **The desktop's defaults for apps that read GSettings** (GTK before 4.21 outside Flatpak, and Chrome through
-      GTK: they don't use the Settings portal, see 4b). Supply `org.gnome.desktop.wm.preferences` `button-layout =
-      ':minimize,maximize,close'` (Windows style, like our frames) to the apps of our sessions only, the standard way:
-      a dconf profile (`DCONF_PROFILE` in the session's environment) whose first layer is the user's own database
-      (`user-db:user`, so whatever the user set explicitly still wins, and writes go there as usual) above a nebula
-      defaults database. Rules:
-      - Don't change the user's own settings (no `gsettings set`/`dconf write` of their database) and nothing
-        machine-wide (`/etc`, `/usr/share/glib-2.0/schemas` overrides): the user's other desktops on the same machine
-        must be unaffected.
-      - First find out whether the defaults database can live outside `/etc/dconf/db` without root (dconf profiles'
-        `file-db:` line, and the dconf version on Ubuntu 24.04; `dconf compile` builds the database). If it needs a
-        system install step, implement what's possible, document the step for the install script (Lower priority
-        item: install script), and say so.
-      - Keep nebula's desktop settings (the button layout now; the color scheme later) in one place in the code, so
-        the portal backend (step 4) serves the same values.
-      - Verify: inside a session, `gsettings get org.gnome.desktop.wm.preferences button-layout` (with the session's
-        environment) gives `':minimize,maximize,close'`; gtk4-demo shows minimize, maximize and close (an e2e check
-        if cheap: gtk4-demo is optional in `decorations.sh`); by hand Chrome. The user's own value outside our
-        sessions is still `'appmenu:close'`.
-   4. **Partly done (2026-10-05):** dark mode and the accent for GSettings and KDE apps (dconf defaults, a
-      `kdeglobals` layer, `QT_QPA_PLATFORMTHEME=kde`; see DESIGN.md "Apps follow the theme"). Defaults only: the
-      user's own settings always win. **Waits for the install script:** the nebula Settings backend for `xdg-desktop-portal` from 4b (for Flatpak
-      apps, GTK 4.21 and newer, Qt), serving the same values. `xdg-desktop-portal` 1.18 finds backends' `.portal`
-      files only in `/usr/share/xdg-desktop-portal/portals` or `XDG_DESKTOP_PORTAL_DIR`: an install-script step.
-   - For the agent: name anything new "nebula" (never "greenfield"); tests under a minute, on spare ports
-     (`GATEWAY_PORT`); never kill processes by name; never read `human_notes.txt`. To try it by hand the user restarts
-     the gateway and starts a new session (protocol 14).
+3. **Don't send what can't be seen.** Minimized, fully covered and partially covered windows, all with one algorithm
+   computed on the server (it has every window's position, stacking order, minimized state and opaque region). Damage
+   in hidden regions accumulates instead of being sent; when a region becomes visible again, the accumulated damage is
+   sent. The tricky part: the viewer's layout runs ahead of the server's during drags, resizes and animations, so the
+   server must widen its idea of what's visible during those interactions.
 
-### First extra feature
+4. **Text input methods (IME)** for Chinese, Japanese, Korean and other composed input, and dead keys and compose:
+   the browser's composition events mapped to `text-input-v3` (wlroots provides it).
 
-5. **Audio playback** (see [Audio](#audio-playback-only)); add the taskbar mute toggle. **Done** (scene protocol 15).
-   - Server: each session starts its own `pipewire`, `pipewire-pulse` and `wireplumber` (`gateway/src/audio/`), with a
-     null sink `nebula` as the default output and no hardware. **Isolation**: every socket lives in the session's own
-     directory `$XDG_RUNTIME_DIR/nebula-audio-<session pid>` (mode 0700; `PIPEWIRE_RUNTIME_DIR`, `PULSE_RUNTIME_PATH`),
-     the daemons run with our own static configuration (`dist/audio-config`, generated by the build;
-     `XDG_CONFIG_HOME` points there, `XDG_STATE_HOME`/`XDG_CACHE_HOME` into the session directory), with no D-Bus
-     (an address that goes nowhere; WirePlumber's ALSA/V4L2/libcamera/bluetooth parts are disabled, so there is no device
-     reservation either), all started and stopped by their PIDs (`setpriv --pdeathsig` if the session process dies
-     without cleaning up). Apps get `PIPEWIRE_RUNTIME_DIR`, `PULSE_RUNTIME_PATH` and `PULSE_SERVER=unix:<dir>/native`
-     even when our daemons failed to start (silence is better than the user's speakers), and these are not given to
-     `dbus-update-activation-environment`. Notes for PipeWire 1.0.5 / WirePlumber 0.4.17 are in
-     `audio/pipewire.ts` and `audio/config.ts` (the core needs `module-access`, or no client sees the graph;
-     WirePlumber exits without a session bus unless the Flatpak portal check is off; with `XDG_CONFIG_HOME` set it
-     finds our files first and the system's `/usr/share/wireplumber` for the rest).
-   - Capture: `gst-launch-1.0 pulsesrc device=nebula.monitor ! ... ! opusenc audio-type=generic bitrate=112000
-     frame-size=20 ! rtpopuspay ! rtpstreampay ! fdsink` as a child process (RTP carries the packet boundaries,
-     sequence numbers and timestamps), only while a viewer is attached and unmuted: no capture, no encoding otherwise.
-     A crashing capture is restarted (up to 5 quick failures); missing programs or crashing daemons are logged and the
-     session simply has no audio (`audio.state` tells the viewer).
-   - Protocol 15: the AUDIO envelope (kind 6: u16 seq, u32 timestamp at 48 kHz, Opus packet), `audio.state` (server)
-     and `audio.mute` (viewer; a session sends nothing until the viewer says `muted: false`, which it does first thing
-     after connecting). Audio has control priority: written to the socket at once, ahead of frames and patches, not
-     acknowledged and not counted by the congestion controller (about 14 KB/s). Unlike control messages it is dropped
-     (not queued) while more than 128 KB sit in the socket's buffer, so it never gets later and later.
-   - Viewer: `viewer/src/audio/`: WebCodecs `AudioDecoder` -> `AudioWorklet` with the jitter buffer (`jitter-buffer.ts`,
-     pure and unit tested: 160 ms target (was 70, 5ef434a), +-0.1% linear-interpolation rate following the smoothed level, 3 ms fade out
-     before running dry, rebuffer, 3 ms fade in, backlog over 360 ms dropped with a 5 ms crossfade). The audio context
-     is created on the first pointer or key event (the sign-in click), and the viewer tells the server it is muted until
-     it runs. The taskbar's mute toggle (right side, left of the connection indicator) is remembered in localStorage and
-     sent on every (re)connection. Test hook: `window.__viewerTest.audio()`.
-   - Tests: viewer 96 (was 79: jitter buffer 9, protocol 8), session 160 (was 156), gateway 28 (was 17),
-     new `scripts/e2e/audio.sh` (tone in a session app, decoded in the browser, mute/unmute, reload, isolation with and
-     without a user PipeWire running, cleanup at logout; 5-10 s); `test-gateway.sh` about 22 s.
-   - Not verified by ear (needs the user): sound quality, clicks at underruns, drift over a long listen, recovery after
-     a network hiccup, real apps (Firefox/Chrome video), and Chrome's behavior on a machine with real audio output.
+5. Hardware video decoding in the browser.
 
-### Done: QOI patches and lossy encoding (phases 1 to 3)
+6. Downloadable/user-written CSS themes.
 
-5b. **QOI instead of PNG for patches** (user's request, 2026-10-05; the design is in [Encoding
-    policy](#qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)). Today every patch is a PNG from our
-    own encoder (`compositor-proxy/src/encoding/png.ts`), which hogs the CPU. QOI (https://github.com/phoboslab/qoi,
-    MIT, one header) and LZ4 (BSD) are owned in the codebase (vendored with their licences, not dependencies).
-    1. **Done: the spike** (Sonnet, branch `worktree-agent-a1e5c33d5ee632214`, `spike/qoi/results.md`; not merged, its
-       patch recorder in `SurfaceEncoder.ts` must never be merged). 1032 real patches (foot, xterm, GTK 4 apps, Chrome
-       in the session, the busy client). Encode CPU per 1080p frame: our PNG 75–83 ms on UI content and 145 ms on
-       noise; libpng 43–58 / 131 ms; QOI 3.3–4.1 / 17.5 ms; QOI + LZ4 3.5–4.8 / 26.5 ms; QOI + deflate 1 5.3–10 / 66
-       ms. Bytes as a share of our PNG: QOI 1.5x on text, 1.1x GTK, 2.9x Chrome, 2.9x noise; QOI + LZ4 0.69x, 0.90x,
-       0.77x, 2.28x; QOI + deflate 1 the smallest but its browser decode (`DecompressionStream`, ~0.4 ms per call) is
-       slower than PNG's. Browser decode per 64k-pixel tile: PNG 0.66 ms, QOI + LZ4 in wasm 0.27 ms, QOI in plain JS
-       0.37 ms. All patches round-trip exactly. The wasm decoder (QOI into a caller buffer + LZ4) is 2.1 KB.
-    2. **Done.** **Phase 1: replace PNG with the QOI cascade** (raw / QOI / QOI + LZ4, one-byte format tag; see Encoding policy) for
-       every patch of every surface, no PNG fallback for patches and no special cases.
-       - Encoder: native C (QOI + LZ4) in compositor-proxy's CMake project, called synchronously from worker threads
-         (the streaming class's already run at low priority; the normal class keeps its own). Opaque detection as in
-         Encoding policy (format, opaque region, else an alpha scan folded into the copy in `readPixels`). Later,
-         possibly: encode straight from the wlroots buffer without a JS copy.
-       - Decoder: wasm built with plain `clang --target=wasm32` and `wasm-ld` (package `lld`, a new build requirement),
-         no Emscripten and no libc (the spike's `qoi_wasm.c`/`lz4_wasm.c` show how). It runs in a Web Worker (wasm on
-         the main thread would stutter the UI): raw/QOI/QOI + LZ4 → `ImageData` → `createImageBitmap`, the bitmap
-         transferred to the main thread.
-       - PNG stays only for images that aren't surfaces (an X11 app's `_NET_WM_ICON` window icon, read from an X
-         property and sent as a data URL); `png.ts` and `png-worker.ts` otherwise go. Protocol version bump.
-       - Afterwards, check the encoding policy's tuning (pool sizes, the relentless thresholds), measured with PNG's
-         costs. **Done (2026-10-05):** left as they are (the user found them good). `scripts/e2e/cpu.sh` again: busy
-         client 9.5 s of CPU in 10 s, 5416 patches, 1.76 ms per patch; foot 1.3 s, 0.72 ms per patch; the 1080p busy
-         client is still promoted (busy.sh).
-       - Status (built 2026-10-05, scene protocol 16): `native/patch` (`nebula-patch-addon`, QOI + LZ4 vendored with
-         their licences in `native/patch/vendor`) encodes synchronously; `PatchWorkerPool` (was `StreamingPngPool`,
-         `patch-worker.ts` was `png-worker.ts`) runs it on 2 worker threads at nice 19 for the streaming class and on 4
-         at nice 0 for the normal class (replacing libuv's pool; the scheduler, slots and ordering are unchanged).
-         `readPixels` (wlr-core) returns `{ pixels, opaque }` in a transferable `ArrayBuffer`: opaque if the format has
-         no alpha, or the rectangle is inside `wlr_surface.opaque_region` (only for scale-only surfaces: no transform,
-         no viewport), else if the alpha scan folded into the copy finds every alpha byte 255. The patch envelope
-         carries `u8 format` (`PatchFormat`: RAW 0, QOI 1, QOI + LZ4 2; 3 and 4 are left for JPEG and JPEG with alpha)
-         and `u8 channels` after the rectangle. The viewer's `patch/patch-worker.ts` (Web Worker) decodes with the
-         2.1 KB wasm module (`wasm/*.c`, built by `packages/viewer/scripts/build-wasm.mjs` as part of `yarn build`,
-         with `clang` and `wasm-ld` from `lld`; the bytes go into the generated, uncommitted `src/patch/wasm-bytes.ts`)
-         into `ImageData` -> `createImageBitmap(.., { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })`, as
-         the PNG path did, and posts the bitmap back. The gateway's CSP gained `'wasm-unsafe-eval'`. `png.ts` keeps
-         only `encodePng` (window icons). Measured with the new opt-in `scripts/e2e/cpu.sh` (session process CPU over
-         10 s, no GPU, 1080p busy client / foot printing text): the busy client 17.3 s of CPU (1905 patches, 9.1 ms per
-         patch) -> 8.9 s (5600 patches, 1.6 ms per patch, three times the throughput); foot 8.0 s (4.8 ms per patch)
-         -> 1.5 s (0.8 ms per patch). Tests: session 169 (was 160: cascade branches with exact round trips
-         for 3 and 4 channels, the pools, the opaque flag), viewer 113 (was 96: the wasm decoder against the real
-         encoder for all three formats, the protocol), gateway 28; `test-gateway.sh` about 23 s (checks that foot's
-         patches arrive opaque and decoded in the worker). Not covered by a test: the opaque-region path of
-         `readPixels` (needs a client that sets an opaque region; the format and scan paths are exercised by foot and
-         the busy client).
-    3. **Done.** **Phase 2: the four cases for the streaming class** (Encoding policy): the bandwidth-limited signal from the
-       controller; not limited: QOI patches (no GPU) or higher-quality video (GPU); limited: JPEG / JPEG with alpha
-       patches (no GPU) or lower-quality video (GPU); fixed-quality video with variable bitrate; per-area lossy
-       tracking and intelligent lossless refreshes; alpha >= 254 opaque in the shared shader. Also remove video on CPU
-       only (x264 and its CPU alpha path).
-       - Status (built 2026-10-05, scene protocol 18; details under "As built" in [Encoding
-         policy](#qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)): `PatchFormat.JPEG` (3) and
-         `JPEG_ALPHA` (4: u32le length of the color JPEG, the color JPEG, a grayscale JPEG of the alpha;
-         `splitJpegAlpha`). `nebula-patch-addon` links the system's libjpeg-turbo (`libjpeg-dev`, a new build
-         requirement) and takes a JPEG quality (`encodePatch(rgba, w, h, opaque, lossy)`); `viewer/bandwidth.ts`;
-         lossy areas and refreshes in `SurfaceEncoder`; constant-QP hardware video with `setQuality`; x264 and the CPU
-         video path deleted. New dev-only gateway option `--dev-link-kbps <n>` (with `--dev-auth`): the session sends
-         to its viewer through a simulated link of n kbit/s (a FIFO in the transport), to try this by hand.
-       - Tests: session 190 (was 170: the monitor's rules and the monitor with the real controller on the
-         simulated link, 11; lossy patches, refreshes and video quality in `SurfaceEncoder`, 5; JPEG encoding, 4),
-         viewer 123 (was 116: the formats and `splitJpegAlpha`; 4 jitter-buffer tests fail since 5ef434a, unrelated),
-         gateway 32. New `scripts/e2e/lossy.sh` (about 11 s): the busy client on an 8 Mbit/s simulated link becomes
-         streaming, the link limited, JPEG patches arrive; paused, bandwidth recovers and the viewer shows its last frame
-         exactly. `video.sh` also feeds a JPEG and a JPEG with alpha (made by the page) and checks their pixels and that
-         near-opaque alpha comes out 255. `test-gateway.sh`: 13 scripts, about 25 s.
-       - Not verified: the GPU half (no GPU here: whether nvh264enc and vaapih264enc take a QP change while playing, and
-         the QPs' look); a real slow link (only the simulated one); real apps with transparency as JPEG with alpha (only
-         the page-made test images).
-    4. **Done.** **Phase 3: fast mode for bursts, and settling at the lowest priority** (user's design, agreed
-       2026-10-05).
-       - Status (built 2026-10-05, no protocol change; details under "As built" in [Encoding
-         policy](#qoi-patches-and-lossy-encoding-only-when-bandwidth-is-short)): as designed below, plus (user's
-         follow-up) frame callbacks no longer wait behind settling (`readyForFrame`), and never more than 100 ms
-         (`MIN_FRAME_RATE` 10: a slow repaint may tear, the app stays responsive). The bytes-per-pixel estimate moved
-         to `SurfaceEncoder`; `BandwidthMonitor` lost its
-         lossless-demand measure and takes the predicted backlog; `EncodingSink` gained `linkBandwidth` and
-         `queuedBytes`, `sendPatch` takes a tier; the transport's patch messages carry `tier`.
-       - Tests: session 199 (the minimum frame rate; burst promotion order and its first patches lossy, none before the link was
-         limited, the estimate, settling at the lowest tier while still limited, pre-empted by damage, re-settling
-         damage that went lossy, demotion only once settled, the 9 : 3 : 1 tiers and a settling patch waiting in its
-         damage's tier, the monitor's backlog trigger, exit and remembered bandwidth). `lossy.sh` (about 17 s) also
-         runs the busy client's new page mode (1200x660 of text-like glyphs on a faintly textured background): after
-         the link was limited once, its first paint is a burst (JPEG), settled and demoted; scrolled, it is promoted
-         again and JPEG arrives about 130 ms after the first scroll frame (polling included); stopped, it settles,
-         is demoted, and the viewer shows its last frame exactly. `test-gateway.sh`: about 27 s.
-       - Tuning knobs: `BURST_MS` (200), `MIN_FRAME_RATE` (10), the settle quantum (a third of streaming's).
-       - Not verified: real apps (foot, a browser) scrolling on a real slow link; with a GPU (a burst starts video).
-       The problem: scrolling a static page on a slow link is very slow for the first seconds. The surface is normal
-       (lossless, medium priority) until the relentless measure promotes it (1.5–2.25 s), and the link only counts as
-       bandwidth-limited after two held-back periods. Then, once quiet, the lossless refresh of its lossy areas runs at
-       normal priority and competes with the normal surfaces.
-       - **Per-surface compression estimate**: each surface keeps a rolling average of its lossless bytes per pixel
-         (pixel-weighted, from its lossless patches: text and UI look like text and UI, noise like noise). It lives in
-         the encoders (it's in the transport's `BandwidthMonitor` today) and pauses while the surface goes lossy (its
-         settle patches update it again). A surface without one counts as uncompressed (3 or 4 bytes per pixel).
-       - **Predicted backlog**: per surface, its bytes waiting in the transport (encoded, real size), plus its pixels
-         being encoded or queued times its estimate. In time: bytes / the bandwidth estimate (`max_bw`), only once the
-         link has been bandwidth-limited at least once on this connection: that estimate is remembered from then (before,
-         an app-limited estimate is only a lower bound, so nothing below applies). Threshold `BURST_MS` = 200 ms
-         (tunable). Settling work (below) never counts.
-       - **Burst promotion** (a second way to become streaming, besides the relentless measure): while the predicted
-         backlog of the normal surfaces alone is over `BURST_MS`, promote the normal surface with the largest predicted
-         backlog, and check again. Streaming surfaces don't add to the pressure to promote.
-       - **Lossy mode (bandwidth-limited) is either/or**: the link is saturated (the held-back measure as built: two 1 s
-         periods in a row held back >= 80%), or the predicted backlog of all surfaces (normal and streaming) is over
-         `BURST_MS`, which takes effect at once (a scroll's first frames go out as JPEG). It ends only when both are quiet:
-         a period held back < 50%, the total predicted backlog under `BURST_MS` (this replaces the lossless-demand check),
-         at least 2 s after it began. So streaming surfaces don't push to promote others, but they do keep the link in
-         lossy mode while they have a backlog.
-       - **Settling, per streaming surface, as a priority queue**: damage first (lossy while bandwidth-limited); when it
-         has no damage queued or in its slots, it settles its lossy areas losslessly (never lossy, whatever the link).
-         New damage pre-empts settling: settle rectangles it covers are dropped (the damage replaces them), the rest
-         wait. As built, the lossy areas are updated in send order, so this holds.
-       - **A third send tier for settling**: settle patches go out in their own class of the transport's deficit
-         round-robin, at a third of the streaming class's quantum (normal 3 x 16 KB, streaming 16 KB, settling about
-         5.3 KB per turn; work-conserving as before: an idle tier's share goes to the others). Within the tier,
-         surfaces take turns as in the others.
-       - **Demotion** (streaming -> normal) only when the surface has no damage, nothing lossy left (fully settled), and
-         its backlogged share of the last period is under `DEMOTE_FRACTION` (15%), where a streaming surface's busy and
-         backlogged time counts damage work only, not settling. (Today the refresh only starts after demotion or
-         recovery, at normal priority.)
-       - Small relentless surfaces still need the relentless (time) measure: a small video saturating the link never
-         has a big backlog at once. The two promotion criteria cover the two cases: a relentless stream of any size
-         (time) and a single large repaint (backlog).
-       - With a GPU, a burst-promoted surface starts video with a key frame like any promoted one (accepted).
-       - Tests: unit (the estimate, the predicted backlog, burst promotion order, lossy mode either/or and its exit,
-         settling pre-empted by damage, the third tier's share, demotion only when settled); e2e: on the 8 Mbit/s
-         simulated link, after the link was limited once, a static page (foot full of text, say) scrolled: JPEG patches
-         within a few hundred ms, then settled losslessly at the lowest tier and demoted; the viewer ends up exact.
+7. WebTransport, only if the single WebSocket ever becomes a bottleneck.
 
-### Done: chunked data items
+8. **Browser-drawn window shadows** (nice-to-have). Only for windows whose `wl_surface.set_opaque_region` covers the
+   whole surface (a plain opaque rectangle with no shadow margin of its own). Everything else keeps the app's own
+   shadow and corners.
 
-5d. **Done.** **Chunk large data items** (user's design, agreed 2026-10-05). The problem: audio and control messages are written
-    to the socket at once, but they can't overtake a data item already handed over. A 64K-pixel lossless patch of
-    video-like content is 130-200 KB, 130-200 ms of an 8 Mbit/s link, and audio waiting behind it underruns the
-    viewer's jitter buffer (seen with a stream at the settling threshold: a settling patch between every frame, audio
-    stuttering every few seconds and now and then splicing). Smaller patches would only fix it for patches; chunking
-    fixes it for every data item (GPU key frames, icons, file transfer later) and situations we don't expect.
-    - **Chunk size**: clamp(10 ms of the congestion controller's bandwidth estimate, 10 KB, 300 KB). 10 KB on a slow
-      link (and before there is an estimate), larger on a fast one so the message (and ack) rate stays around 100 a
-      second; 300 KB caps an overestimate. Items up to the chunk size go out as today, unwrapped.
-    - **CHUNK envelope** (scene protocol 19): item id, first/last flags, payload. The viewer reassembles an item from
-      its chunks and handles it as the original envelope, so nothing above the transport changes. Chunks arrive in
-      order (one ordered connection); at most one partial item per tier at a time.
-    - **Order**: control messages and audio go between any two chunks. One item at a time per tier, not chunk-level
-      round-robin between items (that would make every item finish late): a tier's started item continues chunk after
-      chunk until it is done; the next is chosen as today (surfaces take turns per item). A higher tier's item jumps in
-      between chunks: a normal window's single draw arriving while a streaming or settling item is mid-transfer goes
-      right after the current chunk, then the interrupted item continues. The 9 : 3 : 1 deficit round-robin between
-      the tiers stays, counted per chunk, so steady normal work can't starve the others. (Interleaving video with other
-      frames: maybe later.)
-    - **Pacing and acks** per chunk: the congestion controller lets chunks out (so little sits in the link's queue),
-      the viewer acks each chunk like any data envelope; with the chunk size above that's about 100 acks a second.
-    - **Dropping**: an item with a chunk sent always finishes; only unstarted items are dropped (dropPatches) or
-      replaced (a key frame). A surface's slot frees when its item's last chunk is handed to the socket.
-    - Tests: unit (chunk sizes, reassembly, order: a higher tier between chunks, one item at a time per tier, control
-      and audio between chunks, started items never dropped, slots freed on the last chunk); e2e: on the 8 Mbit/s
-      simulated link, audio packets' delay stays small while a large lossless repaint goes through.
-    - Status (built 2026-10-05, scene protocol 19): `CHUNK` envelope, `encodeChunk` / `decodeChunk` /
-      `ChunkAssembler` in scene-protocol; the transport (`ViewerTransport.ts`) moves an item it starts chunking out
-      of its surface's chain into `started` (so drops can't touch it), continues a tier's started item before the
-      tier starts another, and a started item waits in the highest tier of its surface's queued items (a surface's
-      next item never overtakes it). The deficit round-robin charges chunks. The viewer acks every chunk, joins them
-      (`connection.ts`) and counts an item's chunks as one item for `largestPendingBytes` (`acks.ts`). With
-      `--dev-link-kbps`, the simulated link logs audio that waited over 30 ms behind other data (at most once a
-      second).
-    - Measured on the 8 Mbit/s simulated link while the page client (1200x660) paints and settles (about 1 MB
-      lossless): audio waited at most 15-19 ms with chunks; 70+ ms without (64K-pixel patches whole). The headless
-      browser of the e2e tests is itself slow to take messages while it draws (gaps of about 110 ms between audio
-      packets either way, software rendering under WSL), so the check is on the server.
-    - Tests: session 210 (7 chunking tests in `SendScheduler.test.ts`; the congestion tests run unchunked),
-      viewer 128 (the envelope and assembler, chunk acks), `lossy.sh` gains the audio check (a tone app, skipped
-      without PipeWire), about 20 s.
-    - Seen, not fixed: at the very start of a session on the simulated link (an unbounded FIFO), the busy client's
-      first burst made an audio packet wait about 1 s: the congestion controller's Startup overshoots before it has
-      measured the link. A real link's buffer is bounded (it drops), so this may be the simulation's; worth a look.
-
-### Lower priority
-
-5c. **System tray (StatusNotifierItem host).** Apps like JuK, Discord, Steam, chat clients and network/Bluetooth applets
-    put an icon in "the system tray" and keep running when their window closes. On a Linux desktop the tray is a
-    freedesktop/KDE D-Bus protocol, not Wayland: apps register their `org.kde.StatusNotifierItem` with a
-    `org.kde.StatusNotifierWatcher`, and the panel registers as a `StatusNotifierHost` and draws the icons. Today
-    `kded5` (D-Bus activated by KDE apps) provides a watcher but nothing hosts, so Qt reports a tray and apps "dock"
-    into one nobody draws: JuK, closed, keeps running (and playing) invisibly, reachable only by launching it again.
-    - The session process provides the watcher (if none is on the bus) and registers as the host, like it serves
-      `org.freedesktop.Notifications`; it forwards the items to the viewer over the session WebSocket.
-    - The viewer shows each item's icon (`IconName` through the XDG icon theme like other icons, or `IconPixmap` data)
-      in the taskbar's tray area, left of the mute toggle, with its `ToolTip`; `Status: Passive` items are hidden,
-      `NeedsAttention` uses its attention icon.
-    - Clicks: left click `Activate(x, y)` (usually shows/hides the window), middle click `SecondaryActivate`, wheel
-      `Scroll`. Right click (or `ItemIsMenu`) shows the item's menu, read from its `com.canonical.dbusmenu` object
-      (labels, enabled, toggles/radios, separators, submenus), as one of our own animated context menus; choosing an
-      entry sends the dbusmenu `Event` "clicked". `ContextMenu(x, y)` only for items without a dbusmenu.
-    - Legacy XEmbed tray icons (old X11 apps) are not supported.
-    - e2e: a small test item (e.g. a Python/GDBus script) registering an icon and a menu; check the icon shows, a
-      click activates, a menu entry is delivered, and the icon goes when the item's bus name goes.
-
-6. **Don't send what can't be seen: minimized, fully covered and partially covered windows**, all with one algorithm,
-   computed on the server. It already has every window's position, stacking order, minimized state and opaque region
-   (`wl_surface.set_opaque_region`; a translucent window on top doesn't hide what's below it).
-   - Each surface's visible region is its rectangle minus the opaque windows above it (minimized: nothing visible).
-   - Damage in the visible region is sent as usual. Damage in the hidden region accumulates instead, merged as it comes
-     in (like queued patches), so 100 updates to the same area stay one region, not 100.
-   - When part of a surface becomes visible again, the accumulated damage inside it is sent.
-   - Video mode encodes whole surfaces, so there partial cover saves nothing; a fully hidden surface stops its video
-     and resumes with a key frame.
-   - Fully hidden surfaces get throttled frame callbacks, so the app idles.
-   - Taskbar hover previews may show a slightly stale image of a hidden window (accepted).
-   - **The viewer's layout runs ahead of the server's, for long stretches** (tricky, needs care to cover every case):
-     moves and resizes are only sent when the drag ends, so during a drag the server's positions and sizes are stale,
-     and its idea of what covers what is wrong. A window being dragged (or stretched while resizing) reveals parts of
-     the windows it covered, and covers others; the same goes for the minimize, restore and maximize animations and
-     for windows following a dragged parent. If the server held back damage for regions it thinks are hidden, the
-     viewer would show stale content there (or nothing, for a surface never sent). Likely approach: the viewer tells
-     the server when an interaction or animation starts and ends. On start, the server recomputes visibility with the
-     windows involved occluding nothing (and not considered occluded themselves), and immediately sends the damage
-     accumulated in every region that is no longer guaranteed hidden: the drag may uncover any of it from the very
-     first frame (a window moved or shrunk away from what it covered). While it runs, those regions get updates as
-     usual. On end, the server recomputes with the final layout, and regions hidden again start accumulating. Cases to
-     check: drags, resizes (stretched content), the window menu's Move/Size, animations, dialogs moving with their
-     parent, a viewport shrink moving windows, stacking changes from a click, a second viewer taking over mid-drag.
-     Probably a fork, not a Sonnet task.
-7. **Text input methods (IME)** for Chinese, Japanese, Korean and other composed input, and dead keys and compose:
-   the browser's composition events (on a hidden input element) mapped to `text-input-v3` (wlroots provides it), so
-   the app shows the pre-edit text and receives the committed text.
-8. Hardware video decoding in the browser.
-9. Downloadable/user-written CSS themes.
-10. WebTransport, only if the single WebSocket ever becomes a bottleneck.
-11. **Browser-drawn window shadows** (very low priority, nice-to-have). Only draw a shadow when we know the window is a
-    plain opaque rectangle: its `wl_surface.set_opaque_region` covers the whole surface. Such an app draws no shadow
-    margin and no transparent corners of its own, so there is nothing to crop or replace.
-    - Qualifying windows get a themeable shadow from us: a CSS `box-shadow` on the window's element (see Core item 3).
-      This doesn't depend on who draws the chrome: with our chrome (`xdg-decoration`), the shadow goes around chrome
-      and content together.
-    - Qualifying windows that draw their own chrome get their corners slightly rounded with CSS, clipping a few corner
-      pixels of the app's content. With our chrome, the rounding is part of our chrome's styling.
-    - Everything else (an opaque region smaller than the surface, translucency, no opaque region): no shadow and no
-      clipping from us; show the app's pixels as sent, including its own shadow and corners. GTK/libadwaita apps with
-      client-side decorations fall here and keep their toolkit's shadow (extra bandwidth for the shadow margin,
-      accepted).
-    - Maximized windows: no shadow or rounding. Popups: a smaller shadow.
-    - Verify which toolkits (GTK, Qt, Chromium) declare their opaque region reliably; ones that don't simply never
-      get our shadow.
-
-12. **Viewer improvements.** Details to come from the user when this item is reached; ask before starting.
+9. **Viewer improvements.** Details to come from the user when this item is reached.
 
 ### Last
 
-13. **Install script, uninstall script and systemd unit.** A `.deb` package possibly later. Until then, real-PAM setup
-    is manual (see `packages/session` docs). Must run `node packages/session/dist/build-dconf.js` in the installed tree
-    (regenerates the dconf profile with the installed path, see 4c step 3). New package dependencies from audio (item
-    5): `pipewire`, `pipewire-pulse` and `wireplumber` (Ubuntu 24.04: PipeWire 1.0.5, WirePlumber 0.4.17; WirePlumber
-    0.5 has another configuration format), `gstreamer1.0-pulseaudio` (`pulsesrc`), `gstreamer1.0-plugins-base`
-    (`opusenc`, `audioconvert`) and `gstreamer1.0-plugins-good` (`rtpopuspay`, `rtpstreampay`), `util-linux`
-    (`setpriv`). New build requirements from the QOI patches (item 5b): `clang` and `lld` (`wasm-ld`, for the viewer's
-    wasm patch decoder; the build fails with "install lld (apt install lld)" if it is missing), and from item 5b
-    phase 2 `libjpeg-dev` (libjpeg-turbo, for JPEG patches; at run time `libjpeg-turbo8`). The audio configuration is generated by the build (`dist/audio-config`), nothing else to install. Must
-    not enable or touch the user's own PipeWire units. Could later also enable kernel BBR (see
-    [Transport and congestion control](#transport-and-congestion-control)); not for now, to keep installation simple.
+10. **Install script, uninstall script and systemd unit.** Until then, real-PAM setup is manual (see
+    `packages/session/README.md`). A `.deb` package possibly later.
 
-14. **Two-factor sign-in via PAM prompts** (lowest priority of all). Only makes sense once the core infrastructure is
-    verified sound and free of vulnerabilities.
+11. **Two-factor sign-in via PAM prompts** (lowest priority). Only makes sense once the core is verified sound and
+    free of vulnerabilities.
 
 ### Needs verification on other hardware
 
 - Real PAM sign-in (needs root).
 - GPU (dmabuf) buffers on a machine with a GPU.
-- GPU acceleration path of Core 2: `--encoder auto` picking `vaapih264`/`nvh264`, and streaming surfaces sent as
-  hardware video (key frame on promotion, crisp patch render on demotion, video frames in slots). Only unit tested.
-- Item 5b phase 2's video: constant QP (`QP_HIGH` 24, `QP_LOW` 32) on nvh264enc and vaapih264enc, and whether they take
-  a QP change while playing (`setQuality`); if not, the pipelines have to be rebuilt on a change.
-- Lossy encoding on a real slow link (only the simulated `--dev-link-kbps` one is tested): when it goes lossy, how JPEG
-  at quality 70 looks, how often it flaps; phase 3's bursts and settling with real apps scrolling.
-- Congestion control on real links: slow, distant (100-300 ms), Wi-Fi and mobile. Only the simulated link and
-  loopback are tested.
-- Congestion control sharing a bottleneck with other traffic (a download filling the router's buffer). Not in the
-  simulated scenarios; the possible failure would be periodic throughput dips about every 10 s (the competing queue
-  raising the measured base delay until it looks like a path change).
-- A real game rendering on the CPU (llvmpipe) as a streaming surface: no GL app is installed on the development
-  machine, so only the synthetic busy client was measured.
+- GPU acceleration: `--encoder auto` picking `vaapih264`/`nvh264`, streaming surfaces sent as hardware video.
+- Lossy encoding and congestion control on real slow/distant/Wi-Fi links (only the simulated link is tested).
+- Congestion control sharing a bottleneck with other traffic.
+- A real GPU-rendered game as a streaming surface (only the synthetic busy client was tested).
 - Firefox: whether a mouse back button over the desktop is fully blocked.
 
 ### Known issues
 
 - Pinning two apps in quick succession once left only one pinned; not reproduced since.
-- By design, a single busy surface that the server keeps up with stays normal, so its encoding runs at normal
-  priority (one 640x480 busy client alone: about 42% busy, about 85% of a core). Larger ones cross the 60% line
-  (1920x1080: promoted); somewhere around 1280x720 is the border. `PROMOTE_FRACTION` is the knob if this matters.
-- Input on a Wayland subsurface or popup the app just moved (`wl_subsurface.set_position`, `xdg_popup.reposition`)
-  can land off by the move for about a round trip: the viewer picks the surface and computes surface coordinates from
-  the positions in the last scene it has. Not seen with a real app (they rarely move subsurfaces in response to the
-  pointer; the X11 version of this, a window dragging itself, is fixed: the core uses X11's own window position). Fix
-  if it shows: send coordinates relative to the window's main surface and let the core find the surface under the
-  point in wlroots' current surface tree (`wlr_xdg_surface_surface_at`), as a local compositor does.
+- A single busy surface that the server keeps up with stays at normal priority (encoding at nice 0). Larger surfaces
+  cross the 60% threshold and are promoted; `PROMOTE_FRACTION` is the knob.
+- Input on a Wayland subsurface or popup the app just moved can land off by the move for about a round trip. Not seen
+  with a real app. Fix if it shows: send coordinates relative to the window's main surface.

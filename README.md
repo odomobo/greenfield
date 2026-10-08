@@ -34,7 +34,7 @@ make viewer     # just the browser client
 
 ## Documentation
 
-- [ROADMAP.md](ROADMAP.md) — architecture, design decisions, encoding policy, transport, task list
+- [ROADMAP.md](ROADMAP.md) — architecture, design decisions, encoding policy, transport, remaining work
 - [DESIGN.md](DESIGN.md) — shell UI, theme, motion
 - [packages/session/README.md](packages/session/README.md) — process architecture, how sign-in works
 - [packages/gatekeeper/README.md](packages/gatekeeper/README.md) — the Rust crates, the web front, the sandbox
