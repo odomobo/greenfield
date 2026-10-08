@@ -7,8 +7,10 @@
 //!     listener opens one for every TCP connection, most never become a sign-in), at most MAX_ATTEMPTS at a time, and
 //!     forks a child for each;
 //!   - the child runs PAM with one handle (service "nebula"): pam_authenticate and pam_acct_mgmt with PAM's prompts
-//!     relayed to the page (relay.rs), PAM_RHOST set to the client's address and PAM_TTY to "nebula"; refuses root;
-//!     failures take at least 3 s from the last answer;
+//!     relayed to the page (relay.rs), PAM_RHOST set to the client's address and PAM_TTY to "nebula"; an expired
+//!     password is changed (pam_chauthtok) through the same relay; refuses root, uids below UID_MIN and users whose
+//!     shell isn't in /etc/shells (policy.rs; --min-uid, --allow-any-shell); failures take at least 3 s from the last
+//!     answer;
 //!   - on success it attaches to the user's running desktop, or opens the PAM session on the same handle
 //!     (pam_setcred, pam_open_session), starts the desktop as the user (groups, gid, uid dropped and verified, the
 //!     PAM environment, the listening socket inherited, PR_SET_PDEATHSIG) and stays as its PAM parent: it waits for
@@ -21,6 +23,7 @@
 mod args;
 mod attempt;
 mod pam;
+mod policy;
 mod relay;
 
 use args::{Parsed, USAGE};
@@ -72,6 +75,8 @@ struct Config {
     /// the site settings file the desktops read, if not their default
     site_settings: Option<PathBuf>,
     lang: String,
+    /// which accounts may sign in
+    policy: policy::Policy,
 }
 
 fn usage_error(message: &str) -> ! {
@@ -125,6 +130,10 @@ fn configure() -> Config {
             "/etc/pam.d/{PAM_SERVICE} is missing; PAM falls back to the \"other\" service. See packages/login/pam/."
         ));
     }
+    let policy = policy::Policy {
+        min_uid: args.min_uid.unwrap_or_else(policy::system_uid_min),
+        shells: (!args.allow_any_shell).then(|| PathBuf::from(policy::SHELLS)),
+    };
     Config {
         args,
         web,
@@ -132,6 +141,7 @@ fn configure() -> Config {
         node,
         site_settings: None,
         lang: std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into()),
+        policy,
     }
 }
 
@@ -310,7 +320,7 @@ impl Host for System<'_> {
 fn sign_in_child(config: &Config, connection: UnixStream, attempt_over: PipeWriter) -> i32 {
     // a stuck attempt ends (SIGALRM's default action); a PAM parent has no time limit
     sys::alarm(ATTEMPT_TIMEOUT_SECONDS);
-    let result = attempt::sign_in(&System { config }, &LIMITS, connection);
+    let result = attempt::sign_in(&System { config }, &LIMITS, &config.policy, connection);
     sys::alarm(0);
     // the main loop counts this attempt as over (when the child exits, too)
     drop(attempt_over);
@@ -377,9 +387,11 @@ fn main() {
     let web = start_web(&config, tcp).unwrap_or_else(|e| fatal(format!("Starting the web process failed: {e}")));
     let web_pid = web.id() as libc::pid_t;
     log::info(&format!(
-        "Web process {web_pid} runs as {}; signing in at {} (PAM service {PAM_SERVICE}).",
+        "Web process {web_pid} runs as {}; signing in at {} (PAM service {PAM_SERVICE}; uids from {}, {}).",
         config.web.name,
-        config.args.runtime_dir.join("login.sock").display()
+        config.args.runtime_dir.join("login.sock").display(),
+        config.policy.min_uid,
+        if config.policy.shells.is_some() { "shells listed in /etc/shells" } else { "any shell" },
     ));
 
     let parent = sys::getpid();

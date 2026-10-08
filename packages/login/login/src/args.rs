@@ -22,6 +22,10 @@ users in with PAM (service \"nebula\", /etc/pam.d/nebula), starting each user's 
   --encoder <auto|none|nvh264|vaapih264>
                              video encoder, overriding the site settings file (default there: auto)
   --render-device <path>     GPU render node, overriding the site settings file (default /dev/dri/renderD128)
+  --min-uid <uid>            the lowest uid that may sign in (default: UID_MIN from /etc/login.defs, else 1000);
+                             root never may
+  --allow-any-shell          let users sign in whatever their login shell (default: only shells listed in
+                             /etc/shells, so accounts with e.g. /usr/sbin/nologin can't)
 
 Passed on to the web process:
   --cert <file> --key <file> TLS certificate and key, readable by the web user (default: a self-signed one in the
@@ -43,6 +47,9 @@ pub struct Args {
     pub site_config: Option<PathBuf>,
     pub encoder: Option<String>,
     pub render_device: Option<String>,
+    /// None: UID_MIN from /etc/login.defs
+    pub min_uid: Option<libc::uid_t>,
+    pub allow_any_shell: bool,
     /// (certificate, key)
     pub tls: Option<(PathBuf, PathBuf)>,
     pub state_dir: PathBuf,
@@ -67,6 +74,8 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
     let mut site_config = None;
     let mut encoder = None;
     let mut render_device = None;
+    let mut min_uid = None;
+    let mut allow_any_shell = false;
     let mut cert = None;
     let mut key = None;
     let mut state_dir = "/var/lib/nebula".to_string();
@@ -85,6 +94,10 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
                 hide_hostname = true;
                 continue;
             }
+            "--allow-any-shell" => {
+                allow_any_shell = true;
+                continue;
+            }
             _ if name.starts_with("--dev-") => {
                 return Err(format!("{name}: the --dev-* options belong to the dev login helper (nebula-dev-login)"))
             }
@@ -101,6 +114,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
             "--site-config" => site_config = Some(value()?),
             "--encoder" => encoder = Some(value()?),
             "--render-device" => render_device = Some(value()?),
+            "--min-uid" => min_uid = Some(value()?),
             "--cert" => cert = Some(value()?),
             "--key" => key = Some(value()?),
             "--state-dir" => state_dir = value()?,
@@ -125,6 +139,11 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
     if render_device.as_deref() == Some("") {
         return Err("empty --render-device".into());
     }
+    let min_uid = match min_uid.map(|uid| uid.parse::<libc::uid_t>()) {
+        None => None,
+        Some(Ok(uid)) => Some(uid),
+        Some(Err(_)) => return Err("--min-uid must be a number".into()),
+    };
     let tls = match (cert, key) {
         (Some(cert), Some(key)) => Some((absolute(&cert), absolute(&key))),
         (None, None) => None,
@@ -140,6 +159,8 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
         site_config: site_config.map(|path| absolute(&path)),
         encoder,
         render_device,
+        min_uid,
+        allow_any_shell,
         tls,
         state_dir: absolute(&state_dir),
         hide_hostname,
@@ -189,6 +210,8 @@ mod tests {
         assert_eq!(args.web_user, "nebula-web");
         assert_eq!(args.runtime_dir, PathBuf::from("/run/nebula"));
         assert_eq!(args.state_dir, PathBuf::from("/var/lib/nebula"));
+        assert_eq!(args.min_uid, None);
+        assert!(!args.allow_any_shell);
         assert_eq!(args.web_args(), ["--state-dir", "/var/lib/nebula"]);
         assert_eq!(parse(["--help".to_string()]), Ok(Parsed::Help));
     }
@@ -215,8 +238,12 @@ mod tests {
             "/dev/dri/renderD129",
             "--site-config",
             "/etc/x.conf",
+            "--min-uid=500",
+            "--allow-any-shell",
         ])
         .unwrap();
+        assert_eq!(args.min_uid, Some(500));
+        assert!(args.allow_any_shell);
         assert_eq!(args.bind_port, 443);
         assert_eq!(args.web_user, "www");
         assert_eq!(args.encoder.as_deref(), Some("none"));
@@ -250,6 +277,8 @@ mod tests {
             (&["--cert", "/c"][..], "together"),
             (&["--encoder", "x264"][..], "--encoder"),
             (&["--web-user", "root"][..], "unprivileged"),
+            (&["--min-uid", "-1"][..], "--min-uid"),
+            (&["--min-uid", "1000x"][..], "--min-uid"),
             (&["--bind-port"][..], "needs a value"),
             (&["extra"][..], "unknown option"),
         ] {

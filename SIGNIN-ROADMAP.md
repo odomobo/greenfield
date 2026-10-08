@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–6 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–6 are implemented (and 11, see its "As built"); the rest is not.
 
 ## Why
 
@@ -280,8 +280,8 @@ without changing how the pieces connect.
   - **PAM**: service renamed to `nebula` (`packages/login/pam/nebula`, installed as `/etc/pam.d/nebula`; the helper
     warns when it is missing). `PAM_RHOST` = the client's address, `PAM_TTY` = `nebula`, `XDG_SESSION_TYPE=wayland`,
     `XDG_SESSION_CLASS=user`, `XDG_SESSION_DESKTOP=nebula` in PAM's environment for pam_systemd.
-    `pam_authenticate` and `pam_acct_mgmt` with `PAM_DISALLOW_NULL_AUTHTOK`; `PAM_NEW_AUTHTOK_REQD` is refused with
-    its own message (step 11 handles it). On create: `pam_setcred(ESTABLISH)`, `pam_open_session`, the desktop's
+    `pam_authenticate` and `pam_acct_mgmt` with `PAM_DISALLOW_NULL_AUTHTOK`; `PAM_NEW_AUTHTOK_REQD` leads to
+    `pam_chauthtok` (step 11). On create: `pam_setcred(ESTABLISH)`, `pam_open_session`, the desktop's
     environment is PATH, LANG, PAM's list, then HOME/USER/LOGNAME/SHELL; after it exits `pam_close_session`,
     `pam_setcred(DELETE)`, `pam_end`. An answer over `PAM_MAX_RESP_SIZE` (512) or with a NUL fails the conversation.
   - **Refusals without PAM**: a user name that isn't what useradd accepts (≤ 64 bytes; includes the empty name) and a
@@ -378,6 +378,26 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 
 - Refuse uids below `UID_MIN` (`/etc/login.defs`) and shells not in `/etc/shells` by default, both configurable.
 - Expired passwords: `PAM_NEW_AUTHTOK_REQD` → `pam_chauthtok` through the same prompt relay, with a page UI for it.
+- As built:
+  - **Policy** (`packages/login/login/src/policy.rs`): root never; uids below `--min-uid` (default `UID_MIN` from
+    `/etc/login.defs`, read at start, else 1000); login shells not listed in `/etc/shells` (read at every check, so a
+    newly installed shell counts at once; an empty shell field is `/bin/sh`; without the file only `/bin/sh` and
+    `/bin/csh`, as glibc's `getusershell`) unless `--allow-any-shell`. Checked like root was: on the given name before
+    PAM (a refused account gets the fake `Password: ` prompt and never reaches PAM, so system accounts can't be
+    password-guessed through nebula), and on the canonical PAM user after `pam_authenticate`/`pam_acct_mgmt`. The page
+    gets the wrong-password message after the same minimum time; the log has the reason.
+  - **Expired passwords**: `Pam::change_password` = `pam_chauthtok(PAM_CHANGE_EXPIRED_AUTHTOK)` on the attempt's handle,
+    whose conversation is the same `Relay`; called after the policy check, then the sign-in goes on (attach or create).
+    Not changed (wrong current password, PAM's retries used up): refused with "The password has expired and was not
+    changed." after the failure minimum. `pam_acct_mgmt` isn't run again (as login and sshd). No protocol change.
+  - **Page**: PAM's info and error messages now accumulate (one per line) until the page answers the next prompt, then
+    clear, so each prompt shows with the messages that came before it (the expiry notice and "Changing password for
+    …" with "Current password:", a mismatch with the repeated "New password:").
+  - **Dev helper**: `--dev-expired-password` makes every sign-in go through pam_unix's change conversation (the
+    notice, the current password, the new one twice, three tries); the new password isn't kept. e2e:
+    `scripts/e2e/password.sh` (its own gateway, in the runner).
+  - Not changed: the whole-attempt limit (180 s, `ATTEMPT_TIMEOUT_SECONDS`) also covers a password change; a slow
+    change with several retries could hit it (raise it if that matters).
 
 ### 12. Immutable caching for page assets
 

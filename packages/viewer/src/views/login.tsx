@@ -6,8 +6,9 @@ import { useStore } from '../store'
 /**
  * The sign-in form. Like unlocking a screen: the sign-in lasts as long as the page's WebSocket (see connection.ts).
  * The username and password are asked up front (so password managers work); the password answers the server's
- * first hidden prompt. Any further prompt of the server's (PAM's, e.g. a one-time code) replaces the fields with one
- * of its own until it's answered. The inputs are uncontrolled, so the submit handlers read what's in them.
+ * first hidden prompt. Any further prompt of the server's (PAM's, e.g. a one-time code, or the current and new
+ * password when it has expired) replaces the fields with one of its own until it's answered, below the messages that
+ * came with it (several lines). The inputs are uncontrolled, so the submit handlers read what's in them.
  */
 export function LoginView({
   hostname,

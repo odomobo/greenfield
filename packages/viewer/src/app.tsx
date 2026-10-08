@@ -121,7 +121,13 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
             appStore.update({ loginPrompt: { text, echo }, loginBusy: false })
           })
         },
-        message: (kind, text) => appStore.update(kind === 'info' ? { loginInfo: text } : { loginError: text }),
+        // PAM's messages are about the prompt that follows them (e.g. "You are required to change your password",
+        // "Sorry, passwords do not match."): shown together until that prompt is answered
+        message: (kind, text) => {
+          const { loginInfo, loginError } = appStore.get()
+          const add = (shown: string | undefined) => (shown === undefined ? text : `${shown}\n${text}`)
+          appStore.update(kind === 'info' ? { loginInfo: add(loginInfo) } : { loginError: add(loginError) })
+        },
       })
       if (!result.ok) {
         // (an empty message: stopped on purpose, e.g. the page is going away)
@@ -138,7 +144,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
   const handleAnswer = useCallback((answer: string) => {
     const resolve = answerRef.current
     answerRef.current = undefined
-    appStore.update({ loginPrompt: undefined, loginBusy: true })
+    appStore.update({ loginPrompt: undefined, loginBusy: true, loginInfo: undefined, loginError: undefined })
     resolve?.(answer)
   }, [])
 

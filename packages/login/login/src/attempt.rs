@@ -1,8 +1,10 @@
 //! One sign-in attempt, in a child of its own: read the client's address and the user name, run PAM with one handle
-//! (its prompts relayed to the page), and on success attach to the user's running desktop or open the PAM session and
-//! start one. Everything that needs root or PAM is behind `Host` and `Pam`, so this flow is tested without them.
+//! (its prompts relayed to the page; an expired password is changed through the same relay), check the account policy,
+//! and on success attach to the user's running desktop or open the PAM session and start one. Everything that needs
+//! root or PAM is behind `Host` and `Pam`, so this flow is tested without them.
 #![forbid(unsafe_code)]
 
+use crate::policy::Policy;
 use crate::relay::{Relay, PAM_PROMPT_ECHO_OFF};
 use nebula_login_common::channel::Channel;
 use nebula_login_common::desktop::{self, Desktop};
@@ -17,7 +19,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub const WRONG: &str = "The username or password is incorrect.";
-pub const EXPIRED: &str = "The password has expired. Change it, then sign in again.";
+/// An expired password that wasn't changed (a wrong current password, new ones that didn't match or that PAM refused).
+pub const NOT_CHANGED: &str = "The password has expired and was not changed.";
 pub const UNAVAILABLE: &str = "Signing in is not possible right now.";
 pub const NO_DESKTOP: &str = "The desktop could not be started.";
 /// What an unusable user name is asked (the prompt pam_unix asks an unknown user with).
@@ -28,7 +31,7 @@ const PASSWORD_PROMPT: &str = "Password: ";
 pub enum Refusal {
     /// authentication or the account check failed (the text is PAM's, for the log)
     Denied(String),
-    /// the password has expired (PAM_NEW_AUTHTOK_REQD); changing it here is step 11 of SIGNIN-ROADMAP.md
+    /// authenticated, but the password has expired (pam_acct_mgmt said PAM_NEW_AUTHTOK_REQD): it must be changed
     Expired,
 }
 
@@ -36,6 +39,9 @@ pub enum Refusal {
 pub trait Pam {
     /// pam_authenticate, then pam_acct_mgmt. The conversation goes through `relay`.
     fn authenticate(&mut self) -> Result<(), Refusal>;
+    /// pam_chauthtok(PAM_CHANGE_EXPIRED_AUTHTOK), after `authenticate` said Expired. The conversation goes through
+    /// `relay` (PAM asks for the current and the new password itself, and retries as configured).
+    fn change_password(&mut self) -> Result<(), String>;
     /// PAM_USER: the name PAM authenticated (modules may have mapped it).
     fn user(&self) -> Option<String>;
     /// pam_setcred(PAM_ESTABLISH_CRED), then pam_open_session.
@@ -98,7 +104,12 @@ fn invalid(message: &str) -> io::Error {
 /// closes the PAM session); Ok(None) when it is over (signed in to a running desktop, refused, or the connection
 /// never became a sign-in: closed or idle before Begin); Err when the connection broke after Begin, before a result
 /// could be sent.
-pub fn sign_in<H: Host>(host: &H, limits: &Limits, connection: UnixStream) -> io::Result<Option<Started<H::Pam>>> {
+pub fn sign_in<H: Host>(
+    host: &H,
+    limits: &Limits,
+    policy: &Policy,
+    connection: UnixStream,
+) -> io::Result<Option<Started<H::Pam>>> {
     let mut channel = Channel::new(connection);
     let client = match channel.read(limits.begin_timeout)? {
         (Record::ClientAddress(ip), _) => ip,
@@ -114,19 +125,19 @@ pub fn sign_in<H: Host>(host: &H, limits: &Limits, connection: UnixStream) -> io
     };
     let mut relay = Relay::new(channel, limits.answer_timeout);
 
-    // an unusable name (an empty one: the web process sends that for a name over the limit) and root are asked for a
-    // password like anyone else and refused the same way, without PAM ever seeing them
+    // an unusable name (an empty one: the web process sends that for a name over the limit) and accounts the policy
+    // refuses (root, system accounts, no login shell) are asked for a password like anyone else and refused the same
+    // way, without PAM ever seeing them
     let usable = valid_username(&username);
-    let root = usable && host.user(&username).is_some_and(|user| user.uid == 0);
-    if !usable || root {
+    let refused = if usable { host.user(&username).and_then(|user| policy.check(&user).err()) } else { None };
+    if !usable || refused.is_some() {
         let answers = relay.converse(&[(PAM_PROMPT_ECHO_OFF, PASSWORD_PROMPT.into())]);
         if let Ok(answers) = answers {
             answers.into_iter().flatten().for_each(crate::relay::wipe);
         }
-        if root {
-            log::warn(&format!("Refused a sign-in as root from {client}."));
-        } else {
-            log::info(&format!("Failed sign-in from {client}: unusable user name."));
+        match refused {
+            Some(reason) => log::warn(&format!("Refused a sign-in as {username} from {client}: {reason}.")),
+            None => log::info(&format!("Failed sign-in from {client}: unusable user name.")),
         }
         return finish(&mut relay, limits, Outcome::Refused, WRONG).map(|_| None);
     }
@@ -138,24 +149,34 @@ pub fn sign_in<H: Host>(host: &H, limits: &Limits, connection: UnixStream) -> io
             return finish(&mut relay, limits, Outcome::Failed, UNAVAILABLE).map(|_| None);
         }
     };
-    if let Err(refusal) = pam.authenticate() {
-        let (text, reason) = match refusal {
-            Refusal::Denied(reason) => (WRONG, reason),
-            Refusal::Expired => (EXPIRED, "password expired".to_string()),
-        };
-        log::info(&format!("Failed sign-in from {client}: {reason}."));
-        return finish(pam.relay(), limits, Outcome::Refused, text).map(|_| None);
-    }
+    let expired = match pam.authenticate() {
+        Ok(()) => false,
+        Err(Refusal::Expired) => true,
+        Err(Refusal::Denied(reason)) => {
+            log::info(&format!("Failed sign-in from {client}: {reason}."));
+            return finish(pam.relay(), limits, Outcome::Refused, WRONG).map(|_| None);
+        }
+    };
 
-    // PAM may have mapped the name: the session is the canonical user's
+    // PAM may have mapped the name: the session is the canonical user's, and the policy applies to that user too
     let canonical = pam.user().unwrap_or_else(|| username.clone());
     let Some(user) = host.user(&canonical) else {
         log::error(&format!("Signed in as {canonical}, who is not in the passwd database."));
         return finish(pam.relay(), limits, Outcome::Refused, WRONG).map(|_| None);
     };
-    if user.uid == 0 {
-        log::warn(&format!("Refused a sign-in as root ({canonical}) from {client}."));
+    if let Err(reason) = policy.check(&user) {
+        log::warn(&format!("Refused a sign-in as {canonical} (PAM user of {username:?}) from {client}: {reason}."));
         return finish(pam.relay(), limits, Outcome::Refused, WRONG).map(|_| None);
+    }
+
+    // an expired password is changed on the spot, through the same conversation, then the sign-in goes on
+    if expired {
+        log::info(&format!("The password of {canonical} has expired: asking for a new one."));
+        if let Err(e) = pam.change_password() {
+            log::info(&format!("Failed sign-in from {client}: {canonical}'s expired password was not changed ({e})."));
+            return finish(pam.relay(), limits, Outcome::Refused, NOT_CHANGED).map(|_| None);
+        }
+        log::info(&format!("Changed the expired password of {canonical}."));
     }
 
     let attached = host.user_dir(user.uid).and_then(|dir| {
@@ -208,7 +229,7 @@ fn finish(relay: &mut Relay, limits: &Limits, outcome: Outcome, text: &str) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::relay::{PAM_PROMPT_ECHO_ON, PAM_TEXT_INFO};
+    use crate::relay::{PAM_ERROR_MSG, PAM_PROMPT_ECHO_ON, PAM_TEXT_INFO};
     use nebula_login_protocol::PromptStyle;
     use std::cell::RefCell;
     use std::os::unix::net::UnixListener;
@@ -228,10 +249,13 @@ mod tests {
         started: Vec<(String, IpAddr)>,
         opened: u32,
         closed: u32,
+        /// the new password of a change
+        changed: Option<String>,
     }
 
-    /// PAM with one user, "alice" (aliased as "Alice"), whose password is "secret" and who also needs a one-time code
-    /// "123456" (a second prompt, shown after an info message).
+    /// PAM with the users "alice" and "svc" (also known capitalized), whose password is "secret" and who also need a
+    /// one-time code "123456" (a second prompt, shown after an info message). An expired password is changed like
+    /// pam_unix does, with three tries for the new one.
     struct FakePam {
         relay: Relay,
         log: Rc<RefCell<Log>>,
@@ -250,15 +274,42 @@ mod tests {
                 .relay
                 .converse(&[(PAM_TEXT_INFO, "Check your phone".into()), (PAM_PROMPT_ECHO_ON, "Code: ".into())])
                 .map_err(|e| Refusal::Denied(format!("{e:?}")))?;
-            let known = self.username == "alice" || self.username == "Alice";
+            let known = ["alice", "svc"].contains(&self.username.to_lowercase().as_str());
             if !(known && answers[0].as_deref() == Some("secret") && answers2[1].as_deref() == Some("123456")) {
                 return Err(Refusal::Denied("Authentication failure".into()));
             }
             if self.expired {
+                // pam_unix's account check tells the user
+                let _ = self.relay.converse(&[(PAM_ERROR_MSG, EXPIRED_NOTICE.into())]);
                 return Err(Refusal::Expired);
             }
             self.authenticated = true;
             Ok(())
+        }
+        fn change_password(&mut self) -> Result<(), String> {
+            let ask = |relay: &mut Relay, messages: &[(i32, String)]| {
+                let answers = relay.converse(messages).map_err(|e| e.to_string())?;
+                Ok::<_, String>(answers.into_iter().flatten().collect::<Vec<_>>())
+            };
+            let user = self.username.to_lowercase();
+            let current = ask(
+                &mut self.relay,
+                &[(PAM_TEXT_INFO, format!("Changing password for {user}.")), (PAM_PROMPT_ECHO_OFF, "Current password: ".into())],
+            )?;
+            if current != ["secret"] {
+                return Err("Authentication token manipulation error".into());
+            }
+            for _ in 0..3 {
+                let new = ask(&mut self.relay, &[(PAM_PROMPT_ECHO_OFF, "New password: ".into())])?;
+                let again = ask(&mut self.relay, &[(PAM_PROMPT_ECHO_OFF, "Retype new password: ".into())])?;
+                if new == again {
+                    self.log.borrow_mut().changed = Some(new[0].clone());
+                    self.authenticated = true;
+                    return Ok(());
+                }
+                ask(&mut self.relay, &[(PAM_ERROR_MSG, "Sorry, passwords do not match.".into())])?;
+            }
+            Err("Have exhausted maximum number of retries for service".into())
         }
         fn user(&self) -> Option<String> {
             Some(self.username.to_lowercase())
@@ -294,7 +345,15 @@ mod tests {
             let n = NEXT_DIR.fetch_add(1, Ordering::SeqCst);
             let runtime = std::env::temp_dir().join(format!("nebula-login-attempt-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&runtime).unwrap();
+            std::fs::write(runtime.join("shells"), "/bin/sh\n").unwrap();
             FakeHost { runtime, log: Default::default(), desktop: RefCell::new(None), expired: false }
+        }
+    }
+
+    impl FakeHost {
+        /// the default policy: UID_MIN 1000, the shells listed in our own /etc/shells
+        fn policy(&self) -> Policy {
+            Policy { min_uid: 1000, shells: Some(self.runtime.join("shells")) }
         }
     }
 
@@ -312,10 +371,15 @@ mod tests {
             Ok(FakePam { relay, log, username: username.into(), authenticated: false, expired: self.expired })
         }
         fn user(&self, name: &str) -> Option<User> {
-            let user = |name: &str, uid| User { name: name.into(), uid, gid: uid, home: "/".into(), shell: "/bin/sh".into() };
+            let user =
+                |uid, shell: &str| User { name: name.into(), uid, gid: uid, home: "/".into(), shell: shell.into() };
             match name {
-                "alice" => Some(user("alice", 1000)),
-                "root" | "toor" => Some(user(name, 0)),
+                "alice" => Some(user(1000, "/bin/sh")),
+                "root" | "toor" => Some(user(0, "/bin/sh")),
+                // a system account, one below UID_MIN and one without a login shell
+                "daemon" => Some(user(1, "/usr/sbin/nologin")),
+                "svc" => Some(user(999, "/bin/sh")),
+                "kiosk" => Some(user(1001, "/usr/sbin/nologin")),
                 _ => None,
             }
         }
@@ -325,7 +389,7 @@ mod tests {
             Ok(dir)
         }
         fn start_desktop(&self, user: &User, environment: Vec<String>, listener: OwnedFd) -> io::Result<libc::pid_t> {
-            assert_eq!(user.name, "alice");
+            assert!(user.name == "alice" || user.name == "svc");
             assert_eq!(environment, ["XDG_RUNTIME_DIR=/run/user/1000"]);
             *self.desktop.borrow_mut() = Some(UnixListener::from(listener));
             Ok(4242)
@@ -369,7 +433,7 @@ mod tests {
     fn signs_in_relaying_every_prompt_then_creates_and_attaches() {
         let host = FakeHost::new();
         let (connection, page) = web("Alice", vec!["secret", "123456"]);
-        let started = sign_in(&host, &LIMITS, connection).unwrap().expect("a desktop was started");
+        let started = sign_in(&host, &LIMITS, &host.policy(), connection).unwrap().expect("a desktop was started");
         let (seen, fd) = page.join().unwrap();
         assert_eq!(
             seen,
@@ -395,7 +459,7 @@ mod tests {
 
         // signing in again attaches to it, without opening another session
         let (connection, page) = web("alice", vec!["secret", "123456"]);
-        assert!(sign_in(&host, &LIMITS, connection).unwrap().is_none());
+        assert!(sign_in(&host, &LIMITS, &host.policy(), connection).unwrap().is_none());
         assert_eq!(result_of(&page.join().unwrap().0), (Outcome::SignedIn, "alice".into()));
         assert!(listener.accept().is_ok());
         assert_eq!(host.log.borrow().opened, 1);
@@ -407,7 +471,7 @@ mod tests {
         let host = FakeHost::new();
         let (connection, page) = web("alice", vec!["wrong", "123456"]);
         let begun = Instant::now();
-        assert!(sign_in(&host, &LIMITS, connection).unwrap().is_none());
+        assert!(sign_in(&host, &LIMITS, &host.policy(), connection).unwrap().is_none());
         let (seen, fd) = page.join().unwrap();
         assert!(begun.elapsed() >= LIMITS.min_failure);
         assert_eq!(result_of(&seen), (Outcome::Refused, WRONG.into()));
@@ -421,7 +485,7 @@ mod tests {
             let host = FakeHost::new();
             let (connection, page) = web(name, vec!["secret", "123456"]);
             let begun = Instant::now();
-            assert!(sign_in(&host, &LIMITS, connection).unwrap().is_none(), "{name}");
+            assert!(sign_in(&host, &LIMITS, &host.policy(), connection).unwrap().is_none(), "{name}");
             let (seen, _) = page.join().unwrap();
             assert!(begun.elapsed() >= LIMITS.min_failure, "{name}");
             // every one was asked for a password first
@@ -433,14 +497,91 @@ mod tests {
         }
     }
 
+    const EXPIRED_NOTICE: &str = "You are required to change your password immediately (administrator enforced).";
+
+    fn prompt(style: PromptStyle, text: &str) -> Record {
+        Record::Prompt { style, text: text.into() }
+    }
+
     #[test]
-    fn an_expired_password_is_refused_with_its_own_message() {
+    fn an_expired_password_is_changed_then_the_sign_in_goes_on() {
         let mut host = FakeHost::new();
         host.expired = true;
-        let (connection, page) = web("alice", vec!["secret", "123456"]);
-        assert!(sign_in(&host, &LIMITS, connection).unwrap().is_none());
-        assert_eq!(result_of(&page.join().unwrap().0), (Outcome::Refused, EXPIRED.into()));
-        assert_eq!(host.log.borrow().opened, 0);
+        // the new passwords don't match the first time
+        let answers = vec!["secret", "123456", "secret", "new-one", "typo", "new-one", "new-one"];
+        let (connection, page) = web("alice", answers);
+        let started = sign_in(&host, &LIMITS, &host.policy(), connection).unwrap().expect("a desktop was started");
+        let (seen, fd) = page.join().unwrap();
+        assert_eq!(
+            seen,
+            [
+                prompt(PromptStyle::EchoOff, "Password: "),
+                prompt(PromptStyle::Info, "Check your phone"),
+                prompt(PromptStyle::EchoOn, "Code: "),
+                prompt(PromptStyle::Error, EXPIRED_NOTICE),
+                prompt(PromptStyle::Info, "Changing password for alice."),
+                prompt(PromptStyle::EchoOff, "Current password: "),
+                prompt(PromptStyle::EchoOff, "New password: "),
+                prompt(PromptStyle::EchoOff, "Retype new password: "),
+                prompt(PromptStyle::Error, "Sorry, passwords do not match."),
+                prompt(PromptStyle::EchoOff, "New password: "),
+                prompt(PromptStyle::EchoOff, "Retype new password: "),
+                Record::Result { outcome: Outcome::SignedIn, text: "alice".into() },
+            ]
+        );
+        assert!(fd.is_some());
+        assert_eq!(host.log.borrow().changed.as_deref(), Some("new-one"));
+        assert_eq!(host.log.borrow().opened, 1);
+        drop(started);
+    }
+
+    #[test]
+    fn an_expired_password_that_isnt_changed_is_refused() {
+        // a wrong current password; new passwords that never match
+        for answers in [
+            vec!["secret", "123456", "wrong"],
+            vec!["secret", "123456", "secret", "a", "b", "c", "d", "e", "f"],
+        ] {
+            let mut host = FakeHost::new();
+            host.expired = true;
+            let (connection, page) = web("alice", answers);
+            let begun = Instant::now();
+            assert!(sign_in(&host, &LIMITS, &host.policy(), connection).unwrap().is_none());
+            assert!(begun.elapsed() >= LIMITS.min_failure);
+            assert_eq!(result_of(&page.join().unwrap().0), (Outcome::Refused, NOT_CHANGED.into()));
+            assert_eq!(host.log.borrow().changed, None);
+            assert_eq!(host.log.borrow().opened, 0);
+        }
+    }
+
+    #[test]
+    fn accounts_the_policy_refuses_fail_like_a_wrong_password() {
+        // system accounts and accounts without a login shell never reach PAM; "Svc" does (PAM maps it to "svc", uid
+        // 999), and is refused after it, even with the right password
+        for (name, reaches_pam) in [("daemon", false), ("kiosk", false), ("svc", false), ("Svc", true)] {
+            let host = FakeHost::new();
+            let (connection, page) = web(name, vec!["secret", "123456"]);
+            let begun = Instant::now();
+            assert!(sign_in(&host, &LIMITS, &host.policy(), connection).unwrap().is_none(), "{name}");
+            let (seen, _) = page.join().unwrap();
+            assert!(begun.elapsed() >= LIMITS.min_failure, "{name}");
+            assert_eq!(seen[0], prompt(PromptStyle::EchoOff, "Password: "), "{name}");
+            assert_eq!(result_of(&seen), (Outcome::Refused, WRONG.into()), "{name}");
+            assert_eq!(!host.log.borrow().started.is_empty(), reaches_pam, "{name}");
+            assert_eq!(host.log.borrow().opened, 0, "{name}");
+        }
+
+        // with the policy relaxed (a lower UID_MIN, any shell) they may sign in; root still may not
+        let host = FakeHost::new();
+        let relaxed = Policy { min_uid: 500, shells: None };
+        let (connection, page) = web("svc", vec!["secret", "123456"]);
+        let started = sign_in(&host, &LIMITS, &relaxed, connection).unwrap().expect("a desktop was started");
+        assert_eq!(result_of(&page.join().unwrap().0), (Outcome::SignedIn, "svc".into()));
+        drop(started);
+        let open = Policy { min_uid: 0, shells: None };
+        let (connection, page) = web("root", vec!["secret", "123456"]);
+        assert!(sign_in(&host, &LIMITS, &open, connection).unwrap().is_none());
+        assert_eq!(result_of(&page.join().unwrap().0), (Outcome::Refused, WRONG.into()));
     }
 
     #[test]
@@ -452,7 +593,7 @@ mod tests {
         channel.write(&Record::ClientAddress("::1".parse().unwrap()), None).unwrap();
         channel.write(&Record::Begin { username: "alice".into() }, None).unwrap();
         // the relay is closed after the timeout, so no Result can be sent: the web process sees the connection end
-        assert!(sign_in(&host, &limits, connection).is_err());
+        assert!(sign_in(&host, &limits, &host.policy(), connection).is_err());
         assert!(matches!(channel.read(Duration::from_secs(5)).unwrap().0, Record::Prompt { .. }));
         assert!(channel.read(Duration::from_secs(5)).is_err());
     }
@@ -462,7 +603,7 @@ mod tests {
         let host = FakeHost::new();
         let (connection, web_end) = UnixStream::pair().unwrap();
         Channel::new(web_end).write(&Record::Begin { username: "alice".into() }, None).unwrap();
-        assert!(sign_in(&host, &LIMITS, connection).is_err());
+        assert!(sign_in(&host, &LIMITS, &host.policy(), connection).is_err());
         assert!(host.log.borrow().started.is_empty());
     }
 
@@ -472,13 +613,13 @@ mod tests {
         // closed after the address (a worker that only served files)
         let (connection, web_end) = UnixStream::pair().unwrap();
         Channel::new(web_end).write(&Record::ClientAddress("::1".parse().unwrap()), None).unwrap();
-        assert!(sign_in(&host, &LIMITS, connection).unwrap().is_none());
+        assert!(sign_in(&host, &LIMITS, &host.policy(), connection).unwrap().is_none());
         // idle until the Begin timeout
         let limits = Limits { begin_timeout: Duration::from_millis(50), ..LIMITS };
         let (connection, web_end) = UnixStream::pair().unwrap();
         let mut channel = Channel::new(web_end);
         channel.write(&Record::ClientAddress("::1".parse().unwrap()), None).unwrap();
-        assert!(sign_in(&host, &limits, connection).unwrap().is_none());
+        assert!(sign_in(&host, &limits, &host.policy(), connection).unwrap().is_none());
         assert!(host.log.borrow().started.is_empty());
     }
 

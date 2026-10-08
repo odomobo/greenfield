@@ -17,7 +17,7 @@ production helper adds libpam):
   small hand-written binding (`login/src/pam.rs`, linked against `libpam.so.0`; the crate's only unsafe code), a
   separate binary with no dev code. The flow is `#![forbid(unsafe_code)]`: the command line (`args.rs`), PAM's
   conversation relayed to the page (`relay.rs`), one sign-in attempt behind `Pam` / `Host` traits (`attempt.rs`, unit
-  tested with fakes), startup and the accept loop (`main.rs`). See the header of `login/src/main.rs` and
+  tested with fakes), the account policy (`policy.rs`), startup and the accept loop (`main.rs`). See the header of `login/src/main.rs` and
   `nebula-login --help`; installing and running it is in [packages/gateway/README.md](../gateway/README.md).
 - `pam/nebula`: the PAM service file, installed as `/etc/pam.d/nebula`.
 
@@ -38,8 +38,15 @@ too. Tests: `yarn test` (`cargo test`).
    `pam_authenticate`, `pam_acct_mgmt`), each message of PAM's conversation becomes a `Prompt` (hidden and visible
    questions, info and error texts), each question's `Answer` its response (refused over `PAM_MAX_RESP_SIZE`, 512
    bytes). An unusable user name (empty, which the web process sends for an over-long one, or not what useradd
-   accepts) and root are asked `Password: ` and refused without PAM; a canonical PAM user that is root too. An expired
-   password is refused with its own message (changing it is step 11).
+   accepts) and accounts the policy refuses (`login/src/policy.rs`: root, uids below `UID_MIN` from
+   `/etc/login.defs` or `--min-uid`, login shells not listed in `/etc/shells` unless `--allow-any-shell`) are asked
+   `Password: ` and refused like a wrong password without PAM; the canonical PAM user is checked again after PAM (a
+   module may map names). The log says why. An expired password (`pam_acct_mgmt` says `PAM_NEW_AUTHTOK_REQD`) is
+   changed with `pam_chauthtok(PAM_CHANGE_EXPIRED_AUTHTOK)` on the same handle and relay (PAM asks for the current and
+   the new password and retries as configured), after the policy check; if it isn't changed the attempt is refused
+   ("The password has expired and was not changed."), else the sign-in goes on. The dev helper's
+   `--dev-expired-password` plays pam_unix's side of that conversation, for the page's e2e test
+   (`scripts/e2e/password.sh`).
 4. On success it attaches or creates (`common/src/desktop.rs`): flock `<runtime>/users/<uid>/lock`, connect to
    `desktop.sock`; if nothing accepts, remove the stale path, bind it, and start the desktop with the listening socket
    inherited (`SessionConfig.listenFd`, fd 4; the config record is on fd 3). Either way it makes a socket pair,

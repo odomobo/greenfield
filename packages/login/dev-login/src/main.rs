@@ -13,6 +13,9 @@
 //!     address (from the listener) and the user name (from the worker; a connection that never becomes a sign-in just
 //!     closes), asks for the password, and on success attaches to or creates the user's desktop (see
 //!     nebula_login_common::desktop) and passes the worker its end of the connection;
+//!   - with --dev-expired-password every sign-in finds the password expired and goes through the conversation
+//!     nebula-login relays from pam_chauthtok (pam_unix's prompts and messages), so the page's side of a password
+//!     change can be tested; the new password isn't kept;
 //!   - a child that started a desktop stays as its parent until it exits (the PAM parent, in production);
 //!   - SIGTERM / SIGINT stop the web process and the desktops (they end their apps first).
 use nebula_login_common::desktop::{self, Desktop};
@@ -50,6 +53,9 @@ from $GREENFIELD_DEV_PASSWORD (at least 8 characters). Loopback only; refuses to
   --dev-link-kbps <n>        desktops send to their viewer through a simulated link of n kbit/s (tests)
   --dev-patch-order <order>  oldest (default) or random: the order a window's queued patches are sent in
   --dev-patch-shape <shape>  bands (default) or tiles: how a window's large damage is split into patches
+  --dev-expired-password     every sign-in finds the password expired and asks for a new one, with pam_unix's
+                             prompts (the current password, then the new one twice; three tries); the new password
+                             isn't kept (tests the page's side of a password change)
 
 Passed on to the web process:
   --cert <file> --key <file> TLS certificate and key (default: a self-signed one in the state dir)
@@ -69,6 +75,9 @@ const DESKTOP_EXIT_TIMEOUT: Duration = Duration::from_secs(8);
 /// The web process's listening TCP socket.
 const WEB_LISTEN_FD: i32 = 3;
 const PASSWORD_VARIABLE: &str = "GREENFIELD_DEV_PASSWORD";
+const WRONG: &str = "The username or password is incorrect.";
+/// nebula-login's message for an expired password that wasn't changed (login/src/attempt.rs)
+const NOT_CHANGED: &str = "The password has expired and was not changed.";
 
 struct Config {
     bind_ip: IpAddr,
@@ -83,6 +92,7 @@ struct Config {
     link_kbps: f64,
     patch_order: String,
     patch_shape: String,
+    expired_password: bool,
     web_args: Vec<String>,
     password: String,
     user: sys::User,
@@ -107,6 +117,7 @@ fn parse_config() -> Config {
     let mut patch_order = "oldest".to_string();
     let mut patch_shape = "bands".to_string();
     let mut state_dir = None;
+    let mut expired_password = false;
     let mut web_args = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -121,6 +132,10 @@ fn parse_config() -> Config {
         }
         if name == "--hide-hostname" {
             web_args.push(name);
+            continue;
+        }
+        if name == "--dev-expired-password" {
+            expired_password = true;
             continue;
         }
         let mut value = || inline.clone().or_else(|| args.next()).unwrap_or_else(|| fail(&format!("{name} needs a value")));
@@ -219,6 +234,7 @@ fn parse_config() -> Config {
         link_kbps,
         patch_order,
         patch_shape,
+        expired_password,
         web_args,
         password,
         user,
@@ -356,9 +372,19 @@ fn sign_in(config: &Config, site_settings: &Option<PathBuf>, connection: UnixStr
             let minimum = MIN_FAILED_SIGN_IN.div_f64(config.time_scale);
             std::thread::sleep(minimum.saturating_sub(answered_at.elapsed()));
             log::info(&format!("Failed sign-in from {client}."));
-            let text = "The username or password is incorrect.".to_string();
-            channel.write(&Record::Result { outcome: Outcome::Refused, text }, None)?;
+            channel.write(&Record::Result { outcome: Outcome::Refused, text: WRONG.into() }, None)?;
             return Ok(None);
+        }
+        if config.expired_password {
+            let mut last_answer = answered_at;
+            if !change_expired_password(&mut channel, config, &username, &mut last_answer)? {
+                let minimum = MIN_FAILED_SIGN_IN.div_f64(config.time_scale);
+                std::thread::sleep(minimum.saturating_sub(last_answer.elapsed()));
+                log::info(&format!("Failed sign-in from {client}: the expired password was not changed."));
+                channel.write(&Record::Result { outcome: Outcome::Refused, text: NOT_CHANGED.into() }, None)?;
+                return Ok(None);
+            }
+            log::info("Changed the (dev) expired password; the new one isn't kept.");
         }
 
         let user_dir = desktop::user_dir(&config.runtime_dir, config.user.uid);
@@ -398,6 +424,54 @@ fn sign_in(config: &Config, site_settings: &Option<PathBuf>, connection: UnixStr
             1
         }
     }
+}
+
+/// Send a prompt; for a question, its answer (and when it came).
+fn ask(channel: &mut Channel, style: PromptStyle, text: &str, last_answer: &mut Instant) -> io::Result<Option<String>> {
+    channel.write(&Record::Prompt { style, text: text.into() }, None)?;
+    if style != PromptStyle::EchoOff && style != PromptStyle::EchoOn {
+        return Ok(None);
+    }
+    match channel.read(ANSWER_TIMEOUT)? {
+        (Record::Answer { text }, _) => {
+            *last_answer = Instant::now();
+            Ok(Some(text))
+        }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Answer")),
+    }
+}
+
+/// --dev-expired-password: the conversation of an expired password as nebula-login relays it from PAM (pam_unix's
+/// account check, then pam_chauthtok: the current password, the new one twice, three tries). Whether it was changed.
+fn change_expired_password(
+    channel: &mut Channel,
+    config: &Config,
+    username: &str,
+    last_answer: &mut Instant,
+) -> io::Result<bool> {
+    use PromptStyle::{EchoOff, Error, Info};
+    let notice = "You are required to change your password immediately (administrator enforced).";
+    ask(channel, Error, notice, last_answer)?;
+    ask(channel, Info, &format!("Changing password for {username}."), last_answer)?;
+    let current = ask(channel, EchoOff, "Current password: ", last_answer)?.unwrap_or_default();
+    if !equal_constant_time(current.as_bytes(), config.password.as_bytes()) {
+        ask(channel, Error, "passwd: Authentication token manipulation error", last_answer)?;
+        return Ok(false);
+    }
+    for _ in 0..3 {
+        let new = ask(channel, EchoOff, "New password: ", last_answer)?.unwrap_or_default();
+        if new.is_empty() {
+            ask(channel, Error, "No password has been supplied.", last_answer)?;
+            continue;
+        }
+        let again = ask(channel, EchoOff, "Retype new password: ", last_answer)?.unwrap_or_default();
+        if new == again {
+            return Ok(true);
+        }
+        ask(channel, Error, "Sorry, passwords do not match.", last_answer)?;
+    }
+    ask(channel, Error, "passwd: Have exhausted maximum number of retries for service", last_answer)?;
+    Ok(false)
 }
 
 /// As a desktop's parent: wait for it to exit; SIGTERM / SIGINT are passed on to it.

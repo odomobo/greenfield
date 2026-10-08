@@ -101,7 +101,8 @@ Open https://127.0.0.1:8443/ (self-signed certificate; the fingerprint is printe
 own user with that password. The dev login helper has no PAM and no privilege separation: desktops run as you. It
 refuses to start on non-loopback addresses, as root, or without a password of at least 8 characters. Its options
 (`--help`): the `--dev-*` experiments and test settings (`--dev-time-scale`, `--dev-link-kbps`, `--dev-patch-order`,
-`--dev-patch-shape`), `--encoder` / `--render-device` / `--site-config`, `--runtime-dir` (default
+`--dev-patch-shape`, `--dev-expired-password`: every sign-in has to change its expired password, with pam_unix's
+prompts; the new one isn't kept), `--encoder` / `--render-device` / `--site-config`, `--runtime-dir` (default
 `$XDG_RUNTIME_DIR/nebula-dev-<port>`), and the web process's `--cert`, `--key`, `--state-dir` (default
 `~/.local/state/greenfield-dev`), `--hide-hostname`, `--allowed-origin`, which it passes on. The production helper
 (`nebula-login`) and the web process take no dev options.
@@ -134,12 +135,17 @@ Options (`--help` lists everything): `--bind-ip` / `--bind-port`, `--cert/--key`
 the web user; default: a self-signed one in `--state-dir`, default `/var/lib/nebula`, which the helper creates for the
 web user and refuses if it belongs to someone else), `--hide-hostname`, `--allowed-origin` (behind a reverse proxy),
 `--web-user` (default `nebula-web`), `--runtime-dir` (default `/run/nebula`), `--gateway-dir` (default: the built
-`packages/gateway/dist` next to the binary), `--node` (default: `node` from `PATH`), and the site settings below.
+`packages/gateway/dist` next to the binary), `--node` (default: `node` from `PATH`), `--min-uid` / `--allow-any-shell`
+(below), and the site settings below.
 
 The PAM service is `nebula` (`/etc/pam.d/nebula`; without it PAM falls back to `other`). Whatever is configured there
 runs on one handle per sign-in: the page shows PAM's prompts (a second hidden prompt, e.g. a one-time code, gets a
 field of its own), `PAM_RHOST` is the browser's IP and `PAM_TTY` is `nebula`. Per-account lockout is PAM's job
-(`pam_faillock`). Root can't sign in.
+(`pam_faillock`). An expired password is changed on the page (`pam_chauthtok`: PAM asks for the current and the new
+password), then the sign-in goes on. Root can't sign in, and by default neither can system accounts (uids below
+`UID_MIN` in `/etc/login.defs`, else 1000; `--min-uid` sets another limit) nor users whose login shell isn't listed in
+`/etc/shells`, e.g. `/usr/sbin/nologin` (`--allow-any-shell` turns that off). They fail like a wrong password; the
+helper's log says why.
 
 Site settings (the video encoder and the GPU render node) are in a root-owned file, `/etc/nebula/nebula.conf` (another
 path with `--site-config`); a missing file means the defaults. Format (see `src/site-settings.ts`):

@@ -21,6 +21,13 @@ and the order of work; this file covers how things look and move. Values live in
 - **Logo**: the nebula "N" (from `~/nebula-icon`) is the favicon (16 and 32 px PNGs) and replaces the person icon on
   the sign-in card. PNGs, not the SVG: the SVG embeds the picture and weighs 1 MB.
 
+## Sign-in card
+
+- Username and password up front (password managers fill them); any further PAM prompt (a one-time code, the current
+  and new password when it has expired) replaces the fields with one labelled field of its own and a Continue button.
+- PAM's messages show above the field: errors in the error box, info texts as grey centered lines, several one per
+  line. They belong to the prompt they came before, so answering it clears them.
+
 ## Apps follow the theme (defaults only)
 
 nebula tells apps it's dark and gives them an accent color, the standard ways, **as defaults only**: whatever the

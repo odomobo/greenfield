@@ -46,6 +46,7 @@ const PAM_RHOST: c_int = 4;
 const PAM_DISALLOW_NULL_AUTHTOK: c_int = 0x0001;
 const PAM_ESTABLISH_CRED: c_int = 0x0002;
 const PAM_DELETE_CRED: c_int = 0x0004;
+const PAM_CHANGE_EXPIRED_AUTHTOK: c_int = 0x0020;
 
 #[link(name = "libpam.so.0", kind = "dylib", modifiers = "+verbatim")]
 extern "C" {
@@ -53,6 +54,7 @@ extern "C" {
     fn pam_end(pamh: *mut PamHandleT, status: c_int) -> c_int;
     fn pam_authenticate(pamh: *mut PamHandleT, flags: c_int) -> c_int;
     fn pam_acct_mgmt(pamh: *mut PamHandleT, flags: c_int) -> c_int;
+    fn pam_chauthtok(pamh: *mut PamHandleT, flags: c_int) -> c_int;
     fn pam_setcred(pamh: *mut PamHandleT, flags: c_int) -> c_int;
     fn pam_open_session(pamh: *mut PamHandleT, flags: c_int) -> c_int;
     fn pam_close_session(pamh: *mut PamHandleT, flags: c_int) -> c_int;
@@ -240,6 +242,12 @@ impl Pam for Handle {
             return Err(Refusal::Expired);
         }
         self.call("pam_acct_mgmt", result).map_err(Refusal::Denied)
+    }
+
+    fn change_password(&mut self) -> Result<(), String> {
+        // only the expired token; the conversation (current and new password, PAM's retries) goes through the relay
+        let result = unsafe { pam_chauthtok(self.pamh, PAM_CHANGE_EXPIRED_AUTHTOK) };
+        self.call("pam_chauthtok", result)
     }
 
     fn user(&self) -> Option<String> {

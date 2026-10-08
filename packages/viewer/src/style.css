@@ -15,6 +15,14 @@
   user-select: none;
 }
 
+/* --- sign-in (the card itself is the theme's) --- */
+
+/* PAM's messages during a sign-in come one per line (e.g. a password change: the expiry notice, then a mismatch) */
+#login-view .error,
+#login-info {
+  white-space: pre-line;
+}
+
 /* --- taskbar (top) --- */
 
 #taskbar {
