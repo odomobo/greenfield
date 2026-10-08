@@ -1,5 +1,6 @@
 //! The listener and its workers as processes: a worker per connection, the client's address written to the helper
-//! first, workers not dumpable, and a worker's exit closing its helper connection. (The sign-in and the relay are
+//! first, workers not dumpable, a worker's exit closing its helper connection, and TLS handshakes signed through the
+//! listener (the generated ECDSA key and an RSA key). (The sign-in and the relay are
 //! covered end to end by scripts/e2e: auth.sh and desktop.sh.) Needs curl and openssl.
 use nebula_login_common::spawn::spawn_with_fds;
 use nebula_login_protocol::{decode, Record};
@@ -34,6 +35,11 @@ impl Drop for Listener {
 }
 
 fn start(name: &str) -> (Listener, UnixListener) {
+    start_with(name, |_| Vec::new())
+}
+
+/// `extra`: more arguments for the listener, given its test directory (created and empty but for the page).
+fn start_with(name: &str, extra: impl FnOnce(&Path) -> Vec<String>) -> (Listener, UnixListener) {
     let dir = std::env::temp_dir().join(format!("nebula-web-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("viewer/assets")).unwrap();
@@ -41,6 +47,7 @@ fn start(name: &str) -> (Listener, UnixListener) {
     std::fs::write(dir.join("viewer/index.html"), "<html><p><!--hostname--></p></html>").unwrap();
     std::fs::write(dir.join("viewer/assets/index.js"), "console.log(1)").unwrap();
     std::fs::write(dir.join("static/theme.css"), "body {}").unwrap();
+    let extra = extra(&dir);
     let helper = UnixListener::bind(dir.join("login.sock")).unwrap();
     let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = tcp.local_addr().unwrap().port();
@@ -55,6 +62,7 @@ fn start(name: &str) -> (Listener, UnixListener) {
         .arg("--state-dir")
         .arg(dir.join("state"))
         .args(["--hide-hostname"])
+        .args(extra)
         .stdout(Stdio::null());
     let child = spawn_with_fds(&mut command, vec![(OwnedFd::from(tcp), 3)], None).unwrap();
     (Listener { child, dir, port }, helper)
@@ -71,11 +79,18 @@ fn curl(port: u16, path: &str) -> (String, String) {
     (status.to_string(), body.to_string())
 }
 
-fn children(pid: u32) -> Vec<u32> {
+/// The listener's live workers (not its openssl generating the certificate, nor a worker that exited and isn't reaped
+/// yet).
+fn workers(pid: u32) -> Vec<u32> {
     std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
         .unwrap_or_default()
         .split_whitespace()
         .filter_map(|pid| pid.parse().ok())
+        .filter(|pid| {
+            let command = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            command.split(|&b| b == 0).next().is_some_and(|exe| exe.ends_with(b"/nebula-web-worker"))
+        })
+        .filter(|&pid| !is_zombie(pid))
         .collect()
 }
 
@@ -104,7 +119,7 @@ fn serves_the_page_with_a_worker_per_connection() {
         assert_eq!(record, Record::ClientAddress("127.0.0.1".parse().unwrap()));
         assert_eq!(size, bytes.len());
     }
-    wait_until("the workers to exit", || children(listener.child.id()).is_empty());
+    wait_until("the workers to exit", || workers(listener.child.id()).is_empty());
 }
 
 #[test]
@@ -119,7 +134,7 @@ fn workers_are_not_dumpable() {
     };
     let mut worker = 0;
     wait_until("a worker", || {
-        worker = children(listener.child.id()).first().copied().unwrap_or(0);
+        worker = workers(listener.child.id()).first().copied().unwrap_or(0);
         worker != 0
     });
     // our own process's files are readable; the worker's (same user) stop being so once it marked itself
@@ -135,4 +150,48 @@ fn is_zombie(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .map(|stat| stat.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')))
         .unwrap_or(true)
+}
+
+fn openssl(args: &[&str]) {
+    let status = Command::new("openssl").args(args).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    assert!(status.expect("openssl").success(), "openssl {args:?}");
+}
+
+#[test]
+fn rsa_keys_sign_through_the_listener() {
+    let (listener, _helper) = start_with("rsa", |dir| {
+        let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+        let (cert, key) = (cert.to_str().unwrap(), key.to_str().unwrap());
+        openssl(&["genrsa", "-out", key, "2048"]);
+        openssl(&["req", "-x509", "-new", "-key", key, "-out", cert, "-days", "1", "-subj", "/CN=localhost"]);
+        vec!["--cert".into(), cert.into(), "--key".into(), key.into()]
+    });
+    // (the handshake's CertificateVerify is RSA-PSS, signed by the listener; curl checks it)
+    assert_eq!(curl(listener.port, "/assets/index.js"), ("200".into(), "console.log(1)".into()));
+    assert_eq!(curl(listener.port, "/assets/index.js"), ("200".into(), "console.log(1)".into()));
+}
+
+#[test]
+fn a_key_that_isnt_the_certificates_is_refused() {
+    let dir = std::env::temp_dir().join(format!("nebula-web-test-mismatch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |name: &str| dir.join(name).to_str().unwrap().to_string();
+    for name in ["one", "two"] {
+        let key = path(&format!("{name}.key"));
+        openssl(&["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", &key]);
+        let cert = path(&format!("{name}.pem"));
+        openssl(&["req", "-x509", "-new", "-key", &key, "-out", &cert, "-days", "1", "-subj", "/CN=localhost"]);
+    }
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nebula-web"));
+    command
+        .args(["--listen-fd", "3", "--login-socket", "x", "--viewer-dir", "x", "--static-dir", "x"])
+        .args(["--cert", &path("one.pem"), "--key", &path("two.key")])
+        .stderr(Stdio::piped());
+    let child = spawn_with_fds(&mut command, vec![(OwnedFd::from(tcp), 3)], None).unwrap();
+    let output = child.wait_with_output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("the key"), "{output:?}");
 }

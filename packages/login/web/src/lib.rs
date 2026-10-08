@@ -13,7 +13,10 @@
 //!   5  the report socket (a Unix stream socket pair's other end is the listener's): the worker writes one byte,
 //!      REPORT_REFUSED, when the helper refused its sign-in; its EOF tells the listener the worker is gone
 //!   6  the page bundle: a sealed read-only memfd (layout in assets.rs)
-//!   7  the TLS certificate chain and key, PEM, in a sealed read-only memfd
+//!   7  the TLS certificate chain and the key's signature schemes, in a sealed read-only memfd (layout in tls.rs);
+//!      not the key: the listener keeps it
+//!   8  the signing channel (a SOCK_SEQPACKET socket pair's other end is the listener's): the worker sends the TLS 1.3
+//!      CertificateVerify content of its handshake and gets the signature, once (see signing.rs)
 //! ```
 //!
 //! and these arguments (nothing secret: they are visible in /proc):
@@ -31,6 +34,7 @@ pub mod conn;
 pub mod helper;
 pub mod http;
 pub mod limits;
+pub mod signing;
 pub mod sys;
 pub mod tls;
 pub mod websocket;
@@ -40,6 +44,7 @@ pub const WORKER_HELPER_FD: i32 = 4;
 pub const WORKER_REPORT_FD: i32 = 5;
 pub const WORKER_ASSETS_FD: i32 = 6;
 pub const WORKER_TLS_FD: i32 = 7;
+pub const WORKER_SIGNING_FD: i32 = 8;
 /// The worker's report: the helper refused its sign-in (counted at most once per worker).
 pub const REPORT_REFUSED: u8 = 1;
 pub const WORKER_BINARY: &str = "nebula-web-worker";

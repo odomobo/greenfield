@@ -153,8 +153,8 @@ sudo systemctl enable --now nebula.socket     # the service starts on the first 
 quit); `systemctl restart nebula.service` does too. Only hardening that doesn't break user sessions is set (see
 [packages/login/README.md](../login/README.md#systemd)). This is part of the install script item in ROADMAP.md.
 
-Options (`--help` lists everything): `--bind-ip` / `--bind-port`, `--cert/--key` for a real certificate (readable by
-the web user; default: a self-signed one in `--state-dir`, default `/var/lib/nebula`, which the helper creates for the
+Options (`--help` lists everything): `--bind-ip` / `--bind-port`, `--cert/--key` for a real certificate (the chain, and
+its RSA, ECDSA P-256/P-384 or Ed25519 key; readable by the web user, whose listener keeps the key from the workers; default: a self-signed one in `--state-dir`, default `/var/lib/nebula`, which the helper creates for the
 web user and refuses if it belongs to someone else), `--hide-hostname`, `--allowed-origin` (behind a reverse proxy),
 `--web-user` (default `nebula-web`), `--runtime-dir` (default `/run/nebula`), `--gateway-dir` (default: the built
 `packages/gateway/dist` next to the binary; the page is read from `../static` and `../../viewer/dist` next to it),
