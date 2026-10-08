@@ -1,6 +1,7 @@
 //! The system calls the web front needs beyond nebula_login_common::sys: sealed memfds and read-only mappings of them,
-//! polling many fds, socket tuning, not being dumpable, the worker's sandbox (no_new_privs, rlimits, installing a
-//! seccomp filter; the filter itself is built in sandbox.rs). Everything unsafe in this crate is in this module.
+//! polling many fds, packet socket pairs, socket tuning, not being dumpable, the worker's sandbox (no_new_privs,
+//! rlimits, installing a seccomp filter; the filter itself is built in sandbox.rs). Everything unsafe in this crate is
+//! in this module.
 use std::ffi::CStr;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -84,6 +85,13 @@ pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
 pub fn set_cloexec(fd: RawFd) -> io::Result<()> {
     let flags = check(unsafe { libc::fcntl(fd, libc::F_GETFD) })?;
     check(unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) }).map(|_| ())
+}
+
+/// A connected pair of Unix SOCK_SEQPACKET sockets (close-on-exec): each write arrives as one packet.
+pub fn seqpacket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as RawFd; 2];
+    check(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr()) })?;
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
 /// Whether `fd` is open.

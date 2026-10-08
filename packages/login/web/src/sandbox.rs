@@ -5,6 +5,8 @@
 //! - **no_new_privs**: nothing it could exec would gain privileges (it can't exec anyway; the filter needs it).
 //! - **rlimits** (`limits`): no new processes, no core dumps, no fds beyond the numbers it was given (plus the one
 //!   the helper's `Result` brings), a bounded address space.
+//!   The signing channel (fd 8, signing.rs) needs nothing more: the handshake's one request and reply are a write and
+//!   a recvfrom, its timeouts were set before.
 //! - **seccomp-BPF allowlist** (`ALLOWED`, the one list of what the worker may call): any other system call kills the
 //!   worker (SIGSYS). Kill rather than an error: a call outside the list is a bug or an exploit, and either way the
 //!   connection is better ended loudly (the listener logs the signal) than continued in a state nobody tested; an
@@ -53,8 +55,9 @@ pub const ALLOWED: &[Allow] = &[
     // (aarch64 has no poll: glibc uses ppoll)
     #[cfg(target_arch = "aarch64")]
     Allow::Call(libc::SYS_ppoll),
-    // making the desktop's connection non-blocking
-    Allow::OneOf(libc::SYS_fcntl, 1, &[libc::F_GETFL as u32, libc::F_SETFL as u32]),
+    // making the desktop's connection non-blocking; F_GETFD: in debug builds std checks an fd is open before it
+    // closes it (OwnedFd's drop)
+    Allow::OneOf(libc::SYS_fcntl, 1, &[libc::F_GETFL as u32, libc::F_SETFL as u32, libc::F_GETFD as u32]),
     // ring's and our random numbers; Instant and the log's time (normally in the vDSO, without a system call)
     Allow::Call(libc::SYS_getrandom),
     Allow::Call(libc::SYS_clock_gettime),
@@ -80,8 +83,9 @@ pub fn limits(mapped: usize) -> [(libc::__rlimit_resource_t, u64); 4] {
         (libc::RLIMIT_NPROC, 0),
         // no core dumps (it is not dumpable anyway)
         (libc::RLIMIT_CORE, 0),
-        // fds 0–7: the ones the listener passed (see lib.rs); the desktop's connection takes the place of a closed one
-        (libc::RLIMIT_NOFILE, 8),
+        // fds 0–8: the ones the listener passed (see lib.rs); the desktop's connection takes the place of a closed one
+        // (the page or TLS memfd)
+        (libc::RLIMIT_NOFILE, 9),
         // the program, the libraries and the stack, the mapped page bundle (`mapped`), and room for TLS and the relay's
         // buffers
         (libc::RLIMIT_AS, (mapped as u64).saturating_add(ADDRESS_SPACE)),

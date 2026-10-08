@@ -24,13 +24,15 @@ The programs that sign users in and connect their browser to their desktop (see
   `nebula-web-worker` (`src/bin/worker.rs`) for each with fork + exec. The listener opens the worker's `login.sock`
   connection and writes the client's address, caps workers (256 in all, 32 per IP), throttles failed sign-ins per IP
   (20 free, then doubling blocks up to 15 minutes; workers report refusals on a socket of their own), and loads the
-  TLS certificate and key (or generates a self-signed pair with openssl) and the page with its files once, each into a
-  sealed read-only memfd every worker maps. The worker (not dumpable) does TLS 1.3 (rustls with ring), a minimal
+  TLS certificate and key (or generates a self-signed pair with openssl) and the page with its files once. The
+  certificate chain and the page go into sealed read-only memfds every worker maps; the key stays in the listener,
+  which signs each worker's TLS 1.3 CertificateVerify over a per-worker signing channel, checking the layout strictly,
+  once per worker (`src/signing.rs`). The worker (not dumpable) does TLS 1.3 (rustls with ring), a minimal
   HTTP/1.1 (GET/HEAD of the page and its files, the security headers, `src/http.rs`), the WebSocket upgrade with the
   Origin check, the sign-in frames (`src/websocket.rs`) translated to and from login records, and then relays the raw
   WebSocket bytes to the desktop. The fds and arguments a worker gets are documented in `src/lib.rs`, the page
   bundle's layout in `src/assets.rs`. Once set up, the worker enters its sandbox (`src/sandbox.rs`): rlimits (no
-  processes, 8 fds, bounded memory), no_new_privs and a seccomp allowlist (reading, writing and polling its fds,
+  processes, 9 fds, bounded memory), no_new_privs and a seccomp allowlist (reading, writing and polling its fds,
   memory, random numbers, exiting; anything else kills it with SIGSYS, which the listener logs). The helpers start
   `nebula-web` with no inheritable or ambient capabilities and no_new_privs. All its unsafe code is in `src/sys.rs`
   (memfds, mmap, poll, socket options, the sandbox's system calls).

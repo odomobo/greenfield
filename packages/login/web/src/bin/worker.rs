@@ -33,6 +33,7 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -107,7 +108,7 @@ fn main() {
         }
     }
     let sign_in = sign_in.unwrap_or_else(|| fatal("--sign-in is required (started by nebula-web only)"));
-    let fds = [WORKER_TCP_FD, WORKER_REPORT_FD, WORKER_ASSETS_FD, WORKER_TLS_FD];
+    let fds = [WORKER_TCP_FD, WORKER_REPORT_FD, WORKER_ASSETS_FD, WORKER_TLS_FD, WORKER_SIGNING_FD];
     if fds.iter().any(|&fd| !sys::is_open(fd)) || (sign_in == SignIn::Helper) != sys::is_open(WORKER_HELPER_FD) {
         fatal("missing fds (started by nebula-web only)");
     }
@@ -116,15 +117,22 @@ fn main() {
     let report = unsafe { UnixStream::from_raw_fd(WORKER_REPORT_FD) };
     let assets_fd = unsafe { OwnedFd::from_raw_fd(WORKER_ASSETS_FD) };
     let tls_fd = unsafe { OwnedFd::from_raw_fd(WORKER_TLS_FD) };
+    let signing_channel = unsafe { UnixStream::from_raw_fd(WORKER_SIGNING_FD) };
     let helper = (sign_in == SignIn::Helper).then(|| unsafe { UnixStream::from_raw_fd(WORKER_HELPER_FD) });
 
     let bundle = sys::Mapping::sealed(assets_fd.as_raw_fd()).unwrap_or_else(|e| fatal(&format!("The page: {e}")));
     let assets = Assets::parse(bundle.bytes()).unwrap_or_else(|e| fatal(&format!("The page: {e}")));
-    let config = sys::Mapping::sealed(tls_fd.as_raw_fd())
+    let (chain, schemes) = sys::Mapping::sealed(tls_fd.as_raw_fd())
         .map_err(|e| e.to_string())
-        .and_then(|pem| tls::server_config(pem.bytes()))
+        .and_then(|public| tls::parse_public(public.bytes()))
         .unwrap_or_else(|e| fatal(&format!("TLS: {e}")));
     drop((assets_fd, tls_fd));
+    // the key is the listener's: the handshake's signature comes from it (blocking, within the handshake's time)
+    signing_channel
+        .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
+        .and_then(|()| signing_channel.set_write_timeout(Some(HANDSHAKE_TIMEOUT)))
+        .unwrap_or_else(|e| fatal(&format!("The signing channel: {e}")));
+    let config = tls::server_config(chain, Arc::new(signing::RemoteKey::new(signing_channel, schemes)));
 
     let ip = tcp.peer_addr().map(|address| client_ip(address.ip()).to_string()).unwrap_or_default();
     // tuning only

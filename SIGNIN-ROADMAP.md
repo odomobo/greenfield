@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–8, 10, 11 and 13 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–13 are implemented.
 
 ## Why
 
@@ -401,7 +401,7 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
     options.
   - **For later steps**: step 8 can sandbox the worker after it has mapped its memfds and built its TLS
     configuration (it needs read/write/sendmsg/recvmsg/poll/close/getrandom/exit and nothing that opens files); step 9
-    replaces fd 7 (the key) with a signing channel to the listener; step 12 changes only `http::route` (cache headers)
+    replaces fd 7 (the key) with a signing channel to the listener (done: fd 8, see step 9); step 12 changes only `http::route` (cache headers)
     and the bundle; for step 13's socket activation, `nebula-web` takes the listening socket as an inherited fd at any
     number (`--listen-fd`).
 
@@ -416,13 +416,13 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
   - **Where**: `web/src/sandbox.rs` (the allowlist `ALLOWED`, the rlimits, the BPF program built by hand; the
     system calls themselves in `web/src/sys.rs`), applied at one marked point in the worker's `main`
     (`sandbox::enter`), after it has checked its fds, mapped the page bundle, built the TLS configuration from the TLS
-    memfd (then closed and unmapped), tuned the TCP socket and created the rustls connection. Failing to enter it is
-    fatal. No new crates.
+    memfd (then closed and unmapped) and the signing channel (timeouts set), tuned the TCP socket and created the
+    rustls connection. Failing to enter it is fatal. No new crates.
   - **Order**: rlimits, `PR_SET_NO_NEW_PRIVS`, then the seccomp filter (`PR_SET_SECCOMP`, one thread so no TSYNC).
   - **The filter** checks the architecture (x86_64 or aarch64, built per target; another arch is a compile error)
     and on x86_64 refuses x32 numbers, then allows only: `write`, `writev`, `recvfrom`, `sendto`, `recvmsg`,
-    `sendmsg`, `shutdown`, `close`, `poll` (aarch64: `ppoll`), `fcntl` with `F_GETFL`/`F_SETFL` only, `getrandom`,
-    `clock_gettime`, `brk`, `mmap` and `mprotect` without `PROT_EXEC`, `mremap`, `munmap`, `madvise`,
+    `sendmsg`, `shutdown`, `close`, `poll` (aarch64: `ppoll`), `fcntl` with `F_GETFL`/`F_SETFL`/`F_GETFD` only
+    (`F_GETFD`: debug builds of std check an fd before closing it), `getrandom`, `clock_gettime`, `brk`, `mmap` and `mprotect` without `PROT_EXEC`, `mremap`, `munmap`, `madvise`,
     `sigaltstack` (std's `process::exit`), `exit_group`. Found by running the unit tests and the e2e suite with the
     default action set to `SECCOMP_RET_LOG` (first with an empty list, then with the candidates) and reading the
     kernel's audit lines (`dmesg | grep type=1326`); how to repeat that is in the module header. `read` isn't needed
@@ -433,7 +433,7 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
     return would let exploit code probe the filter. The listener logs a worker killed by a signal (rate-limited),
     naming SIGSYS as the sandbox (`A worker ended with signal 31 (a system call its sandbox forbids).`). A Rust abort
     also ends in SIGSYS (no `tgkill`).
-  - **rlimits** (soft = hard): `RLIMIT_NPROC` 0, `RLIMIT_CORE` 0, `RLIMIT_NOFILE` 8 (fds 0–7, the numbers the
+  - **rlimits** (soft = hard): `RLIMIT_NPROC` 0, `RLIMIT_CORE` 0, `RLIMIT_NOFILE` 9 (fds 0–8, the numbers the
     listener uses; the desktop connection the helper's `Result` carries takes the place of a closed memfd, so a
     worker can hold at most one received fd beyond its own), `RLIMIT_AS` the mapped bundle + 128 MiB (a worker peaks
     at about 8 MiB in the e2e suite). **`RLIMIT_FSIZE` is not set to 0**: the worker opens no files, but its
@@ -456,15 +456,42 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
     `socket`, `clone`, an executable `mmap`, `fcntl(F_DUPFD)` and an x32 call each kill the child with SIGSYS.
     `web/tests/listener.rs` checks a real worker's `/proc/<pid>/status` (`Seccomp: 2`, `NoNewPrivs: 1`) and
     `/proc/<pid>/limits`. `common/src/spawn.rs` checks `without_capabilities`.
-  - **For step 9**: the signing channel is one more fd the worker reads and writes with calls already allowed
-    (`sendmsg`/`recvmsg`, `write`/`recvfrom`, `poll`). Keep its number at 7 or below (or raise `RLIMIT_NOFILE` in
-    `sandbox::limits`), and if the worker must build anything new from fd 7 (the certificate chain), do it before
-    `sandbox::enter`.
+  - **With step 9** (merged after): the signing channel (fd 8) needs no further calls: the handshake's request and
+    reply are a `write` and a `recvfrom` (its `SO_RCVTIMEO`/`SO_SNDTIMEO` are set before the sandbox), checked with
+    the log mode as above. A new fd for workers must be numbered 8 or below, or `RLIMIT_NOFILE` raised in
+    `sandbox::limits`.
 
 ### 9. Keep the TLS key in the listener
 
 - Workers ask the listener to sign their handshake through rustls's signing-key interface. The listener signs only
   the exact TLS 1.3 CertificateVerify layout, once per worker. An exploited worker can't copy the key.
+- As built:
+  - **fds**: fd 7 of a worker is still a sealed memfd, now holding only the public part: the key's TLS 1.3 signature
+    schemes and the certificate chain (DER; layout in `web/src/tls.rs`). New fd 8 is the signing channel, a
+    `SOCK_SEQPACKET` socket pair the listener creates per worker (packets, so the listener's loop never reassembles a
+    request). Documented in `web/src/lib.rs`.
+  - **Worker** (`web/src/signing.rs`, `RemoteKey`): rustls's `SigningKey`/`Signer`; `choose_scheme` picks the first of
+    the key's schemes the client offers, `sign` writes one packet (the scheme as u16, then the message rustls gives
+    it, which is the whole CertificateVerify content, not a hash) and blocks reading the signature (read and write
+    timeouts of 10 s, the handshake's, set at setup). EOF means refused and fails the handshake. The channel needs only
+    read/write on an fd the worker already has (for step 8's filter).
+  - **Listener**: polls each worker's channel with its report socket and signs inline in its one-threaded loop (ECDSA
+    P-256 about 0.1 ms, RSA 2048 1–2 ms, RSA 4096 about 10 ms; at most one per worker, so even 256 workers at once
+    delay accepting by well under a second). It checks the packet strictly: a TLS 1.3 scheme (no RSA PKCS#1, SHA-1,
+    SHA-224) the key supports, then exactly 64 bytes 0x20, `TLS 1.3, server CertificateVerify`, a 0 byte and a hash
+    as long as one of the cipher suites' hashes (32 or 48 bytes: the listener can't know which suite the worker
+    negotiated, so either). It signs with rustls's own signer for the key, then closes the channel whether it signed
+    or refused: one request per worker. A refusal is logged.
+  - **Keys**: whatever rustls's ring provider loads (`any_supported_type`): RSA (PKCS#1 or PKCS#8, signed with
+    RSA-PSS), ECDSA P-256 (the generated key) and P-384, Ed25519. The listener checks at startup that the key is the
+    leaf certificate's (`keys_match`) and can sign in TLS 1.3. `--cert` now holds the chain only and `--key` the key
+    (before, a key in either file was found).
+  - **What an exploited worker still gets**: one signature over a CertificateVerify with a transcript hash of its
+    choosing, i.e. one handshake as the server (it could relay another client's handshake to it once). It can't get
+    the key or a second signature without a new TCP connection (and so a new worker, within the listener's caps).
+  - **Tests**: `web/src/signing.rs` (the layout check, a second request refused, oversized packets),
+    `web/src/tls.rs` (the public memfd), `web/tests/listener.rs` (handshakes with the generated ECDSA key and an RSA
+    key, a mismatched key refused at startup); every e2e page load does the handshake through the listener.
 
 ### 10. Per-IP failure backoff
 
@@ -527,6 +554,11 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 
 - Serve content-hashed asset files with a long `immutable` cache lifetime, so repeat visits only fetch `index.html`
   and open the WebSocket. Fewer connections means fewer workers.
+- As built: `http::cache_control` (unit-tested in `routes`). The rule is the path: everything under `/assets/` (the
+  viewer build; Vite hashes every name there, including the patch worker and audio worklet; the wasm decoder is
+  inlined in a script) gets `public, max-age=31536000, immutable`; `public` since the files are the same for everyone.
+  `/static/` files (theme.css, images) keep their names, so they keep `private, max-age=3600`; the page stays
+  `no-store`. Hashing /static/ was not done (the viewer's scripts and theme.css refer to those names). e2e: `auth.sh`.
 
 ### 13. systemd units and hardening
 

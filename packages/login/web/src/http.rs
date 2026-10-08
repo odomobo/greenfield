@@ -205,6 +205,20 @@ impl<'a> Response<'a> {
     }
 }
 
+/// The Cache-Control of a served file. Everything under /assets/ is the viewer build's output, where Vite puts a hash of
+/// the content in every file name (scripts, styles, the patch worker, the audio worklet; the wasm decoder is inlined in
+/// a script), so a name never changes its content and the file can be kept for good. `public` rather than `private`:
+/// the files are the same for everyone and hold no user data. The page (`no-store`, see `Response::page`) is what
+/// names the current files. /static/ files keep their names across builds (theme, images, which a deployment may
+/// replace), so they only get a short lifetime.
+pub fn cache_control(path: &str) -> &'static str {
+    if path.starts_with("/assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "private, max-age=3600"
+    }
+}
+
 /// The response to a request that isn't an upgrade.
 pub fn route<'a>(request: &Request, assets: &Assets<'a>) -> Response<'a> {
     if request.method != "GET" && request.method != "HEAD" {
@@ -216,9 +230,7 @@ pub fn route<'a>(request: &Request, assets: &Assets<'a>) -> Response<'a> {
     // the viewer's files and our public static files (no user data in them)
     if path.starts_with("/static/") || path.starts_with("/assets/") {
         return match assets.get(&path[1..]) {
-            Some(content) => {
-                Response::new(200, assets::content_type(path), "private, max-age=3600", Cow::Borrowed(content))
-            }
+            Some(content) => Response::new(200, assets::content_type(path), cache_control(path), Cow::Borrowed(content)),
             None => Response::error(404),
         };
     }
@@ -384,7 +396,10 @@ mod tests {
         let script = get("GET /assets/a.js HTTP/1.1\r\n\r\n");
         assert_eq!((script.status, &*script.body), (200, &b"js"[..]));
         assert_eq!(header(&script, "Content-Type").as_deref(), Some("text/javascript; charset=utf-8"));
-        assert_eq!(get("GET /static/theme.css HTTP/1.1\r\n\r\n").status, 200);
+        assert_eq!(header(&script, "Cache-Control").as_deref(), Some("public, max-age=31536000, immutable"));
+        let theme = get("GET /static/theme.css HTTP/1.1\r\n\r\n");
+        assert_eq!(theme.status, 200);
+        assert_eq!(header(&theme, "Cache-Control").as_deref(), Some("private, max-age=3600"));
         assert_eq!(get("GET /static/nothing.css HTTP/1.1\r\n\r\n").status, 404);
         assert_eq!(get("GET /assets/../index.html HTTP/1.1\r\n\r\n").status, 404);
         assert_eq!(get("GET /index.html HTTP/1.1\r\n\r\n").status, 404);

@@ -5,15 +5,17 @@
 //!
 //! Started by a login helper (the production nebula-login, as the web user, or the dev helper) with the listening TCP
 //! socket as an inherited fd and where the helper's login.sock is (see USAGE). At startup it loads the TLS certificate
-//! and key (or generates a self-signed pair) and the page with its files, each into a sealed read-only memfd that
-//! every worker maps. For each connection the listener:
+//! and key (or generates a self-signed pair) and the page with its files. The certificate chain and the page go into
+//! sealed read-only memfds that every worker maps; the key stays here: each worker signs its TLS handshake through its
+//! signing channel to us, once (src/signing.rs). For each connection the listener:
 //!
 //!   - refuses it if it's over the connection caps (in all, and per client IP);
 //!   - connects to login.sock and writes the client's address (the login protocol's ClientAddress record, from the
 //!     accepted socket's peer address): the worker can't choose the IP that the helper (PAM, the takeover message)
 //!     sees. Not when the IP is throttled (the worker then refuses any sign-in without asking the helper);
 //!   - starts the worker (fork + exec, so each gets a fresh memory layout) with the TCP connection, the helper
-//!     connection, a report socket and the two memfds at fixed fd numbers (see the crate documentation, src/lib.rs).
+//!     connection, a report socket, the two memfds and a signing channel at fixed fd numbers (see the crate
+//!     documentation, src/lib.rs).
 //!
 //! Failed sign-ins are throttled per IP here (until the helper does it, step 10), generously, since many users may
 //! share an address (NAT): workers report a refused sign-in on their report socket. No per-user throttling:
@@ -26,8 +28,10 @@ use nebula_login_common::{log, spawn::spawn_with_fds, sys as common_sys};
 use nebula_login_protocol::Record;
 use nebula_web::assets::{self, Builder};
 use nebula_web::limits::{RateLimiter, WorkerCount};
+use nebula_web::signing::{self, Served};
 use nebula_web::{client_ip, http, sys, tls};
-use nebula_web::{WORKER_ASSETS_FD, WORKER_BINARY, WORKER_HELPER_FD, WORKER_REPORT_FD, WORKER_TCP_FD, WORKER_TLS_FD};
+use nebula_web::{WORKER_ASSETS_FD, WORKER_BINARY, WORKER_HELPER_FD, WORKER_REPORT_FD, WORKER_TCP_FD};
+use nebula_web::{WORKER_SIGNING_FD, WORKER_TLS_FD};
 use std::io::{self, Read};
 use std::net::{IpAddr, TcpListener};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -165,11 +169,12 @@ struct Settings {
     tls: OwnedFd,
 }
 
-/// A worker alive: its client's IP and our end of its report socket.
+/// A worker alive: its client's IP, our end of its report socket and of its signing channel.
 struct Worker {
     ip: IpAddr,
     report: UnixStream,
     reported: bool,
+    signing: signing::Channel,
 }
 
 fn main() {
@@ -183,9 +188,10 @@ fn main() {
     listener.set_nonblocking(true).unwrap_or_else(|e| fatal(&format!("--listen-fd {}: {e}", args.listen_fd)));
     let address = listener.local_addr().unwrap_or_else(|e| fatal(&format!("--listen-fd {}: {e}", args.listen_fd)));
 
-    let pem = tls::load(args.tls_files.clone(), &args.state_dir).unwrap_or_else(|e| fatal(&e));
-    let tls = sys::sealed_memfd(c"nebula-tls", &pem).unwrap_or_else(|e| fatal(&format!("TLS: {e}")));
-    drop(pem);
+    let credentials = tls::load(args.tls_files.clone(), &args.state_dir).unwrap_or_else(|e| fatal(&e));
+    // (the certificate chain only: the key stays here)
+    let tls = sys::sealed_memfd(c"nebula-tls", &credentials.public()).unwrap_or_else(|e| fatal(&format!("TLS: {e}")));
+    let key = signing::Key::new(credentials.key);
     let bundle = page_bundle(&args).unwrap_or_else(|e| {
         fatal(&format!("Loading the page from {} and {}: {e}", args.viewer_dir.display(), args.static_dir.display()))
     });
@@ -200,10 +206,10 @@ fn main() {
     let settings =
         Settings { worker, login_socket: args.login_socket, allowed_origins: args.allowed_origins, assets, tls };
     log::info(&format!("Listening on https://{address}"));
-    listen(listener, &settings);
+    listen(listener, &settings, &key);
 }
 
-fn listen(listener: TcpListener, settings: &Settings) -> ! {
+fn listen(listener: TcpListener, settings: &Settings, key: &signing::Key) -> ! {
     let mut throttle = RateLimiter::new(FREE_FAILURES);
     let mut count = WorkerCount::new(MAX_WORKERS, MAX_WORKERS_PER_IP);
     let mut workers: Vec<Worker> = Vec::new();
@@ -216,8 +222,11 @@ fn listen(listener: TcpListener, settings: &Settings) -> ! {
         }
     };
     loop {
+        // the listening socket, then each worker's report socket and signing channel (-1, ignored, once used)
         let mut fds: Vec<libc::pollfd> = std::iter::once(listener.as_raw_fd())
-            .chain(workers.iter().map(|worker| worker.report.as_raw_fd()))
+            .chain(workers.iter().flat_map(|worker| {
+                [worker.report.as_raw_fd(), worker.signing.stream().map_or(-1, |stream| stream.as_raw_fd())]
+            }))
             .map(|fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 })
             .collect();
         // (a timeout only to retry accepting after running out of fds)
@@ -226,7 +235,14 @@ fn listen(listener: TcpListener, settings: &Settings) -> ! {
         }
         // reports and exits first: they make room
         let mut ended = vec![false; workers.len()];
-        for ((worker, fd), ended) in workers.iter_mut().zip(&fds[1..]).zip(ended.iter_mut()) {
+        for ((worker, fds), ended) in workers.iter_mut().zip(fds[1..].chunks(2)).zip(ended.iter_mut()) {
+            // signing inline: it takes well under a millisecond (ECDSA) to a few (RSA), once per worker
+            if fds[1].revents != 0 {
+                if let Served::Refused(why) = worker.signing.serve(key) {
+                    log::warn(&format!("Refused to sign for a worker (client {}): {why}.", worker.ip));
+                }
+            }
+            let fd = &fds[0];
             if fd.revents == 0 {
                 continue;
             }
@@ -254,13 +270,14 @@ fn listen(listener: TcpListener, settings: &Settings) -> ! {
                 }
                 alive
             });
-            // (reap them; one killed by a signal is a crash, or its sandbox stopped it: SIGSYS)
-            while let Ok(Some((_, status))) = common_sys::wait_child(-1, false) {
-                if libc::WIFSIGNALED(status) {
-                    let sandbox = libc::WTERMSIG(status) == libc::SIGSYS;
-                    let why = if sandbox { " (a system call its sandbox forbids)" } else { "" };
-                    warn(format!("A worker ended with {}{why}.", common_sys::describe_status(status)));
-                }
+        }
+        // reap the workers that exited (on every round: a worker's report socket closes just before it can be reaped);
+        // one killed by a signal crashed, or its sandbox stopped it (SIGSYS)
+        while let Ok(Some((_, status))) = common_sys::wait_child(-1, false) {
+            if libc::WIFSIGNALED(status) {
+                let sandbox = libc::WTERMSIG(status) == libc::SIGSYS;
+                let why = if sandbox { " (a system call its sandbox forbids)" } else { "" };
+                warn(format!("A worker ended with {}{why}.", common_sys::describe_status(status)));
             }
         }
         if fds[0].revents == 0 {
@@ -283,7 +300,7 @@ fn listen(listener: TcpListener, settings: &Settings) -> ! {
                 continue;
             }
             match start_worker(OwnedFd::from(tcp), ip, settings, &throttle) {
-                Ok(report) => workers.push(Worker { ip, report, reported: false }),
+                Ok((report, signing)) => workers.push(Worker { ip, report, reported: false, signing }),
                 Err(e) => {
                     count.remove(ip);
                     log::error(&format!("Starting a worker failed: {e}"));
@@ -303,8 +320,13 @@ fn connect_helper(path: &Path, ip: IpAddr) -> io::Result<UnixStream> {
 }
 
 /// Start a worker for the accepted (unread) connection `tcp`: open its helper connection and write the client's
-/// address to it, and hand it both (our copies are closed here). Our end of its report socket.
-fn start_worker(tcp: OwnedFd, ip: IpAddr, settings: &Settings, throttle: &RateLimiter) -> io::Result<UnixStream> {
+/// address to it, and hand it both (our copies are closed here). Our ends of its report socket and signing channel.
+fn start_worker(
+    tcp: OwnedFd,
+    ip: IpAddr,
+    settings: &Settings,
+    throttle: &RateLimiter,
+) -> io::Result<(UnixStream, signing::Channel)> {
     let mut fds = vec![(tcp, WORKER_TCP_FD)];
     let sign_in = if throttle.blocked(ip, Instant::now()) {
         "blocked"
@@ -324,6 +346,8 @@ fn start_worker(tcp: OwnedFd, ip: IpAddr, settings: &Settings, throttle: &RateLi
     fds.push((theirs, WORKER_REPORT_FD));
     fds.push((settings.assets.try_clone()?, WORKER_ASSETS_FD));
     fds.push((settings.tls.try_clone()?, WORKER_TLS_FD));
+    let (signing_ours, signing_theirs) = sys::seqpacket_pair()?;
+    fds.push((signing_theirs, WORKER_SIGNING_FD));
     let mut command = Command::new(&settings.worker);
     command.arg("--sign-in").arg(sign_in);
     for origin in &settings.allowed_origins {
@@ -334,5 +358,7 @@ fn start_worker(tcp: OwnedFd, ip: IpAddr, settings: &Settings, throttle: &RateLi
     spawn_with_fds(&mut command, fds, Some(libc::SIGTERM))?;
     let report = UnixStream::from(ours);
     report.set_nonblocking(true)?;
-    Ok(report)
+    let signing = UnixStream::from(signing_ours);
+    signing.set_nonblocking(true)?;
+    Ok((report, signing::Channel::new(signing)))
 }
