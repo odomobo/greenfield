@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–6 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–6, 10 and 13 are implemented; the rest is not.
 
 ## Why
 
@@ -373,6 +373,29 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 
 - A fixed-size table in the helper's main loop, fed by fixed-size `{ip, ok}` reports from its own children. Per-account
   lockout stays with `pam_faillock`; document it and fail2ban in the README.
+- As built:
+  - **The table** is `common/src/backoff.rs` (`Table`, `Policy`, `Report`, `drain`), used by both helpers: 4096 slots
+    (a full table replaces an unblocked entry with the oldest failure, else the block that ends first). Policy: 10 free
+    failures per address, then a block of 30 s doubling with each further failure up to 15 min; an address is
+    forgotten 15 min after its last failure or block end. Successes change nothing (shared addresses; an attacker's own
+    account mustn't reset the count). IPv6 counts per /64, IPv4-mapped as IPv4. The dev helper divides the times by
+    `--dev-time-scale`.
+  - **Reports**: 18 bytes (u8 family 4/6, u8 ok, 16 address bytes) on the existing per-attempt pipe (the dev helper
+    got one too), written when the attempt is decided and before the `Result` goes to the web process, so the page's
+    next attempt is forked after the main loop has read it (it drains every pipe right before each fork, and a reaped
+    child's pipe before dropping it).
+  - **The decision is the child's**, with the copy of the table it was forked with (no query back to the parent; the
+    pipes stay one-way). Attempts forked before a block started still run (bounded by the connections open then).
+    A blocked attempt gets the normal failure: the `Password: ` prompt, the 3 s minimum and the wrong-password
+    message; PAM never sees it and it isn't reported (it doesn't extend the block). In `nebula-login` this is two
+    `Host` methods (`throttled`, `report`) called from `attempt.rs`.
+  - **Log lines** for fail2ban: `Failed sign-in from <ip>: ...`, `Refused a sign-in [as root] from <ip>...`,
+    `Blocking sign-ins from <ip> for <n> s after <k> failed attempts.` The README documents pam_faillock and a
+    fail2ban filter and jail.
+  - **The web listener's `RateLimiter` stays** (20 free failures, "Too many failed attempts", without contacting the
+    helper) as a cheap first line; it duplicates the helper's table. Step 7 ports the listener as it is; whether the
+    front's limiter goes (the helper's table is the one that matters) is a later cleanup. `auth.sh` checks both: the
+    right password fails after 10 failures (the helper), "Too many failed attempts" after 20 (the listener).
 
 ### 11. Account policy
 

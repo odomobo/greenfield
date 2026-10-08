@@ -54,6 +54,8 @@ too. Tests: `yarn test` (`cargo test`).
    closes the PAM session (`pam_close_session`, `pam_setcred(PAM_DELETE_CRED)`, `pam_end`). Log out closes the
    desktop's listening socket, so the next sign-in creates a new desktop.
 
+Per-IP failure backoff (`common/src/backoff.rs`, both helpers): see "Per-IP backoff" below.
+
 Production limits (`login/src/main.rs`): `login.sock` is `root:<web group>` 0660 and only the web user's uid is
 accepted (`SO_PEERCRED`); at most 256 connections at a time, the web listener's cap, since it opens one per TCP
 connection (more are closed at once; a connection that ends or idles before `Begin` ends quietly); `ClientAddress` and `Begin` within 10 s, each answer within 75 s (the web process gives the page 60 s), a
@@ -97,3 +99,83 @@ systemd stays optional: without it `nebula-login` binds `--bind-ip` / `--bind-po
   access, rlimits) is applied by the workers themselves, and is where `NoNewPrivileges` and an empty capability set
   for the front belong. Dropping the helper's inheritable/ambient caps for the front when it starts it can go with
   that step.
+
+## Per-IP backoff
+
+Both helpers keep a fixed-size table (4096 addresses) of failed sign-ins per client address in their main loop
+(`common/src/backoff.rs`). Each sign-in child sends one fixed-size report, `{address, signed in or not}` (18 bytes),
+on its per-attempt pipe as soon as its attempt is decided, before the web process hears the result; the main loop reads
+the reports before it forks the next child, and the child decides with its copy of the table (no query back).
+
+- 10 failures from an address are free; each further one blocks the address for 30 s, doubling with every failure, up
+  to 15 min. An address with no failure for 15 min after its block ends is forgotten. A successful sign-in changes
+  nothing (users may share an address, and an attacker's own account mustn't reset the count).
+- IPv4 counts per address, IPv6 per /64 (IPv4-mapped addresses as IPv4).
+- A blocked attempt looks like any failure: the `Password: ` prompt, then "The username or password is incorrect."
+  after the 3 s minimum. PAM never sees it, and it doesn't extend the block.
+- Attempts forked before a block started (at most the connections open then) still run.
+- The dev helper divides the times by `--dev-time-scale` (`scripts/e2e/auth.sh` checks the block).
+
+The web listener (`packages/gateway/src/web.ts`) still has its own per-IP limiter (20 free failures, then "Too many
+failed attempts" without contacting the helper). It is a cheap first line and duplicates this table; whether it stays
+is left to the Rust front (step 7 of SIGNIN-ROADMAP.md).
+
+## Per-account lockout: pam_faillock
+
+The helpers throttle per address only. Locking an account after failed attempts is PAM's job, with `pam_faillock`,
+which sees the client's address as `PAM_RHOST` (lockouts are logged with it). In `/etc/pam.d/nebula`, around the
+authentication (Debian/Ubuntu; other distributions include their own stacks, e.g. `system-auth`):
+
+```
+auth     required   pam_faillock.so preauth
+@include common-auth
+auth     [default=die] pam_faillock.so authfail
+account  required   pam_faillock.so
+@include common-account
+```
+
+Settings (attempts, unlock time, whether root is covered) are in `/etc/security/faillock.conf`, e.g. `deny = 5`,
+`unlock_time = 600`. `faillock --user <name>` shows an account's failures and `faillock --user <name> --reset`
+unlocks it. A locked account fails like a wrong password, so an attacker can't tell. Note that a lockout is also a way
+for anyone to keep a known user name locked out; the per-IP backoff above limits how fast one address can do that.
+
+## fail2ban
+
+To block addresses at the firewall, fail2ban can watch the helper's log (stderr: the journal under systemd, otherwise
+wherever the service's output goes). The lines, with the client's address:
+
+```
+<ISO time> [nebula-login] info: Failed sign-in from <ip>: <PAM's reason>.
+<ISO time> [nebula-login] info: Failed sign-in from <ip>: unusable user name.
+<ISO time> [nebula-login] warn: Refused a sign-in as root from <ip>.
+<ISO time> [nebula-login] info: Refused a sign-in from <ip>: too many failed attempts from this address.
+<ISO time> [nebula-login] warn: Blocking sign-ins from <ip> for <n> s after <k> failed attempts.
+```
+
+(`Blocking ...` names the counted address: for IPv6 its /64 prefix, `<prefix>::`.) A filter,
+`/etc/fail2ban/filter.d/nebula.conf`:
+
+```
+[Definition]
+failregex = ^\S+ \[nebula-login\] \w+: Failed sign-in from <HOST>:
+            ^\S+ \[nebula-login\] \w+: Refused a sign-in (?:as root )?from <HOST>
+ignoreregex =
+```
+
+and a jail in `/etc/fail2ban/jail.d/nebula.conf` (the port the helper binds; `backend = systemd` with
+`journalmatch = _SYSTEMD_UNIT=nebula.service` under systemd, or `logpath` naming the log file otherwise):
+
+```
+[nebula]
+enabled  = true
+port     = 443
+filter   = nebula
+backend  = systemd
+journalmatch = _SYSTEMD_UNIT=nebula.service
+maxretry = 10
+findtime = 10m
+bantime  = 1h
+```
+
+PAM modules log failures with `rhost=<ip>` too (e.g. `pam_unix(nebula:auth): authentication failure; ... rhost=...`),
+so fail2ban's stock filters that match those lines work as well.

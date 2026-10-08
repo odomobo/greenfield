@@ -59,6 +59,10 @@ pub trait Host {
     fn user_dir(&self, uid: libc::uid_t) -> io::Result<PathBuf>;
     /// Start the user's desktop (as the user, with the session's environment) inheriting `listener`. Its pid.
     fn start_desktop(&self, user: &User, environment: Vec<String>, listener: OwnedFd) -> io::Result<libc::pid_t>;
+    /// Whether the per-IP backoff refuses sign-ins from `client` (nebula_login_common::backoff).
+    fn throttled(&self, client: IpAddr) -> bool;
+    /// Tell the backoff how an attempt from `client` ended, before the web process hears of it.
+    fn report(&self, client: IpAddr, signed_in: bool);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -114,19 +118,25 @@ pub fn sign_in<H: Host>(host: &H, limits: &Limits, connection: UnixStream) -> io
     };
     let mut relay = Relay::new(channel, limits.answer_timeout);
 
-    // an unusable name (an empty one: the web process sends that for a name over the limit) and root are asked for a
-    // password like anyone else and refused the same way, without PAM ever seeing them
+    // an unusable name (an empty one: the web process sends that for a name over the limit), root and an address the
+    // backoff blocks are asked for a password like anyone else and refused the same way, without PAM ever seeing them
+    let throttled = host.throttled(client);
     let usable = valid_username(&username);
     let root = usable && host.user(&username).is_some_and(|user| user.uid == 0);
-    if !usable || root {
+    if throttled || !usable || root {
         let answers = relay.converse(&[(PAM_PROMPT_ECHO_OFF, PASSWORD_PROMPT.into())]);
         if let Ok(answers) = answers {
             answers.into_iter().flatten().for_each(crate::relay::wipe);
         }
-        if root {
+        if throttled {
+            // not reported: attempts made while a block lasts don't extend it
+            log::info(&format!("Refused a sign-in from {client}: too many failed attempts from this address."));
+        } else if root {
             log::warn(&format!("Refused a sign-in as root from {client}."));
+            host.report(client, false);
         } else {
             log::info(&format!("Failed sign-in from {client}: unusable user name."));
+            host.report(client, false);
         }
         return finish(&mut relay, limits, Outcome::Refused, WRONG).map(|_| None);
     }
@@ -144,6 +154,7 @@ pub fn sign_in<H: Host>(host: &H, limits: &Limits, connection: UnixStream) -> io
             Refusal::Expired => (EXPIRED, "password expired".to_string()),
         };
         log::info(&format!("Failed sign-in from {client}: {reason}."));
+        host.report(client, false);
         return finish(pam.relay(), limits, Outcome::Refused, text).map(|_| None);
     }
 
@@ -151,10 +162,12 @@ pub fn sign_in<H: Host>(host: &H, limits: &Limits, connection: UnixStream) -> io
     let canonical = pam.user().unwrap_or_else(|| username.clone());
     let Some(user) = host.user(&canonical) else {
         log::error(&format!("Signed in as {canonical}, who is not in the passwd database."));
+        host.report(client, false);
         return finish(pam.relay(), limits, Outcome::Refused, WRONG).map(|_| None);
     };
     if user.uid == 0 {
         log::warn(&format!("Refused a sign-in as root ({canonical}) from {client}."));
+        host.report(client, false);
         return finish(pam.relay(), limits, Outcome::Refused, WRONG).map(|_| None);
     }
 
@@ -172,6 +185,7 @@ pub fn sign_in<H: Host>(host: &H, limits: &Limits, connection: UnixStream) -> io
             return finish(pam.relay(), limits, Outcome::Failed, NO_DESKTOP).map(|_| None);
         }
     };
+    host.report(client, true);
     let result = Record::Result { outcome: Outcome::SignedIn, text: user.name.clone() };
     let sent = pam.relay().channel().and_then(|channel| channel.write(&result, Some(web_end.as_raw_fd())));
     pam.relay().close();
@@ -228,6 +242,8 @@ mod tests {
         started: Vec<(String, IpAddr)>,
         opened: u32,
         closed: u32,
+        /// what the attempts reported to the backoff
+        reports: Vec<(IpAddr, bool)>,
     }
 
     /// PAM with one user, "alice" (aliased as "Alice"), whose password is "secret" and who also needs a one-time code
@@ -285,6 +301,7 @@ mod tests {
         /// the running desktop's listening socket (a stand-in for the desktop)
         desktop: RefCell<Option<UnixListener>>,
         expired: bool,
+        throttled: bool,
     }
 
     static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
@@ -294,7 +311,7 @@ mod tests {
             let n = NEXT_DIR.fetch_add(1, Ordering::SeqCst);
             let runtime = std::env::temp_dir().join(format!("nebula-login-attempt-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&runtime).unwrap();
-            FakeHost { runtime, log: Default::default(), desktop: RefCell::new(None), expired: false }
+            FakeHost { runtime, log: Default::default(), desktop: RefCell::new(None), expired: false, throttled: false }
         }
     }
 
@@ -329,6 +346,12 @@ mod tests {
             assert_eq!(environment, ["XDG_RUNTIME_DIR=/run/user/1000"]);
             *self.desktop.borrow_mut() = Some(UnixListener::from(listener));
             Ok(4242)
+        }
+        fn throttled(&self, _client: IpAddr) -> bool {
+            self.throttled
+        }
+        fn report(&self, client: IpAddr, signed_in: bool) {
+            self.log.borrow_mut().reports.push((client, signed_in));
         }
     }
 
@@ -431,6 +454,33 @@ mod tests {
             let reached_pam = !host.log.borrow().started.is_empty();
             assert_eq!(reached_pam, name == "bob", "{name}");
         }
+    }
+
+    #[test]
+    fn attempts_are_reported_and_a_throttled_address_fails_like_a_wrong_password() {
+        let client: IpAddr = "192.0.2.7".parse().unwrap();
+        let host = FakeHost::new();
+        let (connection, page) = web("alice", vec!["wrong", "123456"]);
+        assert!(sign_in(&host, &LIMITS, connection).unwrap().is_none());
+        page.join().unwrap();
+        let (connection, page) = web("alice", vec!["secret", "123456"]);
+        let started = sign_in(&host, &LIMITS, connection).unwrap();
+        page.join().unwrap();
+        assert_eq!(host.log.borrow().reports, [(client, false), (client, true)]);
+        drop(started);
+
+        // blocked: the right password fails the normal way, without PAM, and isn't reported
+        let mut host = FakeHost::new();
+        host.throttled = true;
+        let (connection, page) = web("alice", vec!["secret", "123456"]);
+        let begun = Instant::now();
+        assert!(sign_in(&host, &LIMITS, connection).unwrap().is_none());
+        let (seen, _) = page.join().unwrap();
+        assert!(begun.elapsed() >= LIMITS.min_failure);
+        assert_eq!(seen[0], Record::Prompt { style: PromptStyle::EchoOff, text: "Password: ".into() });
+        assert_eq!(result_of(&seen), (Outcome::Refused, WRONG.into()));
+        assert!(host.log.borrow().started.is_empty());
+        assert!(host.log.borrow().reports.is_empty());
     }
 
     #[test]

@@ -157,7 +157,7 @@ web user and refuses if it belongs to someone else), `--hide-hostname`, `--allow
 The PAM service is `nebula` (`/etc/pam.d/nebula`; without it PAM falls back to `other`). Whatever is configured there
 runs on one handle per sign-in: the page shows PAM's prompts (a second hidden prompt, e.g. a one-time code, gets a
 field of its own), `PAM_RHOST` is the browser's IP and `PAM_TTY` is `nebula`. Per-account lockout is PAM's job
-(`pam_faillock`). Root can't sign in.
+(`pam_faillock`, see `packages/login/README.md`, also for fail2ban). Root can't sign in.
 
 Site settings (the video encoder and the GPU render node) are in a root-owned file, `/etc/nebula/nebula.conf` (another
 path with `--site-config`); a missing file means the defaults. Format (see `src/site-settings.ts`):
@@ -194,8 +194,11 @@ state lives in the session process (src/shell), so it survives the browser going
 
 - The sign-in page shows only a username/password form and the host name. Unknown user and wrong password produce
   the same result, and every failure takes at least 3 s. No sessions, users or product/version names before signing in.
-- Failed sign-ins are throttled per IP (20 free), with doubling lockouts up to 15 min. There is no per-user throttling
-  here: per-account lockout is PAM's job (`pam_faillock`).
+- Failed sign-ins are throttled per IP by the login helper (10 free, then blocks of 30 s doubling up to 15 min; a
+  blocked attempt fails like a wrong password, see "Per-IP backoff" in `packages/login/README.md`), and by the web
+  listener (20 free, doubling lockouts up to 15 min, "Too many failed attempts"). There is no per-user throttling
+  here: per-account lockout is PAM's job (`pam_faillock`); fail2ban can watch the helper's log (both in the login
+  README).
 - Signing in works like unlocking a screen: the page's one WebSocket (`/ws`) is the sign-in. The page signs in on it
   (in-band: the server's prompts and the page's answers, see "Sign-in" in `libs/scene-protocol/src/index.ts`) and the
   same WebSocket then carries the desktop. No tokens, no cookies, no API: when the WebSocket closes (tab closed,
