@@ -33,10 +33,15 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
 type Pick = { window: SceneWindow; surface: string; sx: number; sy: number }
 
 /**
- * A Move or Size from the window menu (not asked for by the app): it follows the pointer without a button held, keys
- * nudge it, a click finishes it, Escape cancels it.
+ * A Move or Size from the window menu (not asked for by the app). The pointer is wherever the menu was (often the
+ * taskbar), so it starts armed: a hint by the pointer asks for a click (or Enter, or an arrow key) that starts it. Then it
+ * follows the pointer without a button held, keys nudge it, a click finishes it. Escape or a right click cancels it.
  */
 type MenuInteraction = {
+  /** waiting for the click that starts it: the window doesn't follow the pointer yet */
+  armed: boolean
+  /** the hint by the pointer while it's armed */
+  hint: HTMLElement
   /** what the arrow keys added to the pointer's distance from startPointer */
   nudge: Point
   /** Size: the edges were picked by an arrow key, not by the pointer's position */
@@ -378,6 +383,11 @@ export class Desktop {
     return this.interaction?.mode ?? null
   }
 
+  /** Whether the window menu's Move or Size is waiting for the click that starts it. For tests. */
+  debugMenuArmed(): boolean {
+    return this.interaction?.menu?.armed ?? false
+  }
+
   /** Whether a resize is still waiting for its client to commit the final size. For tests. */
   debugResizing(): boolean {
     return this.resizeOverrides.size > 0
@@ -479,7 +489,7 @@ export class Desktop {
     return window !== undefined && !window.maximized && !window.fullscreen && !this.isMinimized(window)
   }
 
-  /** The window menu's Move: the window follows the pointer, a click drops it, Escape puts it back. */
+  /** The window menu's Move: once a click starts it, the window follows the pointer, a click drops it, Escape puts it back. */
   startMenuMove(id: string): void {
     const window = this.windows.find((w) => w.id === id)
     if (window === undefined || !this.canMoveOrSize(id)) {
@@ -493,12 +503,16 @@ export class Desktop {
       window: id,
       startPointer: this.pointer,
       startPosition: this.windowPosition(window),
-      menu: this.menuInteraction(),
+      menu: this.menuInteraction('Click to start moving'),
     }
     this.container.style.cursor = 'move'
+    this.continueInteraction()
   }
 
-  /** The window menu's Size: the edge or corner nearest the pointer (or the first arrow key's) follows it. */
+  /**
+   * The window menu's Size: the edge or corner nearest the pointer where the click starts it (or the first arrow key's)
+   * follows the pointer.
+   */
   startMenuSize(id: string): void {
     const window = this.windows.find((w) => w.id === id)
     if (window === undefined || !this.canMoveOrSize(id)) {
@@ -509,18 +523,51 @@ export class Desktop {
     this.pointer = this.outputPoint(this.clientPointer)
     const startRect = this.shownGeometry(window)
     const edges = nearestEdges(outerRect(startRect, frameInsets(window)), this.pointer)
-    const previous = this.resizeOverrides.get(window.id)
-    clearTimeout(previous?.settleTimer)
-    this.resizeOverrides.set(window.id, { rect: startRect, edges })
     this.interaction = {
       mode: 'resize',
       window: id,
       edges,
       startPointer: this.pointer,
       startRect,
-      menu: { ...this.menuInteraction(), original: startRect },
+      menu: { ...this.menuInteraction('Click to start resizing'), original: startRect },
     }
     this.container.style.cursor = resizeCursor(edges)
+    this.continueInteraction()
+  }
+
+  /** The click (or key) that starts an armed menu interaction: from here on the window follows the pointer. */
+  private beginMenuInteraction(interaction: Interaction & { menu: MenuInteraction }) {
+    interaction.menu.armed = false
+    interaction.menu.hint.remove()
+    interaction.startPointer = this.pointer
+    const window = this.windows.find((w) => w.id === interaction.window)
+    if (interaction.mode === 'move') {
+      if (window) {
+        interaction.startPosition = this.windowPosition(window)
+      }
+    } else if (window) {
+      // the edges nearest where it was started
+      interaction.startRect = this.shownGeometry(window)
+      interaction.menu.original = interaction.startRect
+      interaction.edges = nearestEdges(outerRect(interaction.startRect, frameInsets(window)), this.pointer)
+      const previous = this.resizeOverrides.get(window.id)
+      clearTimeout(previous?.settleTimer)
+      this.resizeOverrides.set(window.id, { rect: interaction.startRect, edges: interaction.edges })
+      this.container.style.cursor = resizeCursor(interaction.edges)
+    }
+  }
+
+  /** An armed menu interaction: the hint follows the pointer, and Size's cursor shows the edges a click would pick. */
+  private armedPointerMoved(interaction: Interaction & { menu: MenuInteraction }) {
+    const hint = interaction.menu.hint
+    const x = Math.min(this.clientPointer.x + 16, document.documentElement.clientWidth - hint.offsetWidth - 4)
+    const y = Math.min(this.clientPointer.y + 20, document.documentElement.clientHeight - hint.offsetHeight - 4)
+    hint.style.transform = `translate(${Math.max(4, x)}px, ${Math.max(4, y)}px)`
+    const window = this.windows.find((w) => w.id === interaction.window)
+    if (interaction.mode === 'resize' && window) {
+      interaction.edges = nearestEdges(outerRect(this.shownGeometry(window), frameInsets(window)), this.pointer)
+      this.container.style.cursor = resizeCursor(interaction.edges)
+    }
   }
 
   private outputPoint(client: Point): Point {
@@ -528,8 +575,14 @@ export class Desktop {
     return { x: client.x - rect.left, y: client.y - rect.top }
   }
 
-  /** The state of a new menu interaction, with its document listeners: the pointer anywhere, a click anywhere. */
-  private menuInteraction(): MenuInteraction {
+  /**
+   * The state of a new (armed) menu interaction, with its hint and its document listeners: the pointer anywhere, a
+   * click anywhere.
+   */
+  private menuInteraction(hintText: string): MenuInteraction {
+    const hint = document.createElement('div')
+    hint.className = 'flyout menu-interaction-hint'
+    hint.textContent = hintText
     const move = (event: PointerEvent) => {
       this.clientPointer = { x: event.clientX, y: event.clientY }
       this.pointer = this.outputPoint(this.clientPointer)
@@ -538,23 +591,43 @@ export class Desktop {
       }
     }
     const down = (event: PointerEvent) => {
-      // the click that drops the window isn't the app's, nor the shell's
+      // the clicks that start, drop or cancel it aren't the app's, nor the shell's
       event.stopPropagation()
       event.preventDefault()
       this.swallowRelease = true
-      this.finishMenuInteraction(false)
+      const interaction = this.interaction
+      if (interaction?.menu === undefined) {
+        return
+      }
+      this.clientPointer = { x: event.clientX, y: event.clientY }
+      this.pointer = this.outputPoint(this.clientPointer)
+      if (event.button === 2) {
+        swallowContextMenu()
+        this.finishMenuInteraction(true)
+      } else if (interaction.menu.armed) {
+        if (event.button === 0) {
+          this.beginMenuInteraction(interaction as Interaction & { menu: MenuInteraction })
+        }
+      } else {
+        this.finishMenuInteraction(false)
+      }
     }
     document.addEventListener('pointermove', move)
     document.addEventListener('pointerdown', down, { capture: true })
-    return {
+    document.body.append(hint)
+    const menu: MenuInteraction = {
+      armed: true,
+      hint,
       nudge: { x: 0, y: 0 },
       keyChosen: false,
       cancelled: false,
       stop: () => {
+        hint.remove()
         document.removeEventListener('pointermove', move)
         document.removeEventListener('pointerdown', down, { capture: true })
       },
     }
+    return menu
   }
 
   /** Ends the running menu interaction, if any: keeps where the window is, or (cancel) puts it back. */
@@ -564,6 +637,12 @@ export class Desktop {
       return
     }
     interaction.menu.stop()
+    if (interaction.menu.armed) {
+      // never started: nothing to put back
+      this.interaction = undefined
+      this.applyCursor()
+      return
+    }
     interaction.menu.cancelled = cancel
     if (cancel && interaction.mode === 'move') {
       this.sync.setPosition(interaction.window, interaction.startPosition)
@@ -571,7 +650,7 @@ export class Desktop {
     this.endInteraction()
   }
 
-  /** A key while a menu interaction runs: arrows nudge, Enter finishes, Escape cancels. */
+  /** A key while a menu interaction runs: Enter starts and finishes it, arrows start it and nudge, Escape cancels. */
   private menuKey(event: KeyboardEvent, interaction: Interaction & { menu: MenuInteraction }) {
     event.preventDefault()
     if (event.type !== 'keydown') {
@@ -580,11 +659,18 @@ export class Desktop {
     if (event.key === 'Escape') {
       this.finishMenuInteraction(true)
     } else if (event.key === 'Enter' || event.key === ' ') {
-      this.finishMenuInteraction(false)
+      if (interaction.menu.armed) {
+        this.beginMenuInteraction(interaction)
+      } else {
+        this.finishMenuInteraction(false)
+      }
     } else {
       const arrow = arrowOf(event.key)
       if (arrow === undefined) {
         return
+      }
+      if (interaction.menu.armed) {
+        this.beginMenuInteraction(interaction)
       }
       const step = event.shiftKey ? 1 : NUDGE_STEP
       if (interaction.mode === 'resize') {
@@ -2234,6 +2320,10 @@ export class Desktop {
 
   private continueInteraction() {
     const interaction = this.interaction!
+    if (interaction.menu?.armed) {
+      this.armedPointerMoved(interaction as Interaction & { menu: MenuInteraction })
+      return
+    }
     const dx = this.pointer.x - interaction.startPointer.x + (interaction.menu?.nudge.x ?? 0)
     const dy = this.pointer.y - interaction.startPointer.y + (interaction.menu?.nudge.y ?? 0)
     if (interaction.mode === 'move') {
@@ -2325,6 +2415,25 @@ export class Desktop {
     const message: ViewerMessage = { type: 'feedback', refreshInterval: Math.round(this.refreshInterval) }
     this.connection.send(message)
   }
+}
+
+/**
+ * A right click that cancels a menu interaction must not open a context menu as well: swallow the contextmenu event it
+ * fires (on mouse down or up, depending on the platform), or let the listener go at the next press if none came.
+ */
+function swallowContextMenu() {
+  const swallow = (event: Event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    stop()
+  }
+  const stop = () => {
+    document.removeEventListener('contextmenu', swallow, { capture: true })
+    document.removeEventListener('pointerdown', stop, { capture: true })
+  }
+  document.addEventListener('contextmenu', swallow, { capture: true })
+  // (added during the press's own pointerdown: only a later press removes it)
+  setTimeout(() => document.addEventListener('pointerdown', stop, { capture: true }))
 }
 
 /** Whether the app lets its window change size (it says so by a minimum size that is its maximum, too). */

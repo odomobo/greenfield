@@ -92,6 +92,7 @@ is not animated (for now). `prefers-reduced-motion` turns the animations off.
 |---|---|---|
 | Apps menu, notification panel | drops 8 px into place and fades in, 150 ms | fades and lifts out, 100 ms |
 | Context menus (window menu, taskbar menus, session menu) | drops in from where it opens and fades in, 120 ms | fades out, 100 ms |
+| The window menu's Move/Resize hint ("Click to start moving", by the pointer) | fades in, 120 ms | gone at once (the click starts it) |
 | Toasts | slide in from the right, 160 ms | slide out to the right, 140 ms |
 | A dismissed notification in the panel | | slides out to the right, 140 ms |
 | Taskbar buttons | grow in from no width, 160 ms (neighbours slide over) | shrink away to no width, 160 ms |

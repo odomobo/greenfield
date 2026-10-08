@@ -213,6 +213,25 @@
   user-select: none;
 }
 
+/* the hint by the pointer while the window menu's Move or Size waits for the click that starts it (desktop.ts) */
+.menu-interaction-hint {
+  top: 0;
+  left: 0;
+  z-index: 30;
+  padding: 6px 10px;
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-small);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: hint-in 120ms var(--ease-out);
+}
+
+@keyframes hint-in {
+  from {
+    opacity: 0;
+  }
+}
+
 .icon-button {
   display: inline-flex;
   align-items: center;

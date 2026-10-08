@@ -12,7 +12,7 @@
 #      the same window comes back with the earlier output, with foot still running, still pinned, and
 #      the notification still in the history;
 #   2. window management in the viewer: the taskbar's preview cards (title and close only, right-click opens the window
-#      menu), the window menu's Move (pointer, click, Escape, arrow keys) and Size, fullscreen (foot, bound to F11)
+#      menu), the window menu's Move (a click to start, pointer, click, Escape, right click, arrow keys) and Size, fullscreen (foot, bound to F11)
 #      covering the page above the taskbar and back, the cheap globals advertised; a resize follows the pointer immediately (without waiting for the server),
 #      resizing from the left/top edge keeps the right/bottom edge in place, and shrinking the viewport moves a window
 #      back into view;
@@ -615,15 +615,26 @@ wait_geometry() {
   wait_for "() => { const w = window.__viewerTest.windows()[0]; const g = w.shownGeometry; return [g.x, g.y, g.width, g.height].join(' ') === '$1' && !window.__viewerTest.interaction() && w.x === w.shownX && w.y === w.shownY }" "$2" 10
 }
 
-step "window menu, Move: follows the pointer, a click drops it"
+step "window menu, Move: waits for a click to start, then follows the pointer (also up and left), a click drops it"
 read -r OX OY OW OH < <(shown_geometry; echo)
 MOVES1="$(moves_sent)"
 click_element '.context-menu button[data-action=move]'
-wait_for "() => window.__viewerTest.interaction() === 'move'" "Move to start" 5
-# it follows the pointer from where the menu item was clicked
-MX="$CX"; MY="$CY"
+wait_for "() => window.__viewerTest.interaction() === 'move' && window.__viewerTest.menuArmed()" "Move to wait for its click" 5
+wait_for "() => document.querySelector('.menu-interaction-hint')?.textContent === 'Click to start moving'" "the hint" 5
+# armed: the window stays put while the pointer goes where the move should start
+MX="$CX"; MY=$((CY + 250))
+pw mousemove "$MX" "$MY" >/dev/null
+wait_for "() => { const r = document.querySelector('.menu-interaction-hint').getBoundingClientRect(); return Math.abs(r.left - $MX) < 40 && Math.abs(r.top - $MY) < 40 }" "the hint to follow the pointer" 5
+[ "$(pw_eval "() => window.__viewerTest.windows()[0].shownGeometry.x")" = "$OX" ] || fail "the window moved before the click that starts Move"
+pw mousedown >/dev/null
+pw mouseup >/dev/null
+wait_for "() => !window.__viewerTest.menuArmed() && !document.querySelector('.menu-interaction-hint')" "the click to start Move" 5
+[ "$(moves_sent)" = "$MOVES1" ] || fail "the click that starts Move sent a window.move"
 pw mousemove $((MX + 100)) $((MY + 150)) >/dev/null
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((OX + 100)) && g.y === $((OY + 150)) }" "the window to follow the pointer" 5
+# back up and left of where it was started
+pw mousemove $((MX - 30)) $((MY - 40)) >/dev/null
+wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((OX - 30)) && g.y === $((OY - 40)) }" "the window to follow the pointer up and left" 5
 pw mousemove $((MX + 120)) $((MY + 160)) >/dev/null
 [ "$(moves_sent)" = "$MOVES1" ] || fail "Move sent a window.move before the drop"
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((OX + 120)) && g.y === $((OY + 160)) }" "the window to follow the pointer" 5
@@ -635,18 +646,44 @@ pw mousemove $((MX + 200)) $((MY + 200)) >/dev/null
 [ "$(pw_eval "() => window.__viewerTest.windows()[0].shownGeometry.x")" = $((OX + 120)) ] || fail "the window kept following the pointer after the click"
 echo "    moved from $OX,$OY to $((OX + 120)),$((OY + 160)) and dropped"
 
-step "window menu, Move: Escape puts the window back, arrow keys nudge it"
+step "window menu, Move: Escape and right click cancel it (armed or started), arrow keys start it and nudge"
 NX=$((OX + 120)); NY=$((OY + 160))
-taskbar_menu move
-wait_for "() => window.__viewerTest.interaction() === 'move'" "Move to start" 5
-pw mousemove $((CX + 40)) $((CY + 40)) >/dev/null
-wait_for "() => window.__viewerTest.windows()[0].shownGeometry.x === $((NX + 40))" "the window to follow the pointer" 5
 MOVES2="$(moves_sent)"
+# armed: Escape, then a right click (which opens no menu)
+taskbar_menu move
+wait_for "() => window.__viewerTest.menuArmed()" "Move to wait for its click" 5
+pw press Escape >/dev/null
+wait_for "() => !window.__viewerTest.interaction() && !document.querySelector('.menu-interaction-hint')" "Escape to cancel the armed Move" 5
+taskbar_menu move
+wait_for "() => window.__viewerTest.menuArmed()" "Move to wait for its click" 5
+pw mousemove "$CX" $((CY + 250)) >/dev/null
+pw mousedown right >/dev/null
+pw mouseup right >/dev/null
+wait_for "() => !window.__viewerTest.interaction() && !document.querySelector('.menu-interaction-hint')" "a right click to cancel the armed Move" 5
+# started: Escape, then a right click put the window back
+taskbar_menu move
+wait_for "() => window.__viewerTest.menuArmed()" "Move to wait for its click" 5
+pw mousemove "$CX" $((CY + 250)) >/dev/null
+pw mousedown >/dev/null
+pw mouseup >/dev/null
+pw mousemove $((CX + 40)) $((CY + 290)) >/dev/null
+wait_for "() => window.__viewerTest.windows()[0].shownGeometry.x === $((NX + 40))" "the window to follow the pointer" 5
 pw press Escape >/dev/null
 wait_geometry "$NX $NY $OW $OH" "Escape to put the window back"
-[ "$(moves_sent)" = "$MOVES2" ] || fail "Escape in Move sent a window.move"
 taskbar_menu move
-wait_for "() => window.__viewerTest.interaction() === 'move'" "Move to start" 5
+wait_for "() => window.__viewerTest.menuArmed()" "Move to wait for its click" 5
+pw mousemove "$CX" $((CY + 250)) >/dev/null
+pw mousedown >/dev/null
+pw mouseup >/dev/null
+pw mousemove $((CX + 40)) $((CY + 290)) >/dev/null
+wait_for "() => window.__viewerTest.windows()[0].shownGeometry.x === $((NX + 40))" "the window to follow the pointer" 5
+pw mousedown right >/dev/null
+pw mouseup right >/dev/null
+wait_geometry "$NX $NY $OW $OH" "a right click to put the window back"
+[ "$(pw_eval "() => !!document.querySelector('.context-menu')")" = false ] || fail "the right click that cancelled Move opened a menu"
+[ "$(moves_sent)" = "$MOVES2" ] || fail "cancelling Move sent a window.move"
+taskbar_menu move
+wait_for "() => window.__viewerTest.menuArmed()" "Move to wait for its click" 5
 pw press ArrowRight >/dev/null
 pw press ArrowRight >/dev/null
 pw press ArrowDown >/dev/null
@@ -655,7 +692,7 @@ pw press Enter >/dev/null
 wait_geometry "$((NX + 20)) $((NY + 10)) $OW $OH" "Enter to finish the move"
 echo "    ok"
 
-step "window menu, Size: arrow keys pick and move edges, Escape cancels"
+step "window menu, Size: arrow keys or a click pick and move edges, Escape cancels"
 read -r SX SY SW SH < <(shown_geometry; echo)
 resizes_sent() { echo "$(pw_eval "() => window.__viewerTest.resizesSent()")"; }
 SENT0="$(resizes_sent)"
@@ -679,6 +716,21 @@ wait_for "() => window.__viewerTest.interaction() === 'resize'" "Size to start" 
 pw press ArrowLeft >/dev/null
 pw press ArrowLeft >/dev/null
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((X2 - 20)) && g.width === $((W2 + 20)) }" "the left edge to move" 5
+pw press Escape >/dev/null
+wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return !window.__viewerTest.interaction() && !window.__viewerTest.resizing() && [g.x, g.y, g.width, g.height].join(' ') === '$X2 $Y2 $W2 $H2' }" "Escape to cancel the size" 10
+[ "$(resizes_sent)" = "$((SENT0 + 1))" ] || fail "Escape in Size sent a window.resize"
+# a click starts it, sizing the edges nearest the click (here the top left corner)
+taskbar_menu size
+wait_for "() => window.__viewerTest.interaction() === 'resize' && window.__viewerTest.menuArmed()" "Size to wait for its click" 5
+wait_for "() => document.querySelector('.menu-interaction-hint')?.textContent === 'Click to start resizing'" "the hint" 5
+PX=$((X2 + 20)); PY=$((CANVAS_Y + Y2 + 20))
+pw mousemove "$PX" "$PY" >/dev/null
+wait_for "() => document.getElementById('output').style.cursor === 'nw-resize'" "the corner's cursor" 5
+pw mousedown >/dev/null
+pw mouseup >/dev/null
+wait_for "() => !window.__viewerTest.menuArmed()" "the click to start Size" 5
+pw mousemove $((PX - 30)) $((PY - 20)) >/dev/null
+wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return g.x === $((X2 - 30)) && g.y === $((Y2 - 20)) && g.width === $((W2 + 30)) && g.height === $((H2 + 20)) }" "the corner to follow the pointer" 5
 pw press Escape >/dev/null
 wait_for "() => { const g = window.__viewerTest.windows()[0].shownGeometry; return !window.__viewerTest.interaction() && !window.__viewerTest.resizing() && [g.x, g.y, g.width, g.height].join(' ') === '$X2 $Y2 $W2 $H2' }" "Escape to cancel the size" 10
 [ "$(resizes_sent)" = "$((SENT0 + 1))" ] || fail "Escape in Size sent a window.resize"

@@ -22,7 +22,7 @@ export function windowMenuItems(window: ShellWindow, desktop: Desktop): MenuItem
       testId: 'move',
     },
     {
-      label: 'Size',
+      label: 'Resize',
       action: () => desktop.startMenuSize(window.id),
       disabled: !desktop.canMoveOrSize(window.id),
       testId: 'size',
