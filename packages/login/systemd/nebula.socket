@@ -1,0 +1,18 @@
+# The nebula listening socket. systemd binds it (the port is configured here, in one place) and
+# passes it to nebula-login (nebula.service) when the first client connects; nebula-login passes it on to the web
+# process. Change the port or address here (an override: systemctl edit nebula.socket; to replace the default, first
+# clear it with an empty "ListenStream=" line). nebula-login's own --bind-ip / --bind-port are ignored under systemd.
+[Unit]
+Description=nebula remote desktop (listening socket)
+Documentation=file:///opt/greenfield/packages/login/README.md
+
+[Socket]
+ListenStream=443
+# one service instance handles every connection (the web listener forks a worker for each)
+Accept=no
+# a stopping service leaves the socket up: connections wait (backlog) until it is started again
+Backlog=256
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

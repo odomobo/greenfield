@@ -11,6 +11,7 @@ users in with PAM (service \"nebula\", /etc/pam.d/nebula), starting each user's 
 
   --bind-ip <ip>             address to listen on (default 0.0.0.0)
   --bind-port <port>         port to listen on (default 8443)
+                             (both ignored when systemd passes the socket: LISTEN_FDS, see packages/login/systemd/)
   --web-user <name>          unprivileged user the web process runs as (default nebula-web)
   --runtime-dir <dir>        login.sock and the desktops' users/<uid>/ directories (default /run/nebula)
   --gateway-dir <dir>        the built gateway: web.js, session-process.js (default: packages/gateway/dist next to

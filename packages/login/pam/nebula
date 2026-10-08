@@ -2,6 +2,7 @@
 # Debian/Ubuntu layout; on other distributions mirror what /etc/pam.d/login (or sshd) uses. One PAM handle covers a
 # whole sign-in: modules that need the password at session start (pam_mount, keyrings, systemd-homed) get it.
 # PAM_RHOST is the browser's IP address (for pam_access, faillock and fail2ban); PAM_TTY is "nebula".
+# Per-account lockout with pam_faillock: see "Per-account lockout" in packages/login/README.md.
 @include common-auth
 @include common-account
 @include common-session

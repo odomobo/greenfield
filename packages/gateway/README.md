@@ -131,6 +131,24 @@ Run:
 sudo env -u DISPLAY /opt/greenfield/packages/login/target/release/nebula-login --bind-port 443 --node /usr/local/bin/node
 ```
 
+### As a systemd service
+
+`packages/login/systemd/` has `nebula.socket` (`ListenStream=443`) and `nebula.service` (`nebula-login`). systemd binds
+the port and passes the socket to `nebula-login` (the `LISTEN_FDS` / `LISTEN_PID` protocol, implemented by hand); it
+hands it on to the web process as it does a socket it binds itself. `--bind-ip` / `--bind-port` are ignored then.
+Without systemd nothing changes: the helper binds the port.
+
+```bash
+sudo cp /opt/greenfield/packages/login/systemd/nebula.{socket,service} /etc/systemd/system/
+sudoedit /etc/systemd/system/nebula.service   # ExecStart: --node and the options you use (cert, origin, ...)
+sudo systemctl daemon-reload
+sudo systemctl enable --now nebula.socket     # the service starts on the first connection
+```
+
+`systemctl stop nebula.service` ends the running desktops (SIGTERM to the helper, which has its apps given 5 s to
+quit); `systemctl restart nebula.service` does too. Only hardening that doesn't break user sessions is set (see
+[packages/login/README.md](../login/README.md#systemd)). This is part of the install script item in ROADMAP.md.
+
 Options (`--help` lists everything): `--bind-ip` / `--bind-port`, `--cert/--key` for a real certificate (readable by
 the web user; default: a self-signed one in `--state-dir`, default `/var/lib/nebula`, which the helper creates for the
 web user and refuses if it belongs to someone else), `--hide-hostname`, `--allowed-origin` (behind a reverse proxy),
@@ -141,11 +159,11 @@ web user and refuses if it belongs to someone else), `--hide-hostname`, `--allow
 The PAM service is `nebula` (`/etc/pam.d/nebula`; without it PAM falls back to `other`). Whatever is configured there
 runs on one handle per sign-in: the page shows PAM's prompts (a second hidden prompt, e.g. a one-time code, gets a
 field of its own), `PAM_RHOST` is the browser's IP and `PAM_TTY` is `nebula`. Per-account lockout is PAM's job
-(`pam_faillock`). An expired password is changed on the page (`pam_chauthtok`: PAM asks for the current and the new
-password), then the sign-in goes on. Root can't sign in, and by default neither can system accounts (uids below
-`UID_MIN` in `/etc/login.defs`, else 1000; `--min-uid` sets another limit) nor users whose login shell isn't listed in
-`/etc/shells`, e.g. `/usr/sbin/nologin` (`--allow-any-shell` turns that off). They fail like a wrong password; the
-helper's log says why.
+(`pam_faillock`, see `packages/login/README.md`, also for fail2ban). An expired password is changed on the page
+(`pam_chauthtok`: PAM asks for the current and the new password), then the sign-in goes on. Root can't sign in, and by
+default neither can system accounts (uids below `UID_MIN` in `/etc/login.defs`, else 1000; `--min-uid` sets another
+limit) nor users whose login shell isn't listed in `/etc/shells`, e.g. `/usr/sbin/nologin` (`--allow-any-shell` turns
+that off). They fail like a wrong password; the helper's log says why.
 
 Site settings (the video encoder and the GPU render node) are in a root-owned file, `/etc/nebula/nebula.conf` (another
 path with `--site-config`); a missing file means the defaults. Format (see `src/site-settings.ts`):
@@ -182,8 +200,11 @@ state lives in the session process (src/shell), so it survives the browser going
 
 - The sign-in page shows only a username/password form and the host name. Unknown user and wrong password produce
   the same result, and every failure takes at least 3 s. No sessions, users or product/version names before signing in.
-- Failed sign-ins are throttled per IP (20 free), with doubling lockouts up to 15 min. There is no per-user throttling
-  here: per-account lockout is PAM's job (`pam_faillock`).
+- Failed sign-ins are throttled per IP by the login helper (10 free, then blocks of 30 s doubling up to 15 min; a
+  blocked attempt fails like a wrong password, see "Per-IP backoff" in `packages/login/README.md`), and by the web
+  listener (20 free, doubling lockouts up to 15 min, "Too many failed attempts"). There is no per-user throttling
+  here: per-account lockout is PAM's job (`pam_faillock`); fail2ban can watch the helper's log (both in the login
+  README).
 - Signing in works like unlocking a screen: the page's one WebSocket (`/ws`) is the sign-in. The page signs in on it
   (in-band: the server's prompts and the page's answers, see "Sign-in" in `libs/scene-protocol/src/index.ts`) and the
   same WebSocket then carries the desktop. No tokens, no cookies, no API: when the WebSocket closes (tab closed,

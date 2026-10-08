@@ -246,6 +246,36 @@ pub fn alarm(seconds: u32) {
     }
 }
 
+/// Take over a listening TCP socket that systemd (socket activation) passed as `fd`. The descriptor is checked
+/// (a stream socket that is listening) and marked close-on-exec; it is owned by the returned listener from then on.
+pub fn adopt_tcp_listener(fd: RawFd) -> io::Result<std::net::TcpListener> {
+    fn option(fd: RawFd, name: libc::c_int) -> io::Result<libc::c_int> {
+        let mut value: libc::c_int = 0;
+        let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        check(unsafe {
+            libc::getsockopt(fd, libc::SOL_SOCKET, name, (&mut value as *mut libc::c_int).cast(), &mut length)
+        })?;
+        Ok(value)
+    }
+    let not_usable = |what: &str| io::Error::other(format!("descriptor {fd} is not {what}"));
+    if option(fd, libc::SO_TYPE)? != libc::SOCK_STREAM {
+        return Err(not_usable("a stream socket"));
+    }
+    if option(fd, libc::SO_ACCEPTCONN)? == 0 {
+        return Err(not_usable("a listening socket"));
+    }
+    let mut domain: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    check(unsafe { libc::getsockname(fd, (&mut domain as *mut libc::sockaddr_storage).cast(), &mut length) })?;
+    if domain.ss_family != libc::AF_INET as libc::sa_family_t && domain.ss_family != libc::AF_INET6 as libc::sa_family_t
+    {
+        return Err(not_usable("a TCP socket"));
+    }
+    check(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) })?;
+    // SAFETY: the descriptor was passed to us for this purpose and nothing else in the process owns it.
+    Ok(unsafe { std::net::TcpListener::from_raw_fd(fd) })
+}
+
 pub fn getpid() -> libc::pid_t {
     unsafe { libc::getpid() }
 }
@@ -393,6 +423,21 @@ fn lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adopts_only_listening_tcp_sockets() {
+        let original = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = original.local_addr().unwrap();
+        let fd = std::os::fd::IntoRawFd::into_raw_fd(duplicate_above(original.as_raw_fd(), 10).unwrap());
+        let adopted = adopt_tcp_listener(fd).unwrap(); // owns it now
+        assert_eq!(adopted.local_addr().unwrap(), address);
+        assert!(std::net::TcpStream::connect(address).is_ok());
+
+        let (a, _b) = socket_pair().unwrap();
+        assert!(adopt_tcp_listener(a.as_raw_fd()).is_err()); // a Unix socket, not listening
+        let plain = std::net::UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        assert!(adopt_tcp_listener(plain.as_raw_fd()).is_err());
+    }
 
     #[test]
     fn peer_uid_of_a_socket_pair() {

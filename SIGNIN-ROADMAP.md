@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–6 are implemented (and 11, see its "As built"); the rest is not.
+Decided 2026-10-07. Steps 1–6, 10, 11 and 13 are implemented; the rest is not.
 
 ## Why
 
@@ -373,6 +373,29 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 
 - A fixed-size table in the helper's main loop, fed by fixed-size `{ip, ok}` reports from its own children. Per-account
   lockout stays with `pam_faillock`; document it and fail2ban in the README.
+- As built:
+  - **The table** is `common/src/backoff.rs` (`Table`, `Policy`, `Report`, `drain`), used by both helpers: 4096 slots
+    (a full table replaces an unblocked entry with the oldest failure, else the block that ends first). Policy: 10 free
+    failures per address, then a block of 30 s doubling with each further failure up to 15 min; an address is
+    forgotten 15 min after its last failure or block end. Successes change nothing (shared addresses; an attacker's own
+    account mustn't reset the count). IPv6 counts per /64, IPv4-mapped as IPv4. The dev helper divides the times by
+    `--dev-time-scale`.
+  - **Reports**: 18 bytes (u8 family 4/6, u8 ok, 16 address bytes) on the existing per-attempt pipe (the dev helper
+    got one too), written when the attempt is decided and before the `Result` goes to the web process, so the page's
+    next attempt is forked after the main loop has read it (it drains every pipe right before each fork, and a reaped
+    child's pipe before dropping it).
+  - **The decision is the child's**, with the copy of the table it was forked with (no query back to the parent; the
+    pipes stay one-way). Attempts forked before a block started still run (bounded by the connections open then).
+    A blocked attempt gets the normal failure: the `Password: ` prompt, the 3 s minimum and the wrong-password
+    message; PAM never sees it and it isn't reported (it doesn't extend the block). In `nebula-login` this is two
+    `Host` methods (`throttled`, `report`) called from `attempt.rs`.
+  - **Log lines** for fail2ban: `Failed sign-in from <ip>: ...`, `Refused a sign-in [as root] from <ip>...`,
+    `Blocking sign-ins from <ip> for <n> s after <k> failed attempts.` The README documents pam_faillock and a
+    fail2ban filter and jail.
+  - **The web listener's `RateLimiter` stays** (20 free failures, "Too many failed attempts", without contacting the
+    helper) as a cheap first line; it duplicates the helper's table. Step 7 ports the listener as it is; whether the
+    front's limiter goes (the helper's table is the one that matters) is a later cleanup. `auth.sh` checks both: the
+    right password fails after 10 failures (the helper), "Too many failed attempts" after 20 (the listener).
 
 ### 11. Account policy
 
@@ -386,6 +409,10 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
     PAM (a refused account gets the fake `Password: ` prompt and never reaches PAM, so system accounts can't be
     password-guessed through nebula), and on the canonical PAM user after `pam_authenticate`/`pam_acct_mgmt`. The page
     gets the wrong-password message after the same minimum time; the log has the reason.
+  - **Backoff (step 10)**: policy refusals are reported as failures (before PAM like root and unusable names, so the
+    backoff doesn't tell refused accounts from unknown names, which PAM fails and which are reported; after PAM like
+    root). An expired password that wasn't changed is not reported: the password was right, and PAM's own retries
+    limit the new ones. A successful change goes on to the success report.
   - **Expired passwords**: `Pam::change_password` = `pam_chauthtok(PAM_CHANGE_EXPIRED_AUTHTOK)` on the attempt's handle,
     whose conversation is the same `Relay`; called after the policy check, then the sign-in goes on (attach or create).
     Not changed (wrong current password, PAM's retries used up): refused with "The password has expired and was not
@@ -411,6 +438,18 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 - systemd stays optional: without it, the helper binds the port as in step 5.
 - Stopping the service ends the running desktops (see "Why this shape"); nothing extra is built for it.
 - Ties in with the install script item in ROADMAP.md.
+- As built:
+  - **Units** in `packages/login/systemd/` (`nebula.socket`, `nebula.service`); install steps in
+    `packages/gateway/README.md` ("As a systemd service"), reasoning in `packages/login/README.md` ("systemd").
+  - **Socket activation**: `login/src/activation.rs` parses `LISTEN_PID` / `LISTEN_FDS` (unit-tested), `main.rs`
+    `listening_socket` adopts fd 3 (`sys::adopt_tcp_listener`: stream, listening, AF_INET/INET6, close-on-exec) instead
+    of binding; exactly one socket. Without the variables it binds as before.
+  - **Hardening**: the unit's settings reach every desktop and app, so only `RestrictAddressFamilies=AF_UNIX AF_INET
+    AF_INET6 AF_NETLINK` is set; `NoNewPrivileges`, the capability set and `ProtectSystem` are left out of the helper's
+    unit on purpose (they'd break PAM sessions and users' setuid programs, mounts, `/dev/dri`). The front gets those
+    in step 8's sandbox (in the workers) and from the helper's drop to an unprivileged user, not from systemd.
+  - **Stopping**: `KillMode=mixed`, `TimeoutStopSec=20` (the helper's own shutdown does the work; desktops sit in
+    session scopes outside the unit's cgroup, so a cgroup kill wouldn't reach them).
 
 ## Order and parallelism
 
@@ -458,7 +497,12 @@ Once everything is done, the user checks with sudo and real PAM:
 - reattaching to a running desktop, and takeover;
 - Log out closing the PAM session (`pam_close_session` runs, `pam_mount` unmounts);
 - `PAM_RHOST` showing the client IP in the auth log;
-- a killed PAM parent ending its desktop.
+- a killed PAM parent ending its desktop;
+- the systemd units (step 13): install them, `systemctl enable --now nebula.socket`, connect (the service starts and
+  logs "Using the socket passed by systemd"), sign in, then `systemctl stop nebula.service`: the desktop ends, the
+  session scope goes away (`loginctl list-sessions`), `/run/nebula` is removed, and a new connection restarts the
+  service; also `systemctl start nebula.service` without the socket unit's help and a sign-in with
+  `RestrictAddressFamilies` active (apps still reach the network, `getent hosts` works in a desktop terminal).
 
 ## Not planned
 

@@ -1,7 +1,7 @@
 //! nebula-login: the production login helper and the nebula service's entry point. Runs as root.
 //!
 //! What it does (see SIGNIN-ROADMAP.md, steps 4 and 5, and packages/login/README.md):
-//!   - binds the TCP port and starts the web process (`node web.js --listen-fd 3 --login-socket <runtime>/login.sock`)
+//!   - binds the TCP port (or, started by a systemd socket unit, uses the socket systemd passes: LISTEN_FDS) and starts the web process (`node web.js --listen-fd 3 --login-socket <runtime>/login.sock`)
 //!     as the unprivileged web user (`--web-user`, default nebula-web), with the listening socket as fd 3;
 //!   - accepts the web process's connections on `<runtime>/login.sock` (only from the web user: SO_PEERCRED; the
 //!     listener opens one for every TCP connection, most never become a sign-in), at most MAX_ATTEMPTS at a time, and
@@ -15,11 +15,15 @@
 //!     (pam_setcred, pam_open_session), starts the desktop as the user (groups, gid, uid dropped and verified, the
 //!     PAM environment, the listening socket inherited, PR_SET_PDEATHSIG) and stays as its PAM parent: it waits for
 //!     the desktop to exit, then closes the PAM session;
+//!   - a per-IP failure backoff (nebula_login_common::backoff): each child reports its attempt's outcome on its
+//!     per-attempt pipe, the main loop keeps the table, and a child forked while its client's address is blocked
+//!     fails the attempt the normal way without PAM;
 //!   - SIGTERM / SIGINT stop the web process and the desktops (they end their apps first).
 //!
 //! It contains no dev code: the dev helper is a separate binary (dev-login).
 #![deny(unsafe_code)]
 
+mod activation;
 mod args;
 mod attempt;
 mod pam;
@@ -28,13 +32,14 @@ mod relay;
 
 use args::{Parsed, USAGE};
 use attempt::{Host, Limits};
+use nebula_login_common::backoff::{self, Policy, Report, Table};
 use nebula_login_common::desktop;
 use nebula_login_common::session_config::{session_config, SESSION_CONFIG_FD, SESSION_LISTEN_FD};
 use nebula_login_common::spawn::{spawn_as, wait_passing_terminate};
 use nebula_login_common::{log, sys};
 use relay::Relay;
 use std::fs;
-use std::io::{self, PipeWriter, Write};
+use std::io::{self, PipeReader, PipeWriter, Write};
 use std::net::{IpAddr, TcpListener};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -233,6 +238,28 @@ fn prepare_state_dir(config: &Config) -> io::Result<()> {
     }
 }
 
+/// The TCP listening socket: the one systemd passed (socket activation; --bind-ip / --bind-port don't apply then), or
+/// one bound here.
+fn listening_socket(bind_ip: IpAddr, bind_port: u16) -> TcpListener {
+    match activation::from_environment() {
+        Ok(None) => TcpListener::bind((bind_ip, bind_port))
+            .unwrap_or_else(|e| fatal(format!("Listening on {bind_ip}:{bind_port} failed: {e}"))),
+        Ok(Some(1)) => {
+            let listener = sys::adopt_tcp_listener(activation::LISTEN_FDS_START)
+                .unwrap_or_else(|e| fatal(format!("The socket systemd passed is not usable: {e}")));
+            match listener.local_addr() {
+                Ok(address) => log::info(&format!("Using the socket passed by systemd, listening on {address}.")),
+                Err(_) => log::info("Using the socket passed by systemd."),
+            }
+            listener
+        }
+        Ok(Some(count)) => {
+            fatal(format!("systemd passed {count} sockets; nebula.socket must have exactly one ListenStream"))
+        }
+        Err(e) => fatal(format!("Bad socket activation environment: {e}")),
+    }
+}
+
 /// The web process, as the web user, with the listening socket.
 fn start_web(config: &Config, listener: TcpListener) -> io::Result<std::process::Child> {
     let mut command = Command::new(&config.node);
@@ -253,9 +280,12 @@ fn start_web(config: &Config, listener: TcpListener) -> io::Result<std::process:
     spawn_as(&mut command, vec![(OwnedFd::from(listener), WEB_LISTEN_FD)], Some(credentials), Some(libc::SIGTERM))
 }
 
-/// What a sign-in child needs from the system: PAM, the passwd database, the users' directories, starting desktops.
+/// What a sign-in child needs from the system: PAM, the passwd database, the users' directories, starting desktops,
+/// and the backoff (its copy of the table from when it was forked, and the pipe its report goes back on).
 struct System<'a> {
     config: &'a Config,
+    backoff: &'a Table,
+    attempt_over: &'a PipeWriter,
 }
 
 impl Host for System<'_> {
@@ -314,13 +344,24 @@ impl Host for System<'_> {
         }
         Ok(pid)
     }
+
+    fn throttled(&self, client: IpAddr) -> bool {
+        self.backoff.blocked(client, Instant::now())
+    }
+
+    fn report(&self, client: IpAddr, signed_in: bool) {
+        if let Err(e) = backoff::send(&mut &*self.attempt_over, Report { ip: client, ok: signed_in }) {
+            log::error(&format!("Reporting a sign-in to the main loop failed: {e}"));
+        }
+    }
 }
 
 /// A sign-in child, in the child: run the attempt, and if it started a desktop, be its PAM parent. The exit status.
-fn sign_in_child(config: &Config, connection: UnixStream, attempt_over: PipeWriter) -> i32 {
+fn sign_in_child(config: &Config, backoff: &Table, connection: UnixStream, attempt_over: PipeWriter) -> i32 {
     // a stuck attempt ends (SIGALRM's default action); a PAM parent has no time limit
     sys::alarm(ATTEMPT_TIMEOUT_SECONDS);
-    let result = attempt::sign_in(&System { config }, &LIMITS, &config.policy, connection);
+    let system = System { config, backoff, attempt_over: &attempt_over };
+    let result = attempt::sign_in(&system, &LIMITS, &config.policy, connection);
     sys::alarm(0);
     // the main loop counts this attempt as over (when the child exits, too)
     drop(attempt_over);
@@ -351,21 +392,18 @@ fn sign_in_child(config: &Config, connection: UnixStream, attempt_over: PipeWrit
     }
 }
 
-/// A forked sign-in child: its pid, and the read end of the pipe it closes when its attempt is over.
+/// A forked sign-in child: its pid, and the read end of the pipe it sends its backoff report on and closes when its
+/// attempt is over.
 struct Child {
     pid: libc::pid_t,
-    attempt: Option<OwnedFd>,
+    attempt: Option<PipeReader>,
 }
 
-/// Sign-ins whose attempt is still going on (the pipe isn't closed yet).
-fn attempts_in_progress(children: &mut [Child]) -> usize {
+/// Read the children's reports into the backoff table; the number of sign-ins whose attempt is still going on (the
+/// pipe isn't closed yet).
+fn attempts_in_progress(children: &mut [Child], table: &mut Table) -> usize {
     for child in children.iter_mut() {
-        if let Some(fd) = &child.attempt {
-            // nothing is ever written: readable means closed
-            if !matches!(sys::poll_readable(fd.as_raw_fd(), Duration::ZERO), Ok(false)) {
-                child.attempt = None;
-            }
-        }
+        backoff::drain(&mut child.attempt, table);
     }
     children.iter().filter(|child| child.attempt.is_some()).count()
 }
@@ -378,8 +416,7 @@ fn main() {
     prepare_site_settings(&mut config).unwrap_or_else(|e| fatal(format!("Writing the site settings failed: {e}")));
     prepare_state_dir(&config).unwrap_or_else(|e| fatal(format!("Preparing the state directory failed: {e}")));
     let (bind_ip, bind_port) = (config.args.bind_ip, config.args.bind_port);
-    let tcp = TcpListener::bind((bind_ip, bind_port))
-        .unwrap_or_else(|e| fatal(format!("Listening on {bind_ip}:{bind_port} failed: {e}")));
+    let tcp = listening_socket(bind_ip, bind_port);
     if let Err(e) = sys::catch_terminate() {
         fatal(format!("Can't handle signals: {e}"));
     }
@@ -396,6 +433,7 @@ fn main() {
 
     let parent = sys::getpid();
     let mut children: Vec<Child> = Vec::new();
+    let mut table = Table::new(Policy::DEFAULT);
     loop {
         if sys::terminate_requested() {
             shutdown(&config, web_pid, children, 0);
@@ -407,7 +445,13 @@ fn main() {
                     log::error(&format!("The web process exited ({}). Shutting down.", sys::describe_status(status)));
                     shutdown(&config, web_pid, children, 1);
                 }
-                Ok(Some((pid, _))) => children.retain(|child| child.pid != pid),
+                Ok(Some((pid, _))) => {
+                    // (its report may still be in the pipe)
+                    for child in children.iter_mut().filter(|child| child.pid == pid) {
+                        backoff::drain(&mut child.attempt, &mut table);
+                    }
+                    children.retain(|child| child.pid != pid);
+                }
                 _ => break,
             }
         }
@@ -435,7 +479,8 @@ fn main() {
                 continue;
             }
         }
-        if attempts_in_progress(&mut children) >= MAX_ATTEMPTS {
+        // (the reports the latest attempts sent before their result: the child about to be forked decides with them)
+        if attempts_in_progress(&mut children, &mut table) >= MAX_ATTEMPTS {
             // closing the connection: the web process tells the page signing in didn't work
             log::warn(&format!("Turned a login.sock connection away: {MAX_ATTEMPTS} are in progress."));
             continue;
@@ -462,11 +507,11 @@ fn main() {
                 if sys::set_parent_death_signal(libc::SIGTERM, parent).is_err() {
                     std::process::exit(1);
                 }
-                std::process::exit(sign_in_child(&config, connection, attempt_write));
+                std::process::exit(sign_in_child(&config, &table, connection, attempt_write));
             }
             Ok(sys::Forked::Parent(pid)) => {
                 drop(attempt_write);
-                children.push(Child { pid, attempt: Some(OwnedFd::from(attempt_read)) });
+                children.push(Child { pid, attempt: Some(attempt_read) });
             }
             Err(e) => log::error(&format!("Forking for a sign-in failed: {e}")),
         }
