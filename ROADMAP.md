@@ -69,7 +69,5 @@ For completed work see [HISTORY.md](HISTORY.md).
 ### Known issues
 
 - Pinning two apps in quick succession once left only one pinned; not reproduced since.
-- A single busy surface that the server keeps up with stays at normal priority (encoding at nice 0). Larger surfaces
-  cross the 60% threshold and are promoted; `PROMOTE_FRACTION` is the knob.
 - Input on a Wayland subsurface or popup the app just moved can land off by the move for about a round trip. Not seen
   with a real app. Fix if it shows: send coordinates relative to the window's main surface.
