@@ -1,6 +1,6 @@
 import { ShellWindow } from './desktop'
 import { ConnectionState } from './connection'
-import { ShellApp, ShellNotification } from './protocol'
+import { ShellApp, ShellNotification, ShellTrayItem } from './protocol'
 import { createStore } from './store'
 
 /** The views of the app, one shown at a time (see app.tsx). */
@@ -39,7 +39,7 @@ export const appStore = createStore<AppState>({
 
 /**
  * The state the desktop shell renders: the session's apps, pinned apps and windows, the connection indicator,
- * notifications (with their toasts) and app icons. Published by the shell controller (shell/shell.ts) and the
+ * notifications (with their toasts), app icons and the system tray. Published by the shell controller (shell/shell.ts) and the
  * Desktop (window lists).
  */
 export type ShellState = {
@@ -56,6 +56,8 @@ export type ShellState = {
   toasts: ShellNotification[]
   /** data URLs for icon names (null: no such icon; missing: not requested/arrived yet) */
   icons: Record<string, string | null>
+  /** the system tray's items, in the order they came (passive ones too: the taskbar hides them) */
+  tray: ShellTrayItem[]
 }
 
 export const shellStore = createStore<ShellState>({
@@ -67,6 +69,7 @@ export const shellStore = createStore<ShellState>({
   unseen: false,
   toasts: [],
   icons: {},
+  tray: [],
 })
 
 /** The session's audio as the taskbar's mute toggle shows it. Published by the AudioPlayer (audio/player.ts). */

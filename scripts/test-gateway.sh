@@ -29,6 +29,8 @@
 #                            bursts (a large page painting and scrolling) and audio between chunks.
 #   scripts/e2e/password.sh  changing an expired password in the browser (the dev helper's --dev-expired-password): the
 #                            prompts and messages, a refusal, a mismatch, then signed in.
+#   scripts/e2e/tray.sh      the system tray: a test app's StatusNotifierItem in the taskbar, its tooltip, clicks, the wheel,
+#                            its dbusmenu menu and submenu (updated while open), only this desktop's items shown.
 #
 # Each can also be run on its own (they take GATEWAY_PORT). They start the gateway as the dev login helper
 # (packages/gatekeeper: nebula-dev-login, which starts the web front nebula-web; both built here) with --dev-time-scale, which shortens its sign-in delays; see the header
@@ -39,7 +41,7 @@
 #
 #   scripts/test-gateway.sh
 # The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it, desktop
-# and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen, decorations eighteen, x11-move twenty, audio twenty-two, lossy twenty-four, password twenty-six).
+# and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen, decorations eighteen, x11-move twenty, audio twenty-two, lossy twenty-four, password twenty-six, tray twenty-eight).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
@@ -58,7 +60,7 @@ TIMES="$(mktemp)"
 pids=()
 names=()
 i=0
-for part in auth desktop x11 clipboard dnd hidpi input busy video decorations x11-move audio lossy password; do
+for part in auth desktop x11 clipboard dnd hidpi input busy video decorations x11-move audio lossy password tray; do
   port=$((BASE_PORT + i * 2))
   i=$((i + 1))
   # prefix every line with the script's name; the exit status is the script's, not sed's
@@ -97,6 +99,6 @@ if [ "$seconds" -gt $((LIMIT_SECONDS * 100)) ]; then
   echo "SLOW: the suite took over $LIMIT_SECONDS s: it needs an optimization pass (start with the slowest scripts above)" >&2
 fi
 if [ "$status" = 0 ]; then
-  echo "PASS: sign-in, isolation checks, session survival, desktop shell, window management, reattaching, takeover, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, lossy encoding on a slow link, the video path, audio and changing an expired password"
+  echo "PASS: sign-in, isolation checks, session survival, desktop shell, window management, reattaching, takeover, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, lossy encoding on a slow link, the video path, audio, changing an expired password and the system tray"
 fi
 exit "$status"

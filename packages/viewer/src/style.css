@@ -135,6 +135,17 @@
   padding: 0;
 }
 
+/* an app's tray icon (StatusNotifierItem); it grows in and shrinks away like the app buttons (taskbar.tsx) */
+.app-tray-item img {
+  display: block;
+  object-fit: contain;
+}
+
+.app-tray-item.leaving {
+  pointer-events: none;
+  animation: taskbar-button-out 160ms var(--ease-in) forwards;
+}
+
 #audio-button.unavailable {
   color: var(--color-text-secondary);
 }
@@ -226,6 +237,7 @@
 
 .context-menu {
   min-width: 180px;
+  max-width: 360px;
   padding: 4px;
   z-index: 20;
   /* drops in from where it was opened, and fades out quicker */
@@ -270,6 +282,8 @@
 
 .context-menu button {
   display: flex;
+  align-items: center;
+  gap: 8px;
   justify-content: flex-start;
   width: 100%;
   height: 32px;
@@ -278,8 +292,48 @@
   border: none;
 }
 
-.context-menu button:hover {
+.context-menu button:hover,
+.context-menu button.open {
   background: var(--color-subtle-hover);
+}
+
+/* the columns of check marks and icons (only in menus that have them), the label, a submenu's chevron */
+.context-menu .menu-mark,
+.context-menu .menu-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
+.context-menu .menu-icon img {
+  display: block;
+  object-fit: contain;
+}
+
+.context-menu .radio-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.context-menu .menu-label {
+  flex: 1;
+  min-width: 0;
+  text-align: start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-menu .menu-chevron {
+  flex: none;
+  display: inline-flex;
+  margin-inline-end: -4px;
+  color: var(--color-text-secondary);
 }
 
 .context-menu button:disabled {
@@ -764,6 +818,7 @@
   .context-menu,
   .context-menu.leaving,
   .taskbar-button.app.leaving,
+  .app-tray-item.leaving,
   .toast,
   .toast.leaving,
   .notification.leaving {

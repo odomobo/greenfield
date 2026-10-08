@@ -754,6 +754,19 @@ single large item never stalls the link. Initial window before any estimate: 64 
   in the mask only, nothing is sent when they agree (Ctrl+A, Ctrl+B stays one Ctrl press). Caps Lock and Num Lock
   follow the browser the same way. Losing page focus (blur, hidden tab) or the viewer releases every held key.
   `scripts/e2e/desktop.sh` checks foot's protocol log for all four cases.
+- System tray (2026-10-08, Lower priority 5c): `packages/session/src/shell/tray.ts`. The session is the
+  `org.kde.StatusNotifierWatcher` when no one else is (queued for the name, like the notification server), else it
+  registers as a host with the other watcher and follows its list; either way only the items of this desktop's
+  processes are shown (an app of ours or started from one, or a process whose environment names our Wayland display),
+  since a shared bus has the user's other desktops' items too. Icons: `IconName` (the item's `IconThemePath` first,
+  then the icon theme), else the `IconPixmap` closest to 48 px as a PNG; the attention icon while it needs attention;
+  passive items hidden. Left click `Activate` (the menu instead for `ItemIsMenu`, or when `Activate` fails), middle
+  `SecondaryActivate`, wheel `Scroll`, right click the dbusmenu as our own context menu (check marks, radio buttons,
+  icons, submenus on hover, updated while open; `ContextMenu` for items without one). All D-Bus goes through
+  `src/shell/dbus.ts`, the module the sd_bus addon will replace. Unit tests against a private bus (watcher mode,
+  following another watcher and taking over, foreign items), `scripts/e2e/tray.sh`, and checked by hand with a PyQt5
+  `QSystemTrayIcon`. Not done: the `org.freedesktop.StatusNotifierWatcher` name, overlay icons, menu shortcuts and
+  keyboard navigation in menus, XEmbed icons.
 - Core 2 (2026-10-04, merged into master): normal and streaming priority classes by the relentless measure,
   per-surface slots, streaming patches encoded on nice-19 worker threads, byte-weighted scheduler between the classes,
   lossless patches only without GPU acceleration (`--encoder auto|none|nvh264|vaapih264`, no x264), and our own
@@ -1377,7 +1390,7 @@ single large item never stalls the link. Initial window before any estimate: 64 
 
 ### Lower priority
 
-5c. **System tray (StatusNotifierItem host).** Apps like JuK, Discord, Steam, chat clients and network/Bluetooth applets
+5c. **Done 2026-10-08 (see Done above): System tray (StatusNotifierItem host).** Apps like JuK, Discord, Steam, chat clients and network/Bluetooth applets
     put an icon in "the system tray" and keep running when their window closes. On a Linux desktop the tray is a
     freedesktop/KDE D-Bus protocol, not Wayland: apps register their `org.kde.StatusNotifierItem` with a
     `org.kde.StatusNotifierWatcher`, and the panel registers as a `StatusNotifierHost` and draws the icons. Today

@@ -41,7 +41,7 @@ export type NotificationListener = {
   closed(id: number): void
 }
 
-function plainText(markup: string): string {
+export function plainText(markup: string): string {
   const text = markup
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<[^>]*>/g, '')

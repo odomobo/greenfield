@@ -82,7 +82,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 19
+export const PROTOCOL_VERSION = 20
 
 /**
  * The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). The
@@ -323,6 +323,16 @@ export type ServerMessage =
   | { type: 'shell.notification'; notification: ShellNotification }
   | { type: 'shell.notification-closed'; id: number }
   | { type: 'shell.launch-failed'; app: string; reason: 'unknown' | 'not-runnable' | 'failed' }
+  /** the system tray's items (StatusNotifierItems of this desktop's apps), in the order they came; sent on attach */
+  | { type: 'shell.tray'; items: ShellTrayItem[] }
+  /** a new tray item, or a changed one (same id) */
+  | { type: 'shell.tray-item'; item: ShellTrayItem }
+  | { type: 'shell.tray-item-removed'; id: string }
+  /**
+   * A tray item's menu. show: open it at (x, y), page coordinates (the answer to a `shell.tray-activate` that shows
+   * the menu); without it, the menu changed while open: update it if it's still shown.
+   */
+  | { type: 'shell.tray-menu'; item: string; menu: ShellTrayMenuItem[]; show?: { x: number; y: number } }
   /**
    * Whether the session has audio (its own PipeWire is running); sent on attach and when it changes. Without it the
    * session works silently and `audio.mute` has no effect.
@@ -354,6 +364,40 @@ export type ShellNotification = {
   expireTimeout: number
   time: number
 }
+
+/** A system tray item (StatusNotifierItem). */
+export type ShellTrayItem = {
+  /** the item's bus name and object path */
+  id: string
+  /** the app's name for it (Title, else Id) */
+  title: string
+  /** what the item's tooltip says, plain text; body may be empty */
+  tooltip?: { title: string; body: string }
+  /** passive: hidden (nothing to show right now); attention: icon is its attention icon */
+  status: 'active' | 'passive' | 'attention'
+  /** a PNG or SVG data URL, null if it has no icon we can show */
+  icon: string | null
+  /** it has a menu (com.canonical.dbusmenu) */
+  menu: boolean
+  /** a left click shows the menu rather than activating the item */
+  itemIsMenu: boolean
+}
+
+/** An entry of a tray item's menu (dbusmenu). Hidden entries aren't sent; labels are plain (no mnemonics). */
+export type ShellTrayMenuItem =
+  | { id: number; separator: true }
+  | {
+      id: number
+      label: string
+      enabled: boolean
+      /** a check box or radio button, and whether it's on */
+      toggle?: 'checkmark' | 'radio'
+      checked?: boolean
+      /** data URL */
+      icon?: string
+      /** a submenu */
+      children?: ShellTrayMenuItem[]
+    }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // viewer -> server
@@ -446,6 +490,20 @@ export type ViewerMessage =
   | { type: 'shell.icons'; names: string[] }
   | { type: 'shell.notification-dismiss'; id: number }
   | { type: 'shell.notifications-clear' }
+  /**
+   * A tray item was clicked: activate (left click; an item that doesn't handle it shows its menu: shell.tray-menu
+   * comes back with show), secondary (middle click) or context (right click: its menu, or, without one, the item's
+   * own). x, y: where, page coordinates.
+   */
+  | { type: 'shell.tray-activate'; item: string; action: 'activate' | 'secondary' | 'context'; x: number; y: number }
+  /** the wheel over a tray item: delta in wheel units, 120 per click (positive: down / right) */
+  | { type: 'shell.tray-scroll'; item: string; delta: number; orientation: 'vertical' | 'horizontal' }
+  /** a submenu of a tray item's open menu is shown: the app may update it (an update comes as shell.tray-menu) */
+  | { type: 'shell.tray-submenu'; item: string; id: number }
+  /** a tray menu entry was clicked */
+  | { type: 'shell.tray-menu-event'; item: string; id: number }
+  /** the tray item's menu was closed */
+  | { type: 'shell.tray-menu-closed'; item: string }
   /** re-read installed applications (the server rate-limits this) */
   | { type: 'shell.refresh-apps' }
   /**

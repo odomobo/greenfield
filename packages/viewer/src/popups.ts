@@ -10,9 +10,25 @@ import { createStore } from './store'
  * outside-click logic finds the DOM of a popup and how anchored elements learn that they are open.
  */
 export type MenuItem =
-  | { label: string; action: () => void; danger?: boolean; disabled?: boolean; testId?: string }
+  | {
+      label: string
+      action: () => void
+      danger?: boolean
+      disabled?: boolean
+      testId?: string
+      /** a check box or radio button: shown with a mark when on */
+      toggle?: 'checkmark' | 'radio'
+      checked?: boolean
+      /** an image URL shown before the label */
+      icon?: string
+      /** opens a submenu (pointing at it or clicking it) instead of acting */
+      submenu?: Submenu
+    }
   | { separator: true }
   | { heading: string }
+
+/** A menu entry's submenu: a nested context popup owned by `owner`; onOpen runs when it's shown. */
+export type Submenu = { owner: string; items: MenuItem[]; onOpen?: () => void }
 
 /** A context menu at a point (page coordinates). alignRight: x is the menu's right edge (under its button). */
 export type ContextPopup = {
@@ -25,6 +41,8 @@ export type ContextPopup = {
   alignRight?: boolean
   /** id for the menu element (e.g. #session-menu) */
   menuId?: string
+  /** a submenu: the left edge of the menu it's in, where it goes instead if there's no room on the right */
+  parentLeft?: number
 }
 
 export type AppsPopup = { kind: 'apps'; owner: 'apps-button' }
@@ -67,6 +85,22 @@ export function closePopupOf(owner: string): void {
   const index = stack().findIndex((popup) => popup.owner === owner)
   if (index >= 0) {
     closeAbove(index)
+  }
+}
+
+/** Replace the entries of the open context menus `update` gives new ones for (by owner; undefined: unchanged). */
+export function updateMenus(update: (owner: string) => MenuItem[] | undefined): void {
+  let changed = false
+  const updated = stack().map((popup) => {
+    const items = popup.kind === 'context' ? update(popup.owner) : undefined
+    if (items === undefined) {
+      return popup
+    }
+    changed = true
+    return { ...popup, items }
+  })
+  if (changed) {
+    popupStore.update({ stack: updated })
   }
 }
 

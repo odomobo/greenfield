@@ -10,6 +10,8 @@ import { groupMenuItems } from './menus'
 import { openPreview, previewPinnedFor, schedulePreviewClose, schedulePreviewOpen } from './preview'
 import { usePresence } from './presence'
 import { reducedMotion } from '../animation'
+import { trayMenuOwner } from './tray'
+import type { ShellTrayItem } from '../protocol'
 
 /** How long a taskbar button takes to grow in or shrink away (the .leaving animation in style.css too). */
 const BUTTON_ANIMATION_MS = 160
@@ -18,7 +20,7 @@ const SETTLE_MS = 1000
 
 /**
  * The taskbar at the top of the desktop: the Apps menu button, the pinned apps and running windows grouped by app,
- * and the tray (connection indicator, clock with the notification bell).
+ * and the tray (the apps' tray icons, the mute toggle, the clock with the notification bell).
  */
 export function Taskbar() {
   const state = useStore(shellStore)
@@ -82,7 +84,7 @@ export function Taskbar() {
           <TaskbarButton key={group.key} group={group} onClick={clickGroup} leaving={leaving} growIn={growIn} />
         ))}
       </div>
-      <Tray />
+      <Tray growIn={growIn} />
     </header>
   )
 }
@@ -102,15 +104,7 @@ type TaskbarButtonProps = {
  */
 function TaskbarButton({ group, onClick, leaving, growIn }: TaskbarButtonProps) {
   const buttonRef = useRef<HTMLButtonElement>(null)
-  // (an animation of its own, not a CSS one: the button's classes change while it runs)
-  useLayoutEffect(() => {
-    if (growIn && !reducedMotion()) {
-      buttonRef.current?.animate(
-        [{ opacity: 0, scale: '0.6', width: '0px', minWidth: '0px', paddingInline: '0px', marginInlineEnd: '-2px' }, {}],
-        { duration: BUTTON_ANIMATION_MS, easing: 'cubic-bezier(0, 0, 0.3, 1)' },
-      )
-    }
-  }, [])
+  useGrowIn(buttonRef, growIn)
   const { desktop, shell } = useCore()
   const active = group.windows.some((window) => window.activated && !window.shownMinimized)
   const name = groupName(group)
@@ -154,6 +148,122 @@ function TaskbarButton({ group, onClick, leaving, growIn }: TaskbarButtonProps) 
   )
 }
 
+/**
+ * A new button grows in, from no width (so the buttons after it make room smoothly). An animation of its own, not a
+ * CSS one: the button's classes change while it runs.
+ */
+function useGrowIn(ref: React.RefObject<HTMLElement>, growIn: boolean) {
+  useLayoutEffect(() => {
+    if (growIn && !reducedMotion()) {
+      ref.current?.animate(
+        [{ opacity: 0, scale: '0.6', width: '0px', minWidth: '0px', paddingInline: '0px', marginInlineEnd: '-2px' }, {}],
+        { duration: BUTTON_ANIMATION_MS, easing: 'cubic-bezier(0, 0, 0.3, 1)' },
+      )
+    }
+  }, [])
+}
+
+/** Wheel distance (in Chromium's pixels) per wheel click sent to a tray item: a mouse wheel's click is 100 px. */
+const WHEEL_CLICK_PIXELS = 100
+/** A line (Firefox's wheel deltas) in pixels: a click is 3 lines. */
+const LINE_PIXELS = WHEEL_CLICK_PIXELS / 3
+
+/** The apps' tray icons (StatusNotifierItems) that aren't passive, in the order they came. */
+function TrayItems({ growIn }: { growIn: boolean }) {
+  const tray = useStorePart(shellStore, (state) => state.tray)
+  const shown = usePresence(
+    tray.filter((item) => item.status !== 'passive'),
+    (item) => item.id,
+    BUTTON_ANIMATION_MS,
+  )
+  return (
+    <>
+      {shown.map(({ item, leaving }) => (
+        <TrayIcon key={item.id} item={item} leaving={leaving} growIn={growIn} />
+      ))}
+    </>
+  )
+}
+
+/**
+ * One tray icon: left click activates the app (or shows the menu, for items that are menus), middle click is its
+ * secondary action, right click its menu, the wheel scrolls it. A second click while its menu is open closes it.
+ */
+function TrayIcon({ item, leaving, growIn }: { item: ShellTrayItem; leaving: boolean; growIn: boolean }) {
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  useGrowIn(buttonRef, growIn)
+  const { shell } = useCore()
+  const wheel = useRef({ x: 0, y: 0 })
+  const owner = trayMenuOwner(item.id)
+  const open = isOpen(owner)
+
+  const click = (action: 'activate' | 'secondary' | 'context') => {
+    if (isOpen(owner)) {
+      closePopup()
+      return
+    }
+    // menus open under the icon
+    const rect = buttonRef.current!.getBoundingClientRect()
+    shell.tray.click(item.id, action, Math.round(rect.left), Math.round(rect.bottom + 4))
+  }
+
+  const tooltip = item.tooltip
+    ? [item.tooltip.title || item.title, item.tooltip.body].filter(Boolean).join('\n')
+    : item.title
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      className={
+        'taskbar-button tray-item app-tray-item' +
+        (open ? ' open' : '') +
+        (item.status === 'attention' ? ' attention' : '') +
+        (leaving ? ' leaving' : '')
+      }
+      data-tray-item={leaving ? undefined : item.id}
+      data-popup-anchor={leaving ? undefined : owner}
+      aria-label={item.title || 'Tray icon'}
+      aria-haspopup={item.menu ? 'menu' : undefined}
+      title={tooltip}
+      onClick={() => click('activate')}
+      onMouseDown={(event) => {
+        // no autoscroll
+        if (event.button === 1) {
+          event.preventDefault()
+        }
+      }}
+      onAuxClick={(event) => {
+        if (event.button === 1) {
+          click('secondary')
+        }
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        click('context')
+      }}
+      onWheel={(event) => {
+        const scale = event.deltaMode === 1 ? LINE_PIXELS : event.deltaMode === 2 ? WHEEL_CLICK_PIXELS * 3 : 1
+        const accumulated = wheel.current
+        accumulated.x += event.deltaX * scale
+        accumulated.y += event.deltaY * scale
+        for (const axis of ['y', 'x'] as const) {
+          const clicks = Math.trunc(accumulated[axis] / WHEEL_CLICK_PIXELS)
+          if (clicks !== 0) {
+            accumulated[axis] -= clicks * WHEEL_CLICK_PIXELS
+            shell.tray.scroll(item.id, clicks * 120, axis === 'y' ? 'vertical' : 'horizontal')
+          }
+        }
+      }}
+    >
+      {item.icon ? (
+        <img src={item.icon} alt="" width={20} height={20} draggable={false} />
+      ) : (
+        <span aria-hidden="true" dangerouslySetInnerHTML={{ __html: glyphs.app(20) }} />
+      )}
+    </button>
+  )
+}
+
 function audioLabel(state: { muted: boolean; available: boolean; supported: boolean; running: boolean }): string {
   if (!state.supported) {
     return 'This browser cannot play the session audio'
@@ -191,14 +301,15 @@ function MuteButton() {
   )
 }
 
-/** The right side of the taskbar: the mute toggle and the clock with the notification bell. */
-function Tray() {
+/** The right side of the taskbar: the apps' tray icons, the mute toggle and the clock with the notification bell. */
+function Tray({ growIn }: { growIn: boolean }) {
   const unseen = useStorePart(shellStore, (state) => state.unseen)
   const count = useStorePart(shellStore, (state) => state.notifications.length)
   const { shell } = useCore()
   const now = useClock()
   return (
     <div id="tray">
+      <TrayItems growIn={growIn} />
       <MuteButton />
       <button
         type="button"

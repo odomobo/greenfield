@@ -24,7 +24,7 @@ For the task list see [ROADMAP.md](ROADMAP.md). For completed work see [HISTORY.
   `packages/gatekeeper/README.md` and `packages/session/README.md` for the full process tree.
 - **Session** (`packages/session`, one per desktop, runs as the user): the server side of a user's desktop. A Wayland
   compositor on wlroots (with XWayland), as a Node process with C addons. Encodes frames (QOI/LZ4 patches, PNG, and
-  lossy via GStreamer when bandwidth is short), runs the shell service (desktop entries, icons, notifications) and
+  lossy via GStreamer when bandwidth is short), runs the shell service (desktop entries, icons, notifications, system tray) and
   audio, and sends everything over the session's WebSocket.
 - **Viewer** (`packages/viewer`): the browser side. Receives a window-scene protocol (windows, positions, sizes,
   frames) over one WebSocket, decodes frames (WebCodecs plus QOI/LZ4 patches in a worker), shows each window as its
@@ -127,7 +127,7 @@ Drawn by the browser in HTML/CSS. The visual design (theme, window frames, anima
   - Left-aligned: Apps button, pinned apps (with a running indicator) and running windows grouped by app.
   - Hover previews of a group's windows, from the images the browser already has.
   - Icons from the app's `.desktop` file and the XDG icon theme, with a generic fallback.
-  - Right side: system tray icons (planned, see below), audio mute toggle, notifications, clock.
+  - Right side: system tray icons (see below), audio mute toggle, notifications, clock.
   - Right-click menus (New window, Pin/Unpin, window actions) are a convenience only; everything in them is also
     reachable from the Apps menu or previews.
 - **Apps menu** (not "Start"), top to bottom:
@@ -140,8 +140,10 @@ Drawn by the browser in HTML/CSS. The visual design (theme, window frames, anima
 - **Notifications** via `org.freedesktop.Notifications`, served by the session process on the session's D-Bus bus
   (it starts a bus if the user has none): pop-ups at the top right below the taskbar, plus a history list (last 50,
   kept across reconnects). Notification action buttons are not supported yet.
-- **System tray** (planned, Lower priority item 5c): apps' tray icons (StatusNotifierItem) in the taskbar's tray area,
-  their menus shown as our own menus.
+- **System tray**: apps' tray icons (StatusNotifierItem) in the taskbar's tray area, their menus (dbusmenu) shown as
+  our own menus. The session process is the `org.kde.StatusNotifierWatcher` when no one else is, else it follows the
+  other watcher as a host; only items of this desktop's processes are shown (a bus shared with the user's other
+  desktops has theirs too). XEmbed tray icons (old X11 apps) are not supported.
 
 ## Encoding policy
 

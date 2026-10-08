@@ -8,52 +8,44 @@ For completed work see [HISTORY.md](HISTORY.md).
 
 1. **Replace `dbus-next` with an `sd_bus` C addon.** The `dbus-next` npm package (unmaintained since 2021) is the
    session's only runtime npm dependency with a significant transitive tree (17 packages, including `event-stream`).
-   Replace it with a small C addon wrapping `sd_bus` (libsystemd), which is already on every target machine. The
-   session uses D-Bus only for the notification server (`src/shell/notifications.ts`): connect to the session bus,
-   request a name, export an interface, handle method calls, emit signals. A ~200 line addon in the existing
-   CMake/Ninja build eliminates the entire tree. The notification server's TypeScript stays largely the same.
-
-2. **System tray (StatusNotifierItem host).** Apps like Discord, Steam, chat clients and network applets put an icon
-   in the system tray and keep running when their window closes. The session provides the
-   `org.kde.StatusNotifierWatcher` (if none is on the bus) and registers as the host; it forwards the items to the
-   viewer over the session WebSocket.
-   - The viewer shows each item's icon in the taskbar's tray area (left of the mute toggle), with its tooltip;
-     `Status: Passive` items are hidden, `NeedsAttention` uses its attention icon.
-   - Clicks: left click `Activate`, middle click `SecondaryActivate`, wheel `Scroll`. Right click (or `ItemIsMenu`)
-     shows the item's `com.canonical.dbusmenu` menu as one of our own animated context menus.
-   - Legacy XEmbed tray icons (old X11 apps) are not supported.
-   - e2e: a small test item registering an icon and a menu; check the icon shows, a click activates, a menu entry is
-     delivered, and the icon goes when the item's bus name goes.
+   Replace it with a C addon wrapping `sd_bus` (libsystemd), which is already on every target machine. The addon
+   reimplements `src/shell/dbus.ts` (the system tray's low-level connection, also used by its test fixture: method
+   calls with async replies and timeouts, properties, signal match rules, exported objects, signals; its header
+   documents the value mapping to keep), and the notification server (`src/shell/notifications.ts`, still on
+   `dbus-next`'s high-level interface classes) moves onto it. The bulk is a generic signature-driven converter between
+   JS values and `sd_bus_message` (nested types like dbusmenu's `(ia{sv}av)` and `a(iiay)` pixmaps), plus hooking
+   `sd_bus`'s fd and timeout into libuv (as the poll addon does). The tray's unit tests and `scripts/e2e/tray.sh`
+   cover it. Needs `libsystemd-dev` at build time.
 
 ### Later
 
-3. **Don't send what can't be seen.** Minimized, fully covered and partially covered windows, all with one algorithm
+2. **Don't send what can't be seen.** Minimized, fully covered and partially covered windows, all with one algorithm
    computed on the server (it has every window's position, stacking order, minimized state and opaque region). Damage
    in hidden regions accumulates instead of being sent; when a region becomes visible again, the accumulated damage is
    sent. The tricky part: the viewer's layout runs ahead of the server's during drags, resizes and animations, so the
    server must widen its idea of what's visible during those interactions.
 
-4. **Text input methods (IME)** for Chinese, Japanese, Korean and other composed input, and dead keys and compose:
+3. **Text input methods (IME)** for Chinese, Japanese, Korean and other composed input, and dead keys and compose:
    the browser's composition events mapped to `text-input-v3` (wlroots provides it).
 
-5. Hardware video decoding in the browser.
+4. Hardware video decoding in the browser.
 
-6. Downloadable/user-written CSS themes.
+5. Downloadable/user-written CSS themes.
 
-7. WebTransport, only if the single WebSocket ever becomes a bottleneck.
+6. WebTransport, only if the single WebSocket ever becomes a bottleneck.
 
-8. **Browser-drawn window shadows** (nice-to-have). Only for windows whose `wl_surface.set_opaque_region` covers the
+7. **Browser-drawn window shadows** (nice-to-have). Only for windows whose `wl_surface.set_opaque_region` covers the
    whole surface (a plain opaque rectangle with no shadow margin of its own). Everything else keeps the app's own
    shadow and corners.
 
-9. **Viewer improvements.** Details to come from the user when this item is reached.
+8. **Viewer improvements.** Details to come from the user when this item is reached.
 
 ### Last
 
-10. **Install script, uninstall script and systemd unit.** Until then, real-PAM setup is manual (see
+9. **Install script, uninstall script and systemd unit.** Until then, real-PAM setup is manual (see
     `packages/session/README.md`). A `.deb` package possibly later.
 
-11. **Two-factor sign-in via PAM prompts** (lowest priority). Only makes sense once the core is verified sound and
+10. **Two-factor sign-in via PAM prompts** (lowest priority). Only makes sense once the core is verified sound and
     free of vulnerabilities.
 
 ### Needs verification on other hardware

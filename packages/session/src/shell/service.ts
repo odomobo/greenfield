@@ -1,7 +1,8 @@
 /**
  * The desktop shell's server side, part of the user's session process: installed apps, launching them, pinned apps
- * (kept in the user's config dir) and notifications. The shell UI itself runs in the viewer; this talks to it with
- * `shell.*` control messages over the session's viewer WebSocket (see packages/viewer/src/protocol.ts).
+ * (kept in the user's config dir), notifications and the system tray. The shell UI itself runs in the viewer; this
+ * talks to it with `shell.*` control messages over the session's viewer WebSocket (see
+ * packages/viewer/src/protocol.ts).
  */
 import { createLogger } from '../Logger.js'
 import type { ShellEndpoint } from '../viewer/ViewerHost.js'
@@ -11,6 +12,7 @@ import path from 'node:path'
 import { DesktopEntry, findProgram, loadDesktopEntries, parseExec, terminalCommand } from './desktop-entries'
 import { IconResolver } from './icons'
 import { Notification, NotificationServer } from './notifications'
+import { TrayHost } from './tray'
 
 const logger = createLogger('shell')
 
@@ -44,6 +46,8 @@ function toShellApp(entry: DesktopEntry): ShellApp {
 /** Starts an app in the session (Apps in the session). */
 export interface AppLauncher {
   launch(name: string, executable: string, args: string[]): Promise<unknown>
+  /** whether a process belongs to this desktop */
+  owns(pid: number): boolean
 }
 
 export class ShellService implements ShellEndpoint {
@@ -53,6 +57,7 @@ export class ShellService implements ShellEndpoint {
   private pinned: string[]
   private readonly icons = new IconResolver()
   private readonly notifications = new NotificationServer()
+  private readonly tray: TrayHost
   private readonly pinnedFile: string
 
   constructor(private readonly apps: AppLauncher) {
@@ -66,6 +71,13 @@ export class ShellService implements ShellEndpoint {
       closed: (id: number) => this.send?.({ type: 'shell.notification-closed', id }),
     }
     this.notifications.start().catch((e) => logger.error(`Notification server failed: ${e.message}`))
+    this.tray = new TrayHost({ owns: (pid) => apps.owns(pid), icons: this.icons })
+    this.tray.listener = {
+      changed: (item) => this.send?.({ type: 'shell.tray-item', item }),
+      removed: (id) => this.send?.({ type: 'shell.tray-item-removed', id }),
+      menu: (item, menu, show) => this.send?.({ type: 'shell.tray-menu', item, menu, show }),
+    }
+    this.tray.start().catch((e) => logger.error(`System tray failed: ${e.message}`))
   }
 
   attach(send: (message: ControlMessage) => void): void {
@@ -74,6 +86,7 @@ export class ShellService implements ShellEndpoint {
     send({ type: 'shell.apps', apps: this.entries.map(toShellApp) })
     send({ type: 'shell.pinned', apps: this.pinned })
     send({ type: 'shell.notifications', notifications: this.notifications.all })
+    send({ type: 'shell.tray', items: this.tray.all })
   }
 
   detach(): void {
@@ -96,6 +109,29 @@ export class ShellService implements ShellEndpoint {
         break
       case 'shell.notifications-clear':
         this.notifications.dismissAll()
+        break
+      case 'shell.tray-activate':
+        if (message.action === 'activate' || message.action === 'secondary' || message.action === 'context') {
+          this.tray
+            .click(String(message.item), message.action, Number(message.x) || 0, Number(message.y) || 0)
+            .catch((e: Error) => logger.error(`Tray click failed: ${e.message}`))
+        }
+        break
+      case 'shell.tray-scroll':
+        this.tray.scroll(
+          String(message.item),
+          Number(message.delta),
+          message.orientation === 'horizontal' ? 'horizontal' : 'vertical',
+        )
+        break
+      case 'shell.tray-submenu':
+        this.tray.submenuShown(String(message.item), Number(message.id)).catch(() => {})
+        break
+      case 'shell.tray-menu-event':
+        this.tray.menuClicked(String(message.item), Number(message.id))
+        break
+      case 'shell.tray-menu-closed':
+        this.tray.menuClosed(String(message.item))
         break
       case 'shell.refresh-apps':
         if (this.refreshEntries()) {

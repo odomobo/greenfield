@@ -185,6 +185,35 @@ export class Apps {
     return this.apps.size === 0
   }
 
+  /**
+   * Whether a process belongs to this desktop: it's one of our apps or started from one, or its environment names our
+   * display (a process that left its parent behind, like a daemon an app started).
+   */
+  owns(pid: number): boolean {
+    if (this.appOf(pid) !== undefined) {
+      return true
+    }
+    try {
+      const environment = new Map<string, string>()
+      for (const entry of readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0')) {
+        const separator = entry.indexOf('=')
+        if (separator > 0) {
+          environment.set(entry.slice(0, separator), entry.slice(separator + 1))
+        }
+      }
+      const display = environment.get('WAYLAND_DISPLAY')
+      if (display === undefined) {
+        return false
+      }
+      // a name is relative to the process's runtime directory, which has to be ours
+      return display.startsWith('/')
+        ? display === this.waylandDisplay || display === `${process.env.XDG_RUNTIME_DIR}/${this.waylandDisplay}`
+        : display === this.waylandDisplay && environment.get('XDG_RUNTIME_DIR') === process.env.XDG_RUNTIME_DIR
+    } catch {
+      return false
+    }
+  }
+
   /** The app a process belongs to: the process itself, or the nearest ancestor that's an app of ours. */
   private appOf(pid: number): App | undefined {
     const seen = new Set<number>()

@@ -3,6 +3,7 @@ import { ServerMessage, ShellNotification, ViewerMessage } from '../protocol'
 import { closePopup, isKindOpen, openPopup } from '../popups'
 import { appById, resetGroupOrder } from './groups'
 import { IconCache } from './icons'
+import { TrayController } from './tray'
 
 
 const TOAST_MS = 6000
@@ -12,10 +13,11 @@ const MAX_TOASTS = 3
  * The desktop shell's controller, the imperative side of the shell: it receives the session's shell.* messages and
  * publishes their state into the shell store, sends the shell's own messages to the session, and keeps the toast
  * timers. What the user sees (taskbar, Apps menu, previews, notifications, menus) is rendered by React from the
- * store (shell/*.tsx).
+ * store (shell/*.tsx). The system tray's part is the TrayController (shell/tray.ts).
  */
 export class ShellController {
   readonly icons: IconCache
+  readonly tray: TrayController
   /** IDs for the shell's own notifications (not kept by the session, which uses positive IDs) */
   private localId = -1
   /** hide-timers of the shown toasts, by notification ID */
@@ -23,6 +25,7 @@ export class ShellController {
 
   constructor(private readonly send: (message: ViewerMessage) => void) {
     this.icons = new IconCache((names) => this.send({ type: 'shell.icons', names }))
+    this.tray = new TrayController(send)
   }
 
   /** The desktop was opened: show its user, start empty until the session sends its state. */
@@ -31,6 +34,7 @@ export class ShellController {
     this.clearToastTimers()
     resetGroupOrder()
     closePopup()
+    this.tray.reset()
     shellStore.update({
       username,
       apps: [],
@@ -45,11 +49,15 @@ export class ShellController {
   /** Left the desktop: put popups and toasts away. */
   stop(): void {
     closePopup()
+    this.tray.reset()
     this.clearToastTimers()
     shellStore.update({ notifications: [], unseen: false, toasts: [] })
   }
 
   handleMessage(message: ServerMessage): void {
+    if (this.tray.handleMessage(message)) {
+      return
+    }
     switch (message.type) {
       case 'shell.apps':
         shellStore.update({ apps: message.apps })

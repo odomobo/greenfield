@@ -41,6 +41,8 @@ export const glyphs = {
     glyph(
       '<path fill="currentColor" d="M14.5 3.5 20.5 9.5 17 11l-3.5 3.5.5 4-1.5 1.5-8-8L6 10.5l4 .5L13.5 7.5z"/><path d="M8.5 16 4 20.5"/>',
     ),
+  check: (size = 16) => glyph('<path d="m5 12.5 4.5 4.5L19 7.5"/>', size),
+  chevronRight: (size = 14) => glyph('<path d="m9.5 6 6 6-6 6"/>', size),
   close: (size = 14) => glyph('<path d="m6 6 12 12M18 6 6 18"/>', size),
   minimize: (size = 14) => glyph('<path d="M5 12h14"/>', size),
   maximize: (size = 14) => glyph('<rect x="5" y="5" width="14" height="14" rx="2"/>', size),

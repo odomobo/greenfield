@@ -4,7 +4,7 @@
  * Icons go to the viewer as data URLs.
  */
 import { execFileSync } from 'node:child_process'
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
 import path from 'node:path'
 
 const ICON_SIZE = 48
@@ -41,6 +41,46 @@ export class IconResolver {
       this.cache.set(name, url)
     }
     return url
+  }
+
+  /**
+   * Like resolve, but looks in `themePath` first: a directory of the app's own icons (a tray item's IconThemePath),
+   * holding them directly (Electron) or as an icon theme (hicolor/<size>/<context>/).
+   */
+  resolveWithThemePath(name: string, themePath: string): string | null {
+    if (!themePath.startsWith('/') || name.includes('/') || name.length === 0 || name.length > 512) {
+      return this.resolve(name)
+    }
+    const key = `${themePath}\0${name}`
+    let url = this.cache.get(key)
+    if (url === undefined) {
+      const file = this.lookupInThemePath(path.normalize(themePath), name)
+      url = file ? dataURL(file) : this.resolve(name)
+      this.cache.set(key, url)
+    }
+    return url
+  }
+
+  private lookupInThemePath(themePath: string, name: string): string | undefined {
+    for (const extension of EXTENSIONS) {
+      const file = path.join(themePath, name + extension)
+      if (isFile(file)) {
+        return file
+      }
+    }
+    const dirs: ThemeDir[] = []
+    for (const root of [path.join(themePath, 'hicolor'), themePath]) {
+      for (const sizeDir of readDir(root)) {
+        const size = /^(\d+)x\d+$/.exec(sizeDir)
+        if (size === null && sizeDir !== 'scalable') {
+          continue
+        }
+        for (const context of readDir(path.join(root, sizeDir))) {
+          dirs.push({ dir: path.join(root, sizeDir, context), size: size ? Number(size[1]) : 0, scalable: !size })
+        }
+      }
+    }
+    return this.lookupInTheme({ name: themePath, dirs, inherits: [] }, name)
   }
 
   private load(name: string): string | null {
@@ -230,6 +270,14 @@ function parseIni(text: string): Map<string, Map<string, string>> {
     }
   }
   return groups
+}
+
+function readDir(dir: string): string[] {
+  try {
+    return readdirSync(dir).slice(0, 256)
+  } catch {
+    return []
+  }
 }
 
 function isFile(file: string): boolean {

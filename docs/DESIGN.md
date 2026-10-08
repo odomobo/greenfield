@@ -64,13 +64,17 @@ desktops of the same user never see any of it. All of it comes from `packages/se
 ## Taskbar and Apps menu
 
 - **Taskbar**: 48 px high, at the top. The Apps button is a 3 × 3 grid of dots.
-- **Tray**: the mute toggle, then the notification bell with the clock.
+- **Tray**: the apps' tray icons, the mute toggle, then the notification bell with the clock.
   - Icons are simple solid shapes: a solid speaker with bold sound waves (a bold ✕ when muted, still white; grey
     only when audio is unavailable), a solid bell, a solid user silhouette, a bold power symbol.
   - **No connection indicator.** It only showed connected/not connected, and a dropped connection shows the sign-in
     form (saying why) anyway. Showing link saturation was considered and rejected: by the time the server could
     report it, it's too late to be useful.
-  - **System tray** icons are planned (ROADMAP Lower priority 5c).
+  - **Apps' tray icons** (system tray): 20 px, all shown inline in the order they came (no overflow flyout for now);
+    they grow in and shrink away like taskbar buttons. Menus open under the icon; a second click closes them.
+- **Context menus** may have a column of check marks / radio dots and one of icons (only when an entry has one), and
+  submenus: a chevron, opened by pointing at the entry for 150 ms or clicking it, beside the menu (on its left if
+  there's no room on the right).
 - **Apps menu header**: a three-column grid. The user (avatar and name) on the left, the session name centered on the
   menu, the power button on the right, all on one center line.
   - The session name's field is exactly as wide as its text (a hidden copy of the text sizes it), so it stays
