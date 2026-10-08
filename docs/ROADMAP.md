@@ -6,16 +6,7 @@ For completed work see [HISTORY.md](HISTORY.md).
 
 ### Next
 
-1. **Replace `dbus-next` with an `sd_bus` C addon.** The `dbus-next` npm package (unmaintained since 2021) is the
-   session's only runtime npm dependency with a significant transitive tree (17 packages, including `event-stream`).
-   Replace it with a C addon wrapping `sd_bus` (libsystemd), which is already on every target machine. The addon
-   reimplements `src/shell/dbus.ts` (the system tray's low-level connection, also used by its test fixture: method
-   calls with async replies and timeouts, properties, signal match rules, exported objects, signals; its header
-   documents the value mapping to keep), and the notification server (`src/shell/notifications.ts`, still on
-   `dbus-next`'s high-level interface classes) moves onto it. The bulk is a generic signature-driven converter between
-   JS values and `sd_bus_message` (nested types like dbusmenu's `(ia{sv}av)` and `a(iiay)` pixmaps), plus hooking
-   `sd_bus`'s fd and timeout into libuv (as the poll addon does). The tray's unit tests and `scripts/e2e/tray.sh`
-   cover it. Needs `libsystemd-dev` at build time.
+Nothing queued; the user picks the next item from Later.
 
 ### Later
 

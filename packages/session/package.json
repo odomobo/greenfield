@@ -21,7 +21,6 @@
   },
   "dependencies": {
     "@gfld/scene-protocol": "*",
-    "dbus-next": "^0.10.2",
     "ws": "^8.17.1"
   },
   "devDependencies": {

@@ -73,7 +73,7 @@ sudo apt install build-essential cmake ninja-build meson pkg-config clang lld \
   libopengl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
   libgraphene-1.0-dev libudev-dev libffi-dev \
   xwayland libxcb1-dev libxcb-composite0-dev libxcb-ewmh-dev libxcb-icccm4-dev libxcb-render0-dev libxcb-res0-dev \
-  libxcb-xfixes0-dev
+  libxcb-xfixes0-dev libjpeg-dev libsystemd-dev
 npm install
 make
 ```

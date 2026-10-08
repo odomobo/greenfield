@@ -767,6 +767,13 @@ single large item never stalls the link. Initial window before any estimate: 64 
   following another watcher and taking over, foreign items), `scripts/e2e/tray.sh`, and checked by hand with a PyQt5
   `QSystemTrayIcon`. Not done: the `org.freedesktop.StatusNotifierWatcher` name, overlay icons, menu shortcuts and
   keyboard navigation in menus, XEmbed icons.
+- `dbus-next` replaced by an sd_bus addon (2026-10-08): `native/dbus/src/dbus.c` (nebula-dbus-addon, libsystemd)
+  behind the same `src/shell/dbus.ts` API, so the session has no D-Bus npm dependency (17 packages fewer). sd_bus's fd
+  and timeout are driven from libuv; one filter hands every incoming call and signal to JS, which answers the calls
+  to its exported paths (sd_bus answers the rest); replies to our calls come through `sd_bus_call_async` with its
+  timeout. Values are converted by the signature (mapping in `dbus.ts`'s header). The notification server moved onto
+  it (and now answers `Introspect`). Unit tests `src/test/dbus.test.ts` (every type, signature mismatches, errors,
+  signals, timeouts, losing the bus, the notification server) besides the tray's. Build dependency: `libsystemd-dev`.
 - Core 2 (2026-10-04, merged into master): normal and streaming priority classes by the relentless measure,
   per-surface slots, streaming patches encoded on nice-19 worker threads, byte-weighted scheduler between the classes,
   lossless patches only without GPU acceleration (`--encoder auto|none|nvh264|vaapih264`, no x264), and our own

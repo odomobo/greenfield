@@ -2,18 +2,73 @@
  * A small, low-level D-Bus connection for the session's own services: method calls with explicit signatures, signal
  * subscriptions by match rule, objects exported as plain method handlers, and signals sent. Nothing is introspected.
  *
- * It's deliberately the only place the system tray (tray.ts) touches the D-Bus library: replacing `dbus-next` with an
- * sd_bus addon (ROADMAP) means reimplementing this module, keeping its value mapping:
- *   - integers and doubles (y n q i u d) are numbers, b a boolean, s o g strings; 64-bit integers aren't used;
- *   - ay is a Buffer;
+ * It's the only place the session touches D-Bus: sd_bus (libsystemd) in the nebula-dbus-addon (native/dbus), which
+ * converts between JS values and messages by the signature:
+ *   - integers and doubles (y n q i u x t d) are numbers (64-bit integers lose precision past 2^53), b a boolean,
+ *     s o g strings;
+ *   - ay is a Buffer (any Uint8Array, or an array of numbers, when sending);
  *   - other arrays are arrays, structs are arrays of their fields;
  *   - a{..} dictionaries are plain objects keyed by the (string or number) key;
  *   - v is a `Variant` (signature and value), in both directions.
  */
-import * as dbus from 'dbus-next'
 
-export const Variant = dbus.Variant
-export type Variant<T = unknown> = dbus.Variant<T>
+/** A value of type v: its signature and the value. */
+export class Variant<T = unknown> {
+  constructor(
+    readonly signature: string,
+    readonly value: T,
+  ) {}
+}
+
+/** The nebula-dbus-addon's functions (native/dbus/src/dbus.c). */
+type Bus = { readonly __bus: unique symbol }
+type ReceivedCall = { readonly __call: unique symbol }
+type DBusAddon = {
+  setVariantClass(constructor: typeof Variant): void
+  /** onMessage says whether it handled a method call (sd_bus answers the others); onClose: the connection broke. */
+  openSessionBus(
+    onMessage: (
+      isCall: boolean,
+      sender: string,
+      path: string,
+      iface: string,
+      member: string,
+      signature: string,
+      body: unknown[],
+      call: ReceivedCall | undefined,
+    ) => boolean,
+    onClose: (error: string) => void,
+  ): Bus
+  /** Known once a reply came. */
+  uniqueName(bus: Bus): string
+  call(
+    bus: Bus,
+    destination: string,
+    path: string,
+    iface: string,
+    member: string,
+    signature: string,
+    body: unknown[],
+    timeoutMs: number,
+    callback: (errorName: string | null, errorMessage: string | null, body: unknown[] | null) => void,
+  ): void
+  emitSignal(bus: Bus, path: string, iface: string, member: string, signature: string, body: unknown[]): void
+  reply(bus: Bus, call: ReceivedCall, signature: string, body: unknown[]): void
+  replyError(bus: Bus, call: ReceivedCall, name: string, message: string): void
+  /** Sends what's queued, then closes; pending calls are forgotten. */
+  close(bus: Bus): void
+}
+
+let addon: DBusAddon | undefined
+
+function loadAddon(): DBusAddon {
+  if (addon === undefined) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    addon = require('../addons/nebula-dbus-addon') as DBusAddon
+    addon.setVariantClass(Variant)
+  }
+  return addon
+}
 
 export const DBUS_NAME = 'org.freedesktop.DBus'
 const DBUS_PATH = '/org/freedesktop/DBus'
@@ -57,43 +112,54 @@ export type MatchRule = { sender?: string; path?: string; interface?: string; me
 /** RequestName's answers */
 export const PRIMARY_OWNER = 1
 export const IN_QUEUE = 2
+export const ALREADY_OWNER = 4
 
 export class DBusConnection {
   private readonly signalHandlers = new Set<{ rule: MatchRule; handler: (message: IncomingMessage) => void }>()
   private readonly exported = new Map<string, MethodHandler>()
+  /** the calls waiting for replies, rejected when the connection goes */
+  private readonly pending = new Set<(error: Error) => void>()
+  private bus?: Bus
+  /** our unique name */
+  uniqueName = ''
 
-  private constructor(
-    private readonly bus: dbus.MessageBus,
-    /** our unique name */
-    readonly uniqueName: string,
-  ) {
-    bus.on('message', (message: dbus.Message) => {
-      if (message.type === dbus.MessageType.SIGNAL) {
-        this.dispatchSignal(toIncoming(message))
-      }
-    })
-    bus.addMethodHandler((message: dbus.Message) => this.handleCall(message))
-  }
+  private constructor(private readonly onError: (e: Error) => void) {}
 
   /** Connects to the session bus (DBUS_SESSION_BUS_ADDRESS). */
-  static session(onError: (e: Error) => void): Promise<DBusConnection> {
-    return new Promise((resolve, reject) => {
-      const bus = dbus.sessionBus()
-      let connected = false
-      bus.on('error', (e: Error) => (connected ? onError(e) : reject(e)))
-      bus.on('connect', () => {
-        connected = true
-        resolve(new DBusConnection(bus, (bus as unknown as { name: string }).name))
-      })
-    })
+  static async session(onError: (e: Error) => void): Promise<DBusConnection> {
+    const connection = new DBusConnection(onError)
+    connection.bus = loadAddon().openSessionBus(
+      (isCall, sender, path, iface, member, signature, body, call) => {
+        const message = { sender, path, interface: iface, member, signature, body }
+        if (!isCall) {
+          connection.dispatchSignal(message)
+          return false
+        }
+        return connection.handleCall(message, call!)
+      },
+      (error) => connection.closed(new Error(`D-Bus connection lost: ${error}`)),
+    )
+    try {
+      // the first reply comes after the bus's Hello, which gave us our name
+      await connection.call(DBUS_NAME, DBUS_PATH, 'org.freedesktop.DBus.Peer', 'Ping')
+      connection.uniqueName = loadAddon().uniqueName(connection.bus!)
+    } catch (e) {
+      connection.close()
+      throw e
+    }
+    return connection
   }
 
   close(): void {
-    this.bus.disconnect()
+    if (this.bus !== undefined) {
+      loadAddon().close(this.bus)
+      this.bus = undefined
+      this.rejectPending(new DBusError('org.freedesktop.DBus.Error.Disconnected', 'the D-Bus connection was closed'))
+    }
   }
 
   /** Calls a method; resolves with the reply's body, rejects with a DBusError (or a timeout). */
-  async call(
+  call(
     destination: string,
     path: string,
     iface: string,
@@ -102,31 +168,38 @@ export class DBusConnection {
     body: unknown[] = [],
     timeoutMs = CALL_TIMEOUT_MS,
   ): Promise<unknown[]> {
-    const message = new dbus.Message({ destination, path, interface: iface, member, signature, body })
-    let timer: NodeJS.Timeout | undefined
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new DBusError('org.freedesktop.DBus.Error.NoReply', `${member} on ${destination} timed out`)),
-        timeoutMs,
-      )
-    })
-    try {
-      const reply = await Promise.race([this.bus.call(message), timeout])
-      return reply?.body ?? []
-    } catch (e: any) {
-      if (e instanceof dbus.DBusError) {
-        throw new DBusError(e.type, e.text)
+    return new Promise((resolve, reject) => {
+      if (this.bus === undefined) {
+        reject(new DBusError('org.freedesktop.DBus.Error.Disconnected', 'the D-Bus connection is closed'))
+        return
       }
-      throw e
-    } finally {
-      clearTimeout(timer)
-    }
+      loadAddon().call(
+        this.bus,
+        destination,
+        path,
+        iface,
+        member,
+        signature,
+        body,
+        timeoutMs,
+        (errorName, errorMessage, replyBody) => {
+          this.pending.delete(reject)
+          if (errorName !== null) {
+            reject(new DBusError(errorName, errorMessage ?? ''))
+          } else {
+            resolve(replyBody ?? [])
+          }
+        },
+      )
+      // (not before: a body that doesn't match the signature throws, and that's the only answer)
+      this.pending.add(reject)
+    })
   }
 
   /** org.freedesktop.DBus.Properties.Get, the variant unwrapped. */
   async getProperty(destination: string, path: string, iface: string, name: string): Promise<unknown> {
     const [value] = await this.call(destination, path, 'org.freedesktop.DBus.Properties', 'Get', 'ss', [iface, name])
-    return value instanceof dbus.Variant ? value.value : value
+    return value instanceof Variant ? value.value : value
   }
 
   /** org.freedesktop.DBus.Properties.GetAll, the variants unwrapped. */
@@ -134,7 +207,7 @@ export class DBusConnection {
     const [values] = await this.call(destination, path, 'org.freedesktop.DBus.Properties', 'GetAll', 's', [iface])
     const properties: Record<string, unknown> = {}
     for (const [key, value] of Object.entries((values ?? {}) as Record<string, unknown>)) {
-      properties[key] = value instanceof dbus.Variant ? value.value : value
+      properties[key] = value instanceof Variant ? value.value : value
     }
     return properties
   }
@@ -178,7 +251,7 @@ export class DBusConnection {
     const entry = { rule, handler }
     this.signalHandlers.add(entry)
     return () => {
-      if (this.signalHandlers.delete(entry)) {
+      if (this.signalHandlers.delete(entry) && this.bus !== undefined) {
         this.call(DBUS_NAME, DBUS_PATH, DBUS_NAME, 'RemoveMatch', 's', [text]).catch(() => {})
       }
     }
@@ -190,7 +263,23 @@ export class DBusConnection {
   }
 
   emitSignal(path: string, iface: string, member: string, signature = '', body: unknown[] = []): void {
-    this.bus.send(dbus.Message.newSignal(path, iface, member, signature, body))
+    if (this.bus !== undefined) {
+      loadAddon().emitSignal(this.bus, path, iface, member, signature, body)
+    }
+  }
+
+  private closed(error: Error): void {
+    this.bus = undefined
+    this.rejectPending(new DBusError('org.freedesktop.DBus.Error.Disconnected', error.message))
+    this.onError(error)
+  }
+
+  private rejectPending(error: Error): void {
+    const pending = [...this.pending]
+    this.pending.clear()
+    for (const reject of pending) {
+      reject(error)
+    }
   }
 
   private dispatchSignal(message: IncomingMessage): void {
@@ -207,46 +296,33 @@ export class DBusConnection {
     }
   }
 
-  private handleCall(message: dbus.Message): boolean {
+  /** Whether the call was ours (to an exported path): then it's answered here. */
+  private handleCall(message: IncomingMessage, call: ReceivedCall): boolean {
     const handler = this.exported.get(message.path)
-    if (handler === undefined) {
+    const bus = this.bus
+    if (handler === undefined || bus === undefined) {
       return false
     }
-    const incoming = toIncoming(message)
+    const native = loadAddon()
     let reply: MethodReply | undefined
     try {
-      reply = handler(incoming)
-      if (reply === undefined && incoming.interface === 'org.freedesktop.DBus.Peer' && incoming.member === 'Ping') {
+      reply = handler(message)
+      if (reply === undefined && message.interface === 'org.freedesktop.DBus.Peer' && message.member === 'Ping') {
         reply = { signature: '', body: [] }
       }
-    } catch (e: any) {
-      const error = e instanceof DBusError ? e : new DBusError('org.freedesktop.DBus.Error.Failed', String(e?.message))
-      this.bus.send(dbus.Message.newError(message as never, error.type, error.message))
-      return true
-    }
-    if (reply === undefined) {
-      this.bus.send(
-        dbus.Message.newError(
-          message as never,
+      if (reply === undefined) {
+        throw new DBusError(
           UNKNOWN_METHOD,
           `No method ${message.member} on ${message.interface || '(none)'} at ${message.path}`,
-        ),
-      )
-    } else if (!(message.flags & dbus.MessageFlag.NO_REPLY_EXPECTED)) {
-      this.bus.send(dbus.Message.newMethodReturn(message, reply.signature, reply.body))
+        )
+      }
+      // (sd_bus doesn't send it if the caller expects no reply)
+      native.reply(bus, call, reply.signature, reply.body)
+    } catch (e: any) {
+      const error = e instanceof DBusError ? e : new DBusError('org.freedesktop.DBus.Error.Failed', String(e?.message))
+      native.replyError(bus, call, error.type, error.message)
     }
     return true
-  }
-}
-
-function toIncoming(message: dbus.Message): IncomingMessage {
-  return {
-    sender: message.sender,
-    path: message.path,
-    interface: message.interface ?? '',
-    member: message.member,
-    signature: message.signature ?? '',
-    body: message.body ?? [],
   }
 }
 

@@ -56,6 +56,18 @@ target_compile_options(nebula-patch-addon PRIVATE -O3)
 target_link_libraries(nebula-patch-addon PRIVATE PkgConfig::JPEG)
 set_target_properties(nebula-patch-addon PROPERTIES PREFIX "" SUFFIX ".node")
 
+# The session's D-Bus connection (src/shell/dbus.ts): sd_bus from libsystemd (Ubuntu: libsystemd-dev).
+pkg_check_modules(LIBSYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+add_library(nebula-dbus-addon SHARED
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/dbus/src/dbus.c
+)
+target_include_directories(nebula-dbus-addon PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/node-api
+        ${CMAKE_CURRENT_SOURCE_DIR}/native/poll/src
+)
+target_compile_options(nebula-dbus-addon PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(nebula-dbus-addon PRIVATE PkgConfig::LIBSYSTEMD)
+set_target_properties(nebula-dbus-addon PROPERTIES PREFIX "" SUFFIX ".node" C_STANDARD 11)
 
 # The session's Wayland side (ROADMAP.md, Core item 1): wlroots is a submodule (`git submodule update --init`) pinned to
 # 0.17.4 and built with meson as a static library against the system's libraries (libwayland, pixman, xkbcommon,
@@ -129,4 +141,4 @@ target_link_libraries(wlr-core-addon PRIVATE
         rt
         m
 )
-install(TARGETS wlr-core-addon proxy-poll-addon nebula-patch-addon DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/dist/addons)
+install(TARGETS wlr-core-addon proxy-poll-addon nebula-patch-addon nebula-dbus-addon DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/dist/addons)

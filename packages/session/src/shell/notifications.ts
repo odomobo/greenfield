@@ -7,13 +7,23 @@
  * Several sessions of one user may share a bus (logind's per-user bus); only one can own the name. The others queue
  * and take over when the owner ends.
  */
-import * as dbus from 'dbus-next'
+import {
+  ALREADY_OWNER,
+  DBusConnection,
+  DBusError,
+  IncomingMessage,
+  INVALID_ARGS,
+  MethodReply,
+  PRIMARY_OWNER,
+  Variant,
+} from './dbus'
 import { createLogger } from '../Logger.js'
 
 const logger = createLogger('notifications')
 
 const NAME = 'org.freedesktop.Notifications'
 const PATH = '/org/freedesktop/Notifications'
+const IFACE = 'org.freedesktop.Notifications'
 const MAX_KEPT = 50
 const MAX_TEXT = 2000
 
@@ -56,14 +66,51 @@ export function plainText(markup: string): string {
   return text.slice(0, MAX_TEXT)
 }
 
-function variantValue(hints: Record<string, dbus.Variant>, key: string): unknown {
-  return hints?.[key]?.value
+function variantValue(hints: Record<string, unknown>, key: string): unknown {
+  const value = hints?.[key]
+  return value instanceof Variant ? value.value : undefined
 }
+
+/** For apps that look before they call (gdbus introspect, D-Feet, ...). */
+const INTROSPECTION = `<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="${IFACE}">
+    <method name="GetCapabilities"><arg direction="out" type="as"/></method>
+    <method name="Notify">
+      <arg direction="in" type="s" name="app_name"/>
+      <arg direction="in" type="u" name="replaces_id"/>
+      <arg direction="in" type="s" name="app_icon"/>
+      <arg direction="in" type="s" name="summary"/>
+      <arg direction="in" type="s" name="body"/>
+      <arg direction="in" type="as" name="actions"/>
+      <arg direction="in" type="a{sv}" name="hints"/>
+      <arg direction="in" type="i" name="expire_timeout"/>
+      <arg direction="out" type="u" name="id"/>
+    </method>
+    <method name="CloseNotification"><arg direction="in" type="u" name="id"/></method>
+    <method name="GetServerInformation">
+      <arg direction="out" type="s" name="name"/>
+      <arg direction="out" type="s" name="vendor"/>
+      <arg direction="out" type="s" name="version"/>
+      <arg direction="out" type="s" name="spec_version"/>
+    </method>
+    <signal name="NotificationClosed"><arg type="u" name="id"/><arg type="u" name="reason"/></signal>
+    <signal name="ActionInvoked"><arg type="u" name="id"/><arg type="s" name="action_key"/></signal>
+  </interface>
+  <interface name="org.freedesktop.DBus.Introspectable">
+    <method name="Introspect"><arg direction="out" type="s"/></method>
+  </interface>
+  <interface name="org.freedesktop.DBus.Peer">
+    <method name="Ping"/>
+  </interface>
+</node>
+`
 
 export class NotificationServer {
   private readonly notifications: Notification[] = []
   private nextId = 1
-  private iface?: NotificationsInterface
+  private connection?: DBusConnection
   listener?: NotificationListener
 
   /** Kept notifications, oldest first. */
@@ -76,16 +123,20 @@ export class NotificationServer {
       logger.info('No session bus; apps cannot send notifications.')
       return
     }
-    const bus = dbus.sessionBus()
-    bus.on('error', (e: Error) => logger.error(`Session bus error: ${e.message}`))
-    this.iface = new NotificationsInterface(this)
-    bus.export(PATH, this.iface)
-    const reply = await bus.requestName(NAME, 0)
-    if (reply === dbus.RequestNameReply.PRIMARY_OWNER || reply === dbus.RequestNameReply.ALREADY_OWNER) {
+    const connection = await DBusConnection.session((e) => logger.error(`Session bus error: ${e.message}`))
+    this.connection = connection
+    connection.export(PATH, (call) => this.call(call))
+    const reply = await connection.requestName(NAME, 0)
+    if (reply === PRIMARY_OWNER || reply === ALREADY_OWNER) {
       logger.info('Notification server running.')
     } else {
       logger.info('Another notification server owns the name; notifications go there until it ends.')
     }
+  }
+
+  stop(): void {
+    this.connection?.close()
+    this.connection = undefined
   }
 
   notify(
@@ -94,7 +145,7 @@ export class NotificationServer {
     appIcon: string,
     summary: string,
     body: string,
-    hints: Record<string, dbus.Variant>,
+    hints: Record<string, unknown>,
     expireTimeout: number,
   ): number {
     const replaced = replacesId > 0 ? this.notifications.findIndex((n) => n.id === replacesId) : -1
@@ -127,14 +178,14 @@ export class NotificationServer {
   /** The app withdrew it. */
   closeFromApp(id: number): void {
     if (this.remove(id)) {
-      this.iface?.NotificationClosed(id, CLOSED_BY_CALL)
+      this.closed(id, CLOSED_BY_CALL)
     }
   }
 
   /** The user dismissed it. */
   dismiss(id: number): void {
     if (this.remove(id)) {
-      this.iface?.NotificationClosed(id, CLOSED_DISMISSED)
+      this.closed(id, CLOSED_DISMISSED)
     }
   }
 
@@ -142,6 +193,51 @@ export class NotificationServer {
     for (const { id } of [...this.notifications]) {
       this.dismiss(id)
     }
+  }
+
+  private closed(id: number, reason: number): void {
+    this.connection?.emitSignal(PATH, IFACE, 'NotificationClosed', 'uu', [id, reason])
+  }
+
+  private call(call: IncomingMessage): MethodReply | undefined {
+    if (call.interface === 'org.freedesktop.DBus.Introspectable' && call.member === 'Introspect') {
+      return { signature: 's', body: [INTROSPECTION] }
+    }
+    if (call.interface !== IFACE && call.interface !== '') {
+      return undefined
+    }
+    switch (call.member) {
+      case 'GetCapabilities':
+        return { signature: 'as', body: [['body']] }
+      case 'GetServerInformation':
+        return { signature: 'ssss', body: ['desktop-shell', '', '1.0', '1.2'] }
+      case 'Notify': {
+        if (call.signature !== 'susssasa{sv}i') {
+          throw new DBusError(INVALID_ARGS, `Notify takes susssasa{sv}i, not ${call.signature}`)
+        }
+        const [appName, replacesId, appIcon, summary, body, , hints, expireTimeout] = call.body as [
+          string,
+          number,
+          string,
+          string,
+          string,
+          string[],
+          Record<string, unknown>,
+          number,
+        ]
+        return {
+          signature: 'u',
+          body: [this.notify(appName, replacesId, appIcon, summary, body, hints, expireTimeout)],
+        }
+      }
+      case 'CloseNotification':
+        if (call.signature !== 'u') {
+          throw new DBusError(INVALID_ARGS, `CloseNotification takes u, not ${call.signature}`)
+        }
+        this.closeFromApp(call.body[0] as number)
+        return { signature: '', body: [] }
+    }
+    return undefined
   }
 
   private remove(id: number): boolean {
@@ -154,56 +250,3 @@ export class NotificationServer {
     return true
   }
 }
-
-class NotificationsInterface extends dbus.interface.Interface {
-  constructor(private readonly server: NotificationServer) {
-    super('org.freedesktop.Notifications')
-  }
-
-  GetCapabilities(): string[] {
-    return ['body']
-  }
-
-  Notify(
-    appName: string,
-    replacesId: number,
-    appIcon: string,
-    summary: string,
-    body: string,
-    _actions: string[],
-    hints: Record<string, dbus.Variant>,
-    expireTimeout: number,
-  ): number {
-    return this.server.notify(appName, replacesId, appIcon, summary, body, hints, expireTimeout)
-  }
-
-  CloseNotification(id: number): void {
-    this.server.closeFromApp(id)
-  }
-
-  GetServerInformation(): string[] {
-    return ['desktop-shell', '', '1.0', '1.2']
-  }
-
-  NotificationClosed(id: number, reason: number): number[] {
-    return [id, reason]
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  ActionInvoked(id: number, actionKey: string): [number, string] {
-    return [id, actionKey]
-  }
-}
-
-NotificationsInterface.configureMembers({
-  methods: {
-    GetCapabilities: { outSignature: 'as' },
-    Notify: { inSignature: 'susssasa{sv}i', outSignature: 'u' },
-    CloseNotification: { inSignature: 'u' },
-    GetServerInformation: { outSignature: 'ssss' },
-  },
-  signals: {
-    NotificationClosed: { signature: 'uu' },
-    ActionInvoked: { signature: 'us' },
-  },
-})
