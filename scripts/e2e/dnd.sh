@@ -13,7 +13,7 @@
 #      the app receives their file:// URIs.
 #
 # Requires: gcc, wayland-scanner (libwayland-dev), wayland-protocols, playwright-cli (for its Playwright library and
-# browser), curl, node, the built packages (yarn build). Usage: scripts/e2e/dnd.sh   (GATEWAY_PORT)
+# browser), curl, node, the built packages (make). Usage: scripts/e2e/dnd.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools gcc wayland-scanner playwright-cli curl node
 

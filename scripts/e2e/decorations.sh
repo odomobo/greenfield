@@ -20,7 +20,7 @@
 # E2E_SHOTS=<directory> saves screenshots of the steps there (at device pixel ratios 1 and 2, look at them).
 #
 # Requires: foot, xclock, xprop, dbus-daemon, playwright-cli (for its Playwright library and browser), curl, node, the
-# built packages (yarn build); gtk4-demo and gsettings are optional. Usage: scripts/e2e/decorations.sh   (GATEWAY_PORT)
+# built packages (make); gtk4-demo and gsettings are optional. Usage: scripts/e2e/decorations.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools foot xclock xprop Xwayland dbus-daemon playwright-cli curl node
 

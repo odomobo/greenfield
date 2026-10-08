@@ -3,9 +3,9 @@
 //! relayed as they are, unparsed.
 use nebula_login_common::session_config::json_string;
 
-/// The longest sign-in frame either side may send (SIGN_IN_MAX_FRAME_BYTES in libs/scene-protocol).
+/// The longest sign-in frame either side may send (SIGN_IN_MAX_FRAME_BYTES in packages/scene-protocol).
 pub const MAX_FRAME: usize = 4096;
-/// The sign-in failed, timed out or broke the rules (CLOSE_SIGN_IN_FAILED in libs/scene-protocol).
+/// The sign-in failed, timed out or broke the rules (CLOSE_SIGN_IN_FAILED in packages/scene-protocol).
 pub const CLOSE_SIGN_IN_FAILED: u16 = 4001;
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -94,7 +94,7 @@ pub fn close_frame(code: u16, reason: &str) -> Vec<u8> {
     frame(8, &payload)
 }
 
-/// The page's sign-in messages ("Sign-in" in libs/scene-protocol).
+/// The page's sign-in messages ("Sign-in" in packages/scene-protocol).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ClientMessage {
     Begin { username: String },

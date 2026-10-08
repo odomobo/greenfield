@@ -11,34 +11,31 @@
     "linux"
   ],
   "scripts": {
-    "build:native": "yarn run mkdirp build && cmake -G Ninja -B./build -S./ && ninja -C ./build install",
-    "build:typescript": "yarn run tsc",
-    "build": "yarn run rimraf dist types && yarn build:native && yarn build:typescript",
+    "build:native": "mkdir -p build && cmake -G Ninja -B./build -S./ && ninja -C ./build install",
+    "build:typescript": "npx tsc",
+    "build": "rm -rf dist types && npm run build:native && npx tsc",
     "test": "node --test --test-force-exit dist/encoding/test/ dist/wlroots/test/ dist/viewer/test/ dist/test/",
-    "watch": "yarn run build && yarn run tsc -w",
+    "watch": "npm run build && npx tsc -w",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write 'src/**/*.ts'"
   },
   "dependencies": {
-    "@gfld/scene-protocol": "workspace:^",
+    "@gfld/scene-protocol": "*",
     "dbus-next": "^0.10.2",
     "ws": "^8.17.1"
   },
   "devDependencies": {
     "@tsconfig/node18": "^18.2.4",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^20.14.8",
+    "@types/node": "20.14.8",
     "@types/ws": "^8.5.10",
     "@typescript-eslint/eslint-plugin": "^7.14.1",
     "@typescript-eslint/parser": "^7.14.1",
-    "cpy-cli": "^5.0.0",
     "eslint": "^8.57.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-prettier": "^5.1.3",
-    "mkdirp": "^3.0.1",
     "prettier": "^3.3.2",
-    "rimraf": "^5.0.7",
-    "typescript": "^5.5.2"
+    "typescript": "~5.5.2"
   },
   "license": "AGPL-3.0-or-later"
 }

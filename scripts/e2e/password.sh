@@ -11,7 +11,7 @@
 # The policy checks and the real pam_chauthtok call are unit-tested in packages/gatekeeper (they need PAM and root).
 #
 # Requires: dbus-daemon, playwright-cli (for its Playwright library and browser), curl, node, the built packages
-# (yarn build). Usage: scripts/e2e/password.sh   (GATEWAY_PORT)
+# (make). Usage: scripts/e2e/password.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools dbus-daemon playwright-cli curl node
 

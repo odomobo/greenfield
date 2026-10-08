@@ -9,7 +9,7 @@
 # (The size of client cursors is covered by unit tests.)
 #
 # Requires: foot, dbus-daemon, playwright-cli (for its Playwright library and browser), curl, node, the built
-# packages (yarn build). Usage: scripts/e2e/hidpi.sh   (GATEWAY_PORT)
+# packages (make). Usage: scripts/e2e/hidpi.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools foot dbus-daemon playwright-cli curl node
 

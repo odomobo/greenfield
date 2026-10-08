@@ -10,9 +10,9 @@ can disconnect and reattach at any time without the apps noticing.
 The viewer is the gateway's one page (`packages/session`, served at `/`): the sign-in form and the desktop (signing
 in attaches to the user's one desktop, starting it if needed), so it never navigates away. It opens one WebSocket,
 `/ws` (same origin), signs in on it (the server's prompts answered in-band, see "Sign-in" in
-`libs/scene-protocol`) and then uses it for the desktop ([src/connection.ts](src/connection.ts)). There is no token:
+`packages/scene-protocol`) and then uses it for the desktop ([src/connection.ts](src/connection.ts)). There is no token:
 when the WebSocket closes (a lost connection, another sign-in taking the desktop over, Log out) the page shows the
-sign-in form again, saying why. Build it with `yarn build`; see the gateway README for running everything.
+sign-in form again, saying why. Build it with `make viewer` (at the root); see the gateway README for running everything.
 
 Query parameters:
 

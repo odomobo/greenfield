@@ -7,7 +7,7 @@
 //! What the listener hands it (fds and arguments): see the crate documentation (src/lib.rs).
 //!
 //! Signing in works like unlocking a screen: the page's one WebSocket (`/ws`) is the sign-in. The page signs in on it
-//! (in-band, see "Sign-in" in libs/scene-protocol) and the same WebSocket then carries the desktop. There are no
+//! (in-band, see "Sign-in" in packages/scene-protocol) and the same WebSocket then carries the desktop. There are no
 //! tokens or cookies: when the WebSocket closes (tab closed, reloaded, network gone, another sign-in took the desktop
 //! over), the page has to sign in again. The desktop behind it keeps running until the user logs out.
 //!
@@ -254,7 +254,7 @@ impl Worker<'_> {
     }
 
     /// The page's WebSocket: complete the handshake, run the sign-in on it (prompts and answers, see "Sign-in" in
-    /// libs/scene-protocol), then relay it to the desktop. Never returns.
+    /// packages/scene-protocol), then relay it to the desktop. Never returns.
     fn upgrade(&mut self, request: &Request, helper: Option<UnixStream>, report: UnixStream) -> ! {
         if let Err(status) = http::check_upgrade(request, &self.allowed_origins) {
             self.send(&http::refuse_upgrade(status));

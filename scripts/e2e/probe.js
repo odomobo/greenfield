@@ -1,4 +1,4 @@
-// WebSocket sign-in probes for the e2e scripts (the in-band sign-in on /ws, see "Sign-in" in libs/scene-protocol).
+// WebSocket sign-in probes for the e2e scripts (the in-band sign-in on /ws, see "Sign-in" in packages/scene-protocol).
 // Usage:
 //   probe.js signin <wss-url> <origin> <user> <password>
 //       signs in; prints "<ok|fail|closed> <seconds> <close code> <message>": the outcome, the time from the answer to

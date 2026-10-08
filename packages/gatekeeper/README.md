@@ -37,8 +37,8 @@ The programs that sign users in and connect their browser to their desktop. Rust
   (memfds, mmap, poll, socket options, the sandbox's system calls).
 - `pam/nebula`: the PAM service file, installed as `/etc/pam.d/nebula`.
 
-Build: `yarn build` (here or at the root) runs `cargo build --release --locked`; `scripts/test-gateway.sh` builds it
-too. Tests: `yarn test` (`cargo test`).
+Build: `make gatekeeper` (at the root) runs `cargo build --release --locked`; `scripts/test-gateway.sh` builds it
+too. Tests: `cargo test`.
 
 ## How a sign-in goes
 

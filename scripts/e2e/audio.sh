@@ -14,7 +14,7 @@
 #   5. logging out stops the session's PipeWire daemons and capture and removes the directory.
 #
 # Skipped (exit 0) when pipewire, wireplumber, pipewire-pulse or the GStreamer pulse and opus elements are missing.
-# Requires: playwright-cli (for its Playwright library and browser), curl, node, the built packages (yarn build).
+# Requires: playwright-cli (for its Playwright library and browser), curl, node, the built packages (make).
 # Usage: scripts/e2e/audio.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 

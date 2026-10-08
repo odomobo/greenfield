@@ -11,7 +11,7 @@
 #      last word).
 #
 # Requires: gcc, libx11-dev, Xwayland, playwright-cli (for its Playwright library and browser), curl, node, the built
-# packages (yarn build). Usage: scripts/e2e/x11-move.sh   (GATEWAY_PORT)
+# packages (make). Usage: scripts/e2e/x11-move.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools gcc Xwayland playwright-cli curl node
 

@@ -223,9 +223,9 @@ fn parse_config() -> Config {
         exe.ancestors().nth(4).unwrap_or(Path::new("/")).join("session/dist")
     });
     if !session_dir.join("session-process.js").is_file() {
-        fail(&format!("no built session in {} (yarn build, or --session-dir)", session_dir.display()));
+        fail(&format!("no built session in {} (make, or --session-dir)", session_dir.display()));
     }
-    let web = web_binary().unwrap_or_else(|e| fail(&format!("no web front: {e} (yarn build)")));
+    let web = web_binary().unwrap_or_else(|e| fail(&format!("no web front: {e} (make)")));
 
     Config {
         bind_ip,

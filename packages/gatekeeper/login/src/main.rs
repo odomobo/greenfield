@@ -127,9 +127,9 @@ fn configure() -> Config {
         exe.ancestors().nth(4).unwrap_or(Path::new("/")).join("session/dist")
     });
     if !session_dir.join("session-process.js").is_file() {
-        usage_error(&format!("no built session in {} (yarn build, or --session-dir)", session_dir.display()));
+        usage_error(&format!("no built session in {} (make, or --session-dir)", session_dir.display()));
     }
-    let web_binary = web_binary().unwrap_or_else(|e| usage_error(&format!("no web front: {e} (yarn build)")));
+    let web_binary = web_binary().unwrap_or_else(|e| usage_error(&format!("no web front: {e} (make)")));
     let node = args.node.clone().or_else(find_node).unwrap_or_else(|| usage_error("no node in PATH (--node)"));
     let node = std::path::absolute(&node).unwrap_or(node);
     if !Path::new(&format!("/etc/pam.d/{PAM_SERVICE}")).exists() {

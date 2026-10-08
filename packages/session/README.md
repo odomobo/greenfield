@@ -64,7 +64,7 @@ login helper stops; closing the browser doesn't affect it.
 ## Building
 
 Ubuntu 24.04 (wlroots 0.17 needs its libwayland 1.22; 22.04 is too old). The session's Wayland side is wlroots, a git
-submodule built with meson as part of `yarn build`:
+submodule built with meson as part of `make`:
 
 ```bash
 git submodule update --init
@@ -74,13 +74,13 @@ sudo apt install build-essential cmake ninja-build meson pkg-config clang lld \
   libgraphene-1.0-dev libudev-dev libffi-dev \
   xwayland libxcb1-dev libxcb-composite0-dev libxcb-ewmh-dev libxcb-icccm4-dev libxcb-render0-dev libxcb-res0-dev \
   libxcb-xfixes0-dev
-yarn install
-yarn build
+npm install
+make
 ```
 
 The login helpers and the web front (`packages/gatekeeper`) are Rust: install a Rust toolchain with `cargo` (e.g. rustup)
 and a C compiler (the front's crypto, ring, has some C). The helpers use std and the `libc` crate only; the front adds
-rustls and ring (fetched from crates.io, pinned in `Cargo.lock`). `yarn build` runs `cargo build --release` there.
+rustls and ring (fetched from crates.io, pinned in `Cargo.lock`). `make` runs `cargo build --release` there.
 
 `clang` and `lld` build the viewer's WebAssembly patch decoder (`wasm-ld`, or `wasm-ld-18`, or `$WASM_LD`; the build says
 "install lld (apt install lld)" if it is missing).
@@ -96,7 +96,7 @@ the first X11 app connects). `GFLD_XWAYLAND=0` in the gateway's environment turn
 ## Development (no root)
 
 ```bash
-yarn build   # builds packages/gatekeeper (cargo) too
+make         # builds packages/gatekeeper (cargo) too
 env -u DISPLAY GREENFIELD_DEV_PASSWORD='choose-a-password' \
   packages/gatekeeper/target/release/nebula-dev-login --bind-port 8443
 ```
@@ -121,7 +121,7 @@ The entry point is the production login helper, `packages/gatekeeper/target/rele
 needs no PAM development package (it links `libpam.so.0` directly). One-time setup (Debian/Ubuntu):
 
 ```bash
-yarn build   # builds packages/gatekeeper (cargo) too
+make         # builds packages/gatekeeper (cargo) too
 sudo cp -a ~/greenfield /opt/greenfield            # readable by the web user and all users (not under a 0750 home)
 sudo chown -R root:root /opt/greenfield            # root runs nebula-login from here: nobody else may change it
 sudo cp "$(command -v node)" /usr/local/bin/node   # a node every user can execute (nvm's lives in your home)
@@ -211,7 +211,7 @@ state lives in the session process (src/shell), so it survives the browser going
   here: per-account lockout is PAM's job (`pam_faillock`); fail2ban can watch the helper's log (both in the login
   README).
 - Signing in works like unlocking a screen: the page's one WebSocket (`/ws`) is the sign-in. The page signs in on it
-  (in-band: the server's prompts and the page's answers, see "Sign-in" in `libs/scene-protocol/src/index.ts`) and the
+  (in-band: the server's prompts and the page's answers, see "Sign-in" in `packages/scene-protocol/src/index.ts`) and the
   same WebSocket then carries the desktop. No tokens, no cookies, no API: when the WebSocket closes (tab closed,
   reloaded, network gone, a new sign-in of the same user taking the desktop over), the page shows the sign-in form
   again. The desktop itself keeps running until the user logs out (an in-band message to the desktop).

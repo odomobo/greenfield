@@ -5,21 +5,21 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "yarn vite --config ./vite.config.ts",
+    "start": "npx vite --config ./vite.config.ts",
     "build:wasm": "node scripts/build-wasm.mjs",
-    "build": "yarn build:wasm && yarn tsc --noEmit && yarn vite build",
-    "preview": "yarn vite preview",
-    "test": "yarn build:wasm && yarn tsc -p tsconfig.test.json && node --test dist-test/test/",
+    "build": "npm run build:wasm && npx tsc --noEmit && npx vite build",
+    "preview": "npx vite preview",
+    "test": "npm run build:wasm && npx tsc -p tsconfig.test.json && node --test dist-test/test/",
     "lint": "eslint src --ext .ts,.tsx",
     "format": "prettier --write 'src/**/*.{ts,tsx}'"
   },
   "dependencies": {
-    "@gfld/scene-protocol": "workspace:^",
+    "@gfld/scene-protocol": "*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@types/node": "^20.14.8",
+    "@types/node": "20.14.8",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@typescript-eslint/eslint-plugin": "^7.14.1",
@@ -29,7 +29,7 @@
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-prettier": "^5.1.3",
     "prettier": "^3.3.2",
-    "typescript": "^5.5.2",
+    "typescript": "~5.5.2",
     "vite": "^5.3.1"
   },
   "license": "AGPL-3.0-or-later"

@@ -9,7 +9,7 @@
 #      _NET_WM_ICON when the app sets one (not every app does; reported either way);
 #   3. logging out ends the X11 app started from the terminal (xeyes' process is gone), like foot itself.
 #
-# Requires: foot, xeyes, xclock (x11-apps), Xwayland, playwright-cli, curl, node, the built packages (yarn build).
+# Requires: foot, xeyes, xclock (x11-apps), Xwayland, playwright-cli, curl, node, the built packages (make).
 # Usage: scripts/e2e/input.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools foot xeyes xclock Xwayland playwright-cli curl node

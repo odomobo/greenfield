@@ -26,7 +26,7 @@
 # (a .desktop file for foot with WAYLAND_DEBUG) in its own data dir. It runs with --dev-time-scale (see auth.sh).
 #
 # Requires: foot, dbus-daemon, notify-send, curl, node, playwright-cli (for its Playwright library and browser), the
-# built packages (yarn build). Usage: scripts/e2e/desktop.sh   (GATEWAY_PORT)
+# built packages (make). Usage: scripts/e2e/desktop.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools foot dbus-daemon notify-send playwright-cli curl node
 

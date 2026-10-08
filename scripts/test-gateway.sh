@@ -35,7 +35,7 @@
 # of scripts/e2e/auth.sh. Requires foot, dbus-daemon, notify-send,
 # Xwayland, cargo, x11-utils (xev, xfontsel, xwininfo), gst-launch-1.0 with x264enc (video.sh), gcc, wayland-scanner and
 # wayland-protocols (for the drag and drop test client), libx11-dev (for the X11 test client), playwright-cli (for its Playwright library and Chrome), curl,
-# node, and the built packages (yarn build).
+# node, and the built packages (make).
 #
 #   scripts/test-gateway.sh
 # The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it, desktop
@@ -44,7 +44,7 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
 # the dev login helper the scripts start and the web front it starts (Rust; instant when it is up to date). The rest
-# must be built (yarn build).
+# must be built (make).
 cargo build --release --locked --quiet --manifest-path "$DIR/../../packages/gatekeeper/Cargo.toml" || {
   echo "FAILED: building the gatekeeper (packages/gatekeeper)" >&2
   exit 1

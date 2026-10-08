@@ -10,7 +10,7 @@
 #   4. closes both windows from their taskbar menus (WM_DELETE_WINDOW): the apps exit.
 #
 # Requires: xev, xfontsel, xwininfo (x11-utils), Xwayland, playwright-cli (for its Playwright library and browser),
-# curl, node, the built packages (yarn build). Usage: scripts/e2e/x11.sh   (GATEWAY_PORT)
+# curl, node, the built packages (make). Usage: scripts/e2e/x11.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools xev xfontsel xwininfo Xwayland stdbuf playwright-cli curl node
 

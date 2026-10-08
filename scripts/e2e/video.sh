@@ -12,7 +12,7 @@
 #      with alpha), where alpha of 254 or more comes out fully opaque.
 #
 # Requires: gst-launch-1.0 with x264enc, playwright-cli (for its Playwright library and Chrome), curl, node, the built
-# packages (yarn build). Usage: scripts/e2e/video.sh   (GATEWAY_PORT)
+# packages (make). Usage: scripts/e2e/video.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools gst-launch-1.0 playwright-cli curl node
 

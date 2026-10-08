@@ -11,7 +11,7 @@
 #      the text just pasted is not sent back to the browser as a new selection (the browser's clipboard is untouched).
 #
 # Requires: foot, playwright-cli (for its Playwright library and browser), curl, node, base64, the built packages
-# (yarn build). Usage: scripts/e2e/clipboard.sh   (GATEWAY_PORT)
+# (make). Usage: scripts/e2e/clipboard.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools foot playwright-cli curl node base64
 

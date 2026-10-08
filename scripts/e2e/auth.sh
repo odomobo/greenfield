@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end test of the gateway's sign-in and isolation: no browser, only curl and WebSocket probes (probe.js), which
-# speak the in-band sign-in on the page's WebSocket (see "Sign-in" in libs/scene-protocol).
+# speak the in-band sign-in on the page's WebSocket (see "Sign-in" in packages/scene-protocol).
 #
 # Starts the gateway (the dev login helper, see lib.sh) on $GATEWAY_PORT, then checks:
 #   - unsafe flag combinations are refused, and there is no plain-HTTP mode; the production login helper (nebula-login,
@@ -36,7 +36,7 @@ gateway --dev-time-scale 0 --bind-ip 127.0.0.1 --bind-port "$PORT" >/dev/null 2>
   fail "an invalid time scale was accepted"
 # the production login helper has no dev options, and needs root
 PRODUCTION_HELPER="$REPO/packages/gatekeeper/target/release/nebula-login"
-[ -x "$PRODUCTION_HELPER" ] || fail "build the login helpers first: (cd packages/gatekeeper && yarn build)"
+[ -x "$PRODUCTION_HELPER" ] || fail "build the login helpers first: make gatekeeper"
 OUTPUT="$("$PRODUCTION_HELPER" --bind-ip 127.0.0.1 --bind-port "$PORT" 2>&1)" &&
   fail "the production login helper started without root"
 [[ "$OUTPUT" == *"must be started as root"* ]] || fail "the production login helper didn't refuse for want of root"

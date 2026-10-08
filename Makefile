@@ -2,18 +2,16 @@
 
 all: session viewer gatekeeper
 
-# --- libs ---
+# --- packages (TS) ---
 
 scene-protocol:
-	cd libs/scene-protocol && yarn run tsc
-
-# --- packages (TS + C) ---
+	cd packages/scene-protocol && npx tsc
 
 session: scene-protocol
-	cd packages/session && yarn run rimraf dist types && yarn build:native && yarn build:typescript && node dist/build-dconf.js && node dist/build-audio.js
+	cd packages/session && rm -rf dist types && npm run build:native && npx tsc && node dist/build-dconf.js && node dist/build-audio.js
 
 viewer: scene-protocol
-	cd packages/viewer && yarn build:wasm && yarn tsc --noEmit && yarn vite build
+	cd packages/viewer && npm run build:wasm && npx tsc --noEmit && npx vite build
 
 # --- packages (Rust) ---
 
@@ -23,7 +21,7 @@ gatekeeper:
 # --- housekeeping ---
 
 clean:
-	rm -rf libs/scene-protocol/dist libs/scene-protocol/types
+	rm -rf packages/scene-protocol/dist packages/scene-protocol/types
 	rm -rf packages/session/build packages/session/dist packages/session/types
 	rm -rf packages/viewer/dist
 	cd packages/gatekeeper && cargo clean

@@ -69,7 +69,7 @@ require_tools() {
   done
   [ -f "$REPO/packages/session/dist/session-process.js" ] || fail "build the session first: make session"
   [ -x "$LOGIN_HELPER" ] || fail "build the gatekeeper first: make gatekeeper"
-  [ -f "$REPO/packages/viewer/dist/index.html" ] || fail "build the viewer first: (cd packages/viewer && yarn build)"
+  [ -f "$REPO/packages/viewer/dist/index.html" ] || fail "build the viewer first: make viewer"
 }
 
 # Run the dev login helper in the foreground: gateway <args...> (no environment of its own, for refusal checks)

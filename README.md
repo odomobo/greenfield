@@ -17,7 +17,7 @@ manager, the desktop shell, and the input handling. Sign-in is PAM, over TLS, pr
 
 | Directory | Language | What |
 |---|---|---|
-| `libs/scene-protocol` | TypeScript | Wire protocol (windows, frames, control messages) |
+| `packages/scene-protocol` | TypeScript | Wire protocol (windows, frames, control messages) |
 | `packages/viewer` | TypeScript, React, C→WASM | Browser client: sign-in, desktop shell, window management, decoding |
 | `packages/session` | TypeScript, C (Node addons, wlroots) | Per-user desktop: compositor, encoding, transport, shell service, audio |
 | `packages/gatekeeper` | Rust | Login helpers (PAM + dev), web front (TLS, HTTP, WebSocket, seccomp sandbox) |
@@ -26,9 +26,9 @@ manager, the desktop shell, and the input handling. Sign-in is PAM, over TLS, pr
 ## Building
 
 ```sh
-yarn install    # JS dependencies (once, or after changing package.json)
-make            # builds everything: scene-protocol, session, viewer, login
-make login      # just the Rust side
+npm install     # JS dependencies (once, or after changing package.json)
+make            # builds everything: scene-protocol, session, viewer, gatekeeper
+make gatekeeper # just the Rust side
 make viewer     # just the browser client
 ```
 

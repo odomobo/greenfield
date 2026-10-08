@@ -10,7 +10,7 @@
 # No GPU acceleration is assumed: the gateway runs with --encoder none (lib.sh).
 #
 # Requires: gcc, wayland-scanner (libwayland-dev), wayland-protocols, foot, playwright-cli, curl, node, the built
-# packages (yarn build). Usage: scripts/e2e/busy.sh   (GATEWAY_PORT)
+# packages (make). Usage: scripts/e2e/busy.sh   (GATEWAY_PORT)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_tools gcc wayland-scanner foot playwright-cli curl node
 
