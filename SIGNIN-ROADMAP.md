@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–7, 10, 11 and 13 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–7, 9, 10, 11 and 13 are implemented; the rest is not.
 
 ## Why
 
@@ -401,7 +401,7 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
     options.
   - **For later steps**: step 8 can sandbox the worker after it has mapped its memfds and built its TLS
     configuration (it needs read/write/sendmsg/recvmsg/poll/close/getrandom/exit and nothing that opens files); step 9
-    replaces fd 7 (the key) with a signing channel to the listener; step 12 changes only `http::route` (cache headers)
+    replaces fd 7 (the key) with a signing channel to the listener (done: fd 8, see step 9); step 12 changes only `http::route` (cache headers)
     and the bundle; for step 13's socket activation, `nebula-web` takes the listening socket as an inherited fd at any
     number (`--listen-fd`).
 
@@ -417,6 +417,33 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 
 - Workers ask the listener to sign their handshake through rustls's signing-key interface. The listener signs only
   the exact TLS 1.3 CertificateVerify layout, once per worker. An exploited worker can't copy the key.
+- As built:
+  - **fds**: fd 7 of a worker is still a sealed memfd, now holding only the public part: the key's TLS 1.3 signature
+    schemes and the certificate chain (DER; layout in `web/src/tls.rs`). New fd 8 is the signing channel, a
+    `SOCK_SEQPACKET` socket pair the listener creates per worker (packets, so the listener's loop never reassembles a
+    request). Documented in `web/src/lib.rs`.
+  - **Worker** (`web/src/signing.rs`, `RemoteKey`): rustls's `SigningKey`/`Signer`; `choose_scheme` picks the first of
+    the key's schemes the client offers, `sign` writes one packet (the scheme as u16, then the message rustls gives
+    it, which is the whole CertificateVerify content, not a hash) and blocks reading the signature (read and write
+    timeouts of 10 s, the handshake's, set at setup). EOF means refused and fails the handshake. The channel needs only
+    read/write on an fd the worker already has (for step 8's filter).
+  - **Listener**: polls each worker's channel with its report socket and signs inline in its one-threaded loop (ECDSA
+    P-256 about 0.1 ms, RSA 2048 1–2 ms, RSA 4096 about 10 ms; at most one per worker, so even 256 workers at once
+    delay accepting by well under a second). It checks the packet strictly: a TLS 1.3 scheme (no RSA PKCS#1, SHA-1,
+    SHA-224) the key supports, then exactly 64 bytes 0x20, `TLS 1.3, server CertificateVerify`, a 0 byte and a hash
+    as long as one of the cipher suites' hashes (32 or 48 bytes: the listener can't know which suite the worker
+    negotiated, so either). It signs with rustls's own signer for the key, then closes the channel whether it signed
+    or refused: one request per worker. A refusal is logged.
+  - **Keys**: whatever rustls's ring provider loads (`any_supported_type`): RSA (PKCS#1 or PKCS#8, signed with
+    RSA-PSS), ECDSA P-256 (the generated key) and P-384, Ed25519. The listener checks at startup that the key is the
+    leaf certificate's (`keys_match`) and can sign in TLS 1.3. `--cert` now holds the chain only and `--key` the key
+    (before, a key in either file was found).
+  - **What an exploited worker still gets**: one signature over a CertificateVerify with a transcript hash of its
+    choosing, i.e. one handshake as the server (it could relay another client's handshake to it once). It can't get
+    the key or a second signature without a new TCP connection (and so a new worker, within the listener's caps).
+  - **Tests**: `web/src/signing.rs` (the layout check, a second request refused, oversized packets),
+    `web/src/tls.rs` (the public memfd), `web/tests/listener.rs` (handshakes with the generated ECDSA key and an RSA
+    key, a mismatched key refused at startup); every e2e page load does the handshake through the listener.
 
 ### 10. Per-IP failure backoff
 
