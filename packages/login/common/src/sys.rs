@@ -1,5 +1,6 @@
-//! The system calls std doesn't wrap: fd passing, socket pairs, flock, poll, signals, fork and waitpid, the passwd
-//! database. Everything unsafe in the helpers is in this module.
+//! The system calls std doesn't wrap: fd passing, socket pairs, peer credentials, flock, poll, signals, fork and
+//! waitpid, the passwd and group databases, changing to another user. Everything unsafe in the helpers is in this
+//! module, apart from the production helper's PAM bindings (login/src/pam.rs) and `pre_exec` in spawn.rs.
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
@@ -132,11 +133,62 @@ pub fn duplicate_above(fd: RawFd, minimum: RawFd) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(new) })
 }
 
-/// For `pre_exec` (async-signal-safe): put each source fd at its target number (without close-on-exec), and have
-/// `parent_death_signal` sent to the child when its parent dies (unless the parent `expected_parent` is gone already).
-pub fn child_setup(fds: &[(RawFd, RawFd)], parent_death_signal: Option<libc::c_int>, expected_parent: libc::pid_t) -> io::Result<()> {
+/// Who a started process runs as (see `become_user`). Prepared before forking: the child only makes system calls.
+#[derive(Clone, Debug)]
+pub struct Credentials {
+    pub uid: libc::uid_t,
+    pub gid: libc::gid_t,
+    /// the supplementary groups (`group_list`)
+    pub groups: Vec<libc::gid_t>,
+    /// the working directory to change to as that user ("/" if it can't)
+    pub dir: CString,
+}
+
+impl Credentials {
+    /// A user's credentials: their groups from the group database, their home directory.
+    pub fn of(user: &User) -> io::Result<Credentials> {
+        Ok(Credentials {
+            uid: user.uid,
+            gid: user.gid,
+            groups: group_list(&user.name, user.gid)?,
+            dir: CString::new(user.home.clone()).unwrap_or_else(|_| c"/".to_owned()),
+        })
+    }
+}
+
+/// For `pre_exec` (async-signal-safe): drop from root to `credentials` (groups, then gid, then uid), verify that root
+/// can't be regained, and change to its directory. Never returns Ok with privileges left.
+pub fn become_user(credentials: &Credentials) -> io::Result<()> {
+    let Credentials { uid, gid, groups, dir } = credentials;
+    check(unsafe { libc::setgroups(groups.len(), groups.as_ptr()) })?;
+    check(unsafe { libc::setgid(*gid) })?;
+    check(unsafe { libc::setuid(*uid) })?;
+    // never continue with privileges that were supposed to be dropped
+    let regained = *uid != 0 && unsafe { libc::setuid(0) } == 0;
+    let ids_wrong = unsafe { libc::getuid() != *uid || libc::geteuid() != *uid || libc::getgid() != *gid || libc::getegid() != *gid };
+    if regained || ids_wrong {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "privileges were not dropped"));
+    }
+    if unsafe { libc::chdir(dir.as_ptr()) } != 0 {
+        check(unsafe { libc::chdir(c"/".as_ptr()) })?;
+    }
+    Ok(())
+}
+
+/// For `pre_exec` (async-signal-safe): put each source fd at its target number (without close-on-exec), become
+/// `credentials` (if any), and have `parent_death_signal` sent to the child when its parent dies (unless the parent
+/// `expected_parent` is gone already). The parent death signal is set last: changing credentials clears it.
+pub fn child_setup(
+    fds: &[(RawFd, RawFd)],
+    credentials: Option<&Credentials>,
+    parent_death_signal: Option<libc::c_int>,
+    expected_parent: libc::pid_t,
+) -> io::Result<()> {
     for &(source, target) in fds {
         check(unsafe { libc::dup2(source, target) })?;
+    }
+    if let Some(credentials) = credentials {
+        become_user(credentials)?;
     }
     if let Some(signal) = parent_death_signal {
         check(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, signal as libc::c_ulong, 0, 0, 0) })?;
@@ -149,7 +201,49 @@ pub fn child_setup(fds: &[(RawFd, RawFd)], parent_death_signal: Option<libc::c_i
 
 /// Have `signal` sent to this process when its parent dies (fails if the parent `expected_parent` is gone already).
 pub fn set_parent_death_signal(signal: libc::c_int, expected_parent: libc::pid_t) -> io::Result<()> {
-    child_setup(&[], Some(signal), expected_parent)
+    child_setup(&[], None, Some(signal), expected_parent)
+}
+
+/// The uid of the process at the other end of a connected Unix socket (SO_PEERCRED).
+pub fn peer_uid(socket: RawFd) -> io::Result<libc::uid_t> {
+    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    check(unsafe {
+        libc::getsockopt(
+            socket,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut credentials as *mut libc::ucred as *mut libc::c_void,
+            &mut length,
+        )
+    })?;
+    Ok(credentials.uid)
+}
+
+/// A user's groups (the primary `gid` and the supplementary ones), from the group database.
+pub fn group_list(name: &str, gid: libc::gid_t) -> io::Result<Vec<libc::gid_t>> {
+    let name = CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid user name"))?;
+    let mut groups: Vec<libc::gid_t> = vec![0; 64];
+    loop {
+        let mut count = groups.len() as libc::c_int;
+        let result = unsafe { libc::getgrouplist(name.as_ptr(), gid, groups.as_mut_ptr(), &mut count) };
+        if result >= 0 {
+            groups.truncate(count.max(0) as usize);
+            return Ok(groups);
+        }
+        // too small: count is how many there are
+        if groups.len() >= 65536 {
+            return Err(io::Error::new(io::ErrorKind::Other, "too many groups"));
+        }
+        groups.resize((count as usize).max(groups.len() * 2), 0);
+    }
+}
+
+/// alarm(2): SIGALRM (by default ending the process) after `seconds`; 0 cancels.
+pub fn alarm(seconds: u32) {
+    unsafe {
+        libc::alarm(seconds);
+    }
 }
 
 pub fn getpid() -> libc::pid_t {
@@ -245,6 +339,7 @@ pub struct User {
     pub uid: libc::uid_t,
     pub gid: libc::gid_t,
     pub home: String,
+    pub shell: String,
 }
 
 fn user_from(entry: &libc::passwd) -> User {
@@ -255,7 +350,7 @@ fn user_from(entry: &libc::passwd) -> User {
             unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned()
         }
     };
-    User { name: text(entry.pw_name), uid: entry.pw_uid, gid: entry.pw_gid, home: text(entry.pw_dir) }
+    User { name: text(entry.pw_name), uid: entry.pw_uid, gid: entry.pw_gid, home: text(entry.pw_dir), shell: text(entry.pw_shell) }
 }
 
 /// The passwd entry of a uid.
@@ -292,5 +387,22 @@ fn lookup(
             return Err(io::Error::new(io::ErrorKind::NotFound, "no such user"));
         }
         return Ok(user_from(&entry));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_uid_of_a_socket_pair() {
+        let (a, _b) = socket_pair().unwrap();
+        assert_eq!(peer_uid(a.as_raw_fd()).unwrap(), getuid());
+    }
+
+    #[test]
+    fn groups_include_the_primary_group() {
+        let user = user_by_uid(getuid()).unwrap();
+        assert!(group_list(&user.name, user.gid).unwrap().contains(&user.gid));
     }
 }

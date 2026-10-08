@@ -18,6 +18,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nebula-login"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nebula-login-common",
+ "nebula-login-protocol",
+]
+
+[[package]]
 name = "nebula-login-common"
 version = "0.1.0"
 dependencies = [

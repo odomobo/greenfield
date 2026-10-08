@@ -14,7 +14,9 @@
 //!   - a child that started a desktop stays as its parent until it exits (the PAM parent, in production);
 //!   - SIGTERM / SIGINT stop the web process and the desktops (they end their apps first).
 use nebula_login_common::desktop::{self, Desktop};
-use nebula_login_common::{channel::Channel, log, spawn::spawn_with_fds, sys};
+use nebula_login_common::session_config::{self, json_string, SESSION_CONFIG_FD, SESSION_LISTEN_FD};
+use nebula_login_common::spawn::{spawn_with_fds, wait_passing_terminate};
+use nebula_login_common::{channel::Channel, log, sys};
 use nebula_login_protocol::{is_loopback, Outcome, PromptStyle, Record};
 use std::fs;
 use std::io::{self, Write};
@@ -62,9 +64,6 @@ const BEGIN_TIMEOUT: Duration = Duration::from_secs(10);
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(75);
 /// How long a stopping helper waits for its desktops (they give their apps 5 s to quit, then kill them).
 const DESKTOP_EXIT_TIMEOUT: Duration = Duration::from_secs(8);
-/// The fds a desktop is started with: its SessionConfig and its listening socket.
-const SESSION_CONFIG_FD: i32 = 3;
-const SESSION_LISTEN_FD: i32 = 4;
 /// The web process's listening TCP socket.
 const WEB_LISTEN_FD: i32 = 3;
 const PASSWORD_VARIABLE: &str = "GREENFIELD_DEV_PASSWORD";
@@ -278,34 +277,16 @@ fn start_web(config: &Config, listener: TcpListener) -> io::Result<std::process:
     spawn_with_fds(&mut command, vec![(OwnedFd::from(listener), WEB_LISTEN_FD)], Some(libc::SIGTERM))
 }
 
-fn json_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// The desktop's SessionConfig record (see packages/gateway/src/session-config.ts).
+/// The desktop's SessionConfig record, with the dev flags.
 fn session_config(config: &Config, site_settings: &Option<PathBuf>) -> String {
-    let site = site_settings
-        .as_ref()
-        .map(|path| format!(",\"siteSettingsPath\":{}", json_string(&path.to_string_lossy())))
-        .unwrap_or_default();
-    format!(
-        "{{\"version\":1,\"listenFd\":{SESSION_LISTEN_FD}{site},\"devFlags\":{{\"timeScale\":{},\"linkKbps\":{},\"patchOrder\":{},\"patchShape\":{}}}}}",
+    let dev_flags = format!(
+        "{{\"timeScale\":{},\"linkKbps\":{},\"patchOrder\":{},\"patchShape\":{}}}",
         config.time_scale,
         config.link_kbps,
         json_string(&config.patch_order),
         json_string(&config.patch_shape)
-    )
+    );
+    session_config::session_config(site_settings.as_deref(), Some(&dev_flags))
 }
 
 /// Start a desktop (as the current user) that inherits `listener`; its pid.
@@ -415,27 +396,15 @@ fn sign_in(config: &Config, site_settings: &Option<PathBuf>, connection: UnixStr
 
 /// As a desktop's parent: wait for it to exit; SIGTERM / SIGINT are passed on to it.
 fn wait_desktop(config: &Config, pid: libc::pid_t) -> i32 {
-    if let Err(e) = sys::catch_terminate() {
-        log::error(&format!("Can't handle signals: {e}"));
-    }
-    let mut forwarded = false;
-    loop {
-        match sys::wait_child(pid, false) {
-            Ok(Some((_, status))) => {
-                log::info(&format!("Desktop {pid} of {} exited ({}).", config.user.name, sys::describe_status(status)));
-                return 0;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                log::error(&format!("Waiting for desktop {pid} failed: {e}"));
-                return 1;
-            }
+    match wait_passing_terminate(pid) {
+        Ok(status) => {
+            log::info(&format!("Desktop {pid} of {} exited ({}).", config.user.name, sys::describe_status(status)));
+            0
         }
-        if sys::terminate_requested() && !forwarded {
-            sys::kill(pid, libc::SIGTERM);
-            forwarded = true;
+        Err(e) => {
+            log::error(&format!("Waiting for desktop {pid} failed: {e}"));
+            1
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
 }
 

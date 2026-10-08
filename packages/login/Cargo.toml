@@ -3,7 +3,7 @@
 # libpam).
 [workspace]
 resolver = "2"
-members = ["protocol", "common", "dev-login"]
+members = ["protocol", "common", "dev-login", "login"]
 
 [workspace.package]
 version = "0.1.0"
