@@ -1,7 +1,7 @@
 //! nebula-login: the production login helper and the nebula service's entry point. Runs as root.
 //!
 //! What it does (see SIGNIN-ROADMAP.md, steps 4 and 5, and packages/login/README.md):
-//!   - binds the TCP port and starts the web process (`node web.js --listen-fd 3 --login-socket <runtime>/login.sock`)
+//!   - binds the TCP port (or, started by a systemd socket unit, uses the socket systemd passes: LISTEN_FDS) and starts the web process (`node web.js --listen-fd 3 --login-socket <runtime>/login.sock`)
 //!     as the unprivileged web user (`--web-user`, default nebula-web), with the listening socket as fd 3;
 //!   - accepts the web process's connections on `<runtime>/login.sock` (only from the web user: SO_PEERCRED; the
 //!     listener opens one for every TCP connection, most never become a sign-in), at most MAX_ATTEMPTS at a time, and
@@ -18,6 +18,7 @@
 //! It contains no dev code: the dev helper is a separate binary (dev-login).
 #![deny(unsafe_code)]
 
+mod activation;
 mod args;
 mod attempt;
 mod pam;
@@ -223,6 +224,28 @@ fn prepare_state_dir(config: &Config) -> io::Result<()> {
     }
 }
 
+/// The TCP listening socket: the one systemd passed (socket activation; --bind-ip / --bind-port don't apply then), or
+/// one bound here.
+fn listening_socket(bind_ip: IpAddr, bind_port: u16) -> TcpListener {
+    match activation::from_environment() {
+        Ok(None) => TcpListener::bind((bind_ip, bind_port))
+            .unwrap_or_else(|e| fatal(format!("Listening on {bind_ip}:{bind_port} failed: {e}"))),
+        Ok(Some(1)) => {
+            let listener = sys::adopt_tcp_listener(activation::LISTEN_FDS_START)
+                .unwrap_or_else(|e| fatal(format!("The socket systemd passed is not usable: {e}")));
+            match listener.local_addr() {
+                Ok(address) => log::info(&format!("Using the socket passed by systemd, listening on {address}.")),
+                Err(_) => log::info("Using the socket passed by systemd."),
+            }
+            listener
+        }
+        Ok(Some(count)) => {
+            fatal(format!("systemd passed {count} sockets; nebula.socket must have exactly one ListenStream"))
+        }
+        Err(e) => fatal(format!("Bad socket activation environment: {e}")),
+    }
+}
+
 /// The web process, as the web user, with the listening socket.
 fn start_web(config: &Config, listener: TcpListener) -> io::Result<std::process::Child> {
     let mut command = Command::new(&config.node);
@@ -368,8 +391,7 @@ fn main() {
     prepare_site_settings(&mut config).unwrap_or_else(|e| fatal(format!("Writing the site settings failed: {e}")));
     prepare_state_dir(&config).unwrap_or_else(|e| fatal(format!("Preparing the state directory failed: {e}")));
     let (bind_ip, bind_port) = (config.args.bind_ip, config.args.bind_port);
-    let tcp = TcpListener::bind((bind_ip, bind_port))
-        .unwrap_or_else(|e| fatal(format!("Listening on {bind_ip}:{bind_port} failed: {e}")));
+    let tcp = listening_socket(bind_ip, bind_port);
     if let Err(e) = sys::catch_terminate() {
         fatal(format!("Can't handle signals: {e}"));
     }

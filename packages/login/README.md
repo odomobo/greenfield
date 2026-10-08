@@ -63,3 +63,37 @@ The runtime directory (dev: `--runtime-dir`, default `$XDG_RUNTIME_DIR/nebula-de
 root's, 0755) holds `login.sock` and the helper-owned `users/<uid>/` directories (production: root's, 0755; the
 socket and the lock are root's, 0600). The helper's main loop keeps no per-user state:
 whether a desktop runs is whether its socket accepts.
+
+## systemd
+
+`systemd/nebula.socket` and `systemd/nebula.service` (install steps in [packages/gateway/README.md](../gateway/README.md#as-a-systemd-service)).
+systemd stays optional: without it `nebula-login` binds `--bind-ip` / `--bind-port` itself.
+
+- **Socket activation.** `nebula.socket` listens (`ListenStream=443`); when it starts the service, systemd sets
+  `LISTEN_PID` (the helper's pid) and `LISTEN_FDS=1` and passes the socket as fd 3. `nebula-login` parses that by hand
+  (`login/src/activation.rs`: ignored if `LISTEN_PID` is not its own pid, an error for nonsense or more than one
+  socket), checks the descriptor is a listening TCP socket (`sys::adopt_tcp_listener`) and uses it instead of
+  binding; from there the web process gets it exactly as before. The helper still runs as root (it has to start user
+  sessions); the benefit is one place for the port and address, and starting on demand.
+- **Stopping ends the desktops.** `KillMode=mixed`: SIGTERM goes to `nebula-login` only; it stops the web process and
+  its sign-in children, which pass SIGTERM to their desktops (apps get 5 s to quit); it waits 8 s, then kills the
+  rest. `TimeoutStopSec=20` covers that. A control-group kill would not reach the desktops: `pam_systemd` moves each PAM
+  parent into the user's session scope. A desktop also has `PR_SET_PDEATHSIG`, so a killed PAM parent ends it.
+  `RuntimeDirectory=nebula` removes `/run/nebula` (stale sockets) when the service stops.
+- **Hardening, and why so little.** The unit's restrictions are inherited by every desktop and app (they descend from
+  the helper, whatever cgroup they are in), and the helper must run PAM modules (`pam_unix`, `pam_systemd`,
+  `pam_mount`), `setuid`, and `pam_limits`. So these are *not* used: `NoNewPrivileges` (breaks sudo, polkit, bwrap,
+  `unix_chkpwd`), `CapabilityBoundingSet` (needs at least setuid/setgid/chown/dac_*/sys_admin for pam_mount, and
+  limits users' setuid programs), `ProtectSystem` / `ProtectHome` / `PrivateTmp` / `PrivateDevices` (mount namespace
+  shared with every desktop: read-only `/usr` and `/etc`, no homes, no `/dev/dri`, a private `/tmp`),
+  `ProtectKernel*`, `SystemCallFilter`, `MemoryDenyWriteExecute` (node's JIT), `RestrictNamespaces` (browsers, flatpak),
+  `RestrictRealtime`. Used: `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` (a seccomp filter; netlink
+  for logind/resolver; drop the line if users' apps need AF_PACKET or Bluetooth).
+- **The front (web process and workers).** The roadmap names `NoNewPrivileges`, an empty capability set and
+  `ProtectSystem` for it, but the front is started by the helper, not by systemd, so those can't apply to it without
+  also applying to the desktops. It is hardened where it is started and in itself: an unprivileged user (groups,
+  gid, uid dropped and verified), a cleared environment, `PR_SET_PDEATHSIG`, only the listening socket and
+  `login.sock` access, non-dumpable workers (step 6); the sandbox of step 8 (`no_new_privs`, seccomp, no filesystem
+  access, rlimits) is applied by the workers themselves, and is where `NoNewPrivileges` and an empty capability set
+  for the front belong. Dropping the helper's inheritable/ambient caps for the front when it starts it can go with
+  that step.

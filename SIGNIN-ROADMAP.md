@@ -391,6 +391,18 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 - systemd stays optional: without it, the helper binds the port as in step 5.
 - Stopping the service ends the running desktops (see "Why this shape"); nothing extra is built for it.
 - Ties in with the install script item in ROADMAP.md.
+- As built:
+  - **Units** in `packages/login/systemd/` (`nebula.socket`, `nebula.service`); install steps in
+    `packages/gateway/README.md` ("As a systemd service"), reasoning in `packages/login/README.md` ("systemd").
+  - **Socket activation**: `login/src/activation.rs` parses `LISTEN_PID` / `LISTEN_FDS` (unit-tested), `main.rs`
+    `listening_socket` adopts fd 3 (`sys::adopt_tcp_listener`: stream, listening, AF_INET/INET6, close-on-exec) instead
+    of binding; exactly one socket. Without the variables it binds as before.
+  - **Hardening**: the unit's settings reach every desktop and app, so only `RestrictAddressFamilies=AF_UNIX AF_INET
+    AF_INET6 AF_NETLINK` is set; `NoNewPrivileges`, the capability set and `ProtectSystem` are left out of the helper's
+    unit on purpose (they'd break PAM sessions and users' setuid programs, mounts, `/dev/dri`). The front gets those
+    in step 8's sandbox (in the workers) and from the helper's drop to an unprivileged user, not from systemd.
+  - **Stopping**: `KillMode=mixed`, `TimeoutStopSec=20` (the helper's own shutdown does the work; desktops sit in
+    session scopes outside the unit's cgroup, so a cgroup kill wouldn't reach them).
 
 ## Order and parallelism
 
@@ -438,7 +450,12 @@ Once everything is done, the user checks with sudo and real PAM:
 - reattaching to a running desktop, and takeover;
 - Log out closing the PAM session (`pam_close_session` runs, `pam_mount` unmounts);
 - `PAM_RHOST` showing the client IP in the auth log;
-- a killed PAM parent ending its desktop.
+- a killed PAM parent ending its desktop;
+- the systemd units (step 13): install them, `systemctl enable --now nebula.socket`, connect (the service starts and
+  logs "Using the socket passed by systemd"), sign in, then `systemctl stop nebula.service`: the desktop ends, the
+  session scope goes away (`loginctl list-sessions`), `/run/nebula` is removed, and a new connection restarts the
+  service; also `systemctl start nebula.service` without the socket unit's help and a sign-in with
+  `RestrictAddressFamilies` active (apps still reach the network, `getent hosts` works in a desktop terminal).
 
 ## Not planned
 

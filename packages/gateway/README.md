@@ -130,6 +130,24 @@ Run:
 sudo env -u DISPLAY /opt/greenfield/packages/login/target/release/nebula-login --bind-port 443 --node /usr/local/bin/node
 ```
 
+### As a systemd service
+
+`packages/login/systemd/` has `nebula.socket` (`ListenStream=443`) and `nebula.service` (`nebula-login`). systemd binds
+the port and passes the socket to `nebula-login` (the `LISTEN_FDS` / `LISTEN_PID` protocol, implemented by hand); it
+hands it on to the web process as it does a socket it binds itself. `--bind-ip` / `--bind-port` are ignored then.
+Without systemd nothing changes: the helper binds the port.
+
+```bash
+sudo cp /opt/greenfield/packages/login/systemd/nebula.{socket,service} /etc/systemd/system/
+sudoedit /etc/systemd/system/nebula.service   # ExecStart: --node and the options you use (cert, origin, ...)
+sudo systemctl daemon-reload
+sudo systemctl enable --now nebula.socket     # the service starts on the first connection
+```
+
+`systemctl stop nebula.service` ends the running desktops (SIGTERM to the helper, which has its apps given 5 s to
+quit); `systemctl restart nebula.service` does too. Only hardening that doesn't break user sessions is set (see
+[packages/login/README.md](../login/README.md#systemd)). This is part of the install script item in ROADMAP.md.
+
 Options (`--help` lists everything): `--bind-ip` / `--bind-port`, `--cert/--key` for a real certificate (readable by
 the web user; default: a self-signed one in `--state-dir`, default `/var/lib/nebula`, which the helper creates for the
 web user and refuses if it belongs to someone else), `--hide-hostname`, `--allowed-origin` (behind a reverse proxy),

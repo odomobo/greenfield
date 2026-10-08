@@ -1,0 +1,51 @@
+# nebula-login: the production login helper and the service's entry point. It runs as root, because it must start
+# user sessions (PAM, setuid/setgid, pam_systemd, pam_mount); started through nebula.socket it takes the listening
+# socket from systemd (sd_listen_fds protocol) and hands it to the web process (nebula-web, an unprivileged user)
+# exactly as it does for a socket it binds itself. See packages/login/README.md for what is and isn't hardened here.
+[Unit]
+Description=nebula remote desktop (login helper, web process and desktops)
+Documentation=file:///opt/greenfield/packages/login/README.md
+Requires=nebula.socket
+After=nebula.socket network.target systemd-logind.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+# Adjust --node (a node every user can execute) and the installation path. Options: nebula-login --help.
+ExecStart=/opt/greenfield/packages/login/target/release/nebula-login --node /usr/local/bin/node
+Restart=on-failure
+RestartSec=2
+
+# --- Stopping ends the running desktops ---
+# SIGTERM goes to nebula-login only (mixed): it stops the web process and tells each PAM parent, which passes it on
+# to its desktop; the desktops give their apps 5 s to quit, then close the PAM sessions. nebula-login waits up to 8 s
+# for all of that and kills what is left. (The desktops' processes are not in this unit's control group: pam_systemd
+# moves each PAM parent into the user's session scope, so a control-group kill would not reach them. A desktop also
+# has PR_SET_PDEATHSIG, so it ends if its PAM parent is killed.) Whatever is still in the unit's group after the
+# timeout is killed with SIGKILL.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# The runtime directory (login.sock, the desktops' users/<uid>/ directories) is /run/nebula, root's; systemd removes it
+# when the service stops, so no stale sockets are left. nebula-login (re)creates it with the right owners.
+RuntimeDirectory=nebula
+RuntimeDirectoryMode=0755
+
+# --- Hardening: only what does not break user sessions ---
+# Everything set here is inherited by every desktop and every app the users start (they are descendants of this
+# service, even though their cgroup is a session scope). That rules out most of the usual directives:
+#   NoNewPrivileges, CapabilityBoundingSet, RestrictSUIDSGID, ProtectSystem, ProtectHome, PrivateTmp, PrivateDevices,
+#   ProtectKernel*, MemoryDenyWriteExecute, SystemCallFilter, RestrictNamespaces, RestrictRealtime
+# would break sudo, su, polkit, flatpak/bwrap, unix_chkpwd (setuid), pam_mount (mount needs CAP_SYS_ADMIN), writing
+# /etc and the users' homes, /tmp shared between sessions, GPU access (/dev/dri), JIT compilers and PipeWire's
+# realtime scheduling. They are deliberately not used. The web process is hardened where it is started instead (see
+# the README): an unprivileged user, a cleared environment, PR_SET_PDEATHSIG, and the worker sandbox (step 8).
+#
+# Socket families: Unix sockets (the helper protocol, the desktops, D-Bus), IPv4/IPv6 (the clients, apps), and netlink
+# (name resolution, logind, many libraries). Apps needing AF_PACKET, AF_BLUETOOTH and the like would be refused:
+# remove this line (systemctl edit nebula.service) if users need them.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
