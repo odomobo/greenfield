@@ -1,9 +1,9 @@
 # The login helpers (see SIGNIN-ROADMAP.md): the protocol and the code both helpers share, and the helpers themselves
 # as separate binaries, so the production helper contains no dev code. std and libc only (the production helper adds
-# libpam).
+# libpam). And the web front (web: the listener and its per-connection workers), which adds rustls and ring.
 [workspace]
 resolver = "2"
-members = ["protocol", "common", "dev-login", "login"]
+members = ["protocol", "common", "dev-login", "login", "web"]
 
 [workspace.package]
 version = "0.1.0"

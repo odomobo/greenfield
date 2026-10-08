@@ -14,10 +14,10 @@ users in with PAM (service \"nebula\", /etc/pam.d/nebula), starting each user's 
                              (both ignored when systemd passes the socket: LISTEN_FDS, see packages/login/systemd/)
   --web-user <name>          unprivileged user the web process runs as (default nebula-web)
   --runtime-dir <dir>        login.sock and the desktops' users/<uid>/ directories (default /run/nebula)
-  --gateway-dir <dir>        the built gateway: web.js, session-process.js (default: packages/gateway/dist next to
-                             this binary's packages/login)
-  --node <path>              the node to run them with, executable by the web user and every user (default: node
-                             from PATH)
+  --gateway-dir <dir>        the built gateway: session-process.js, and the page in ../static and ../../viewer/dist,
+                             readable by the web user (default: packages/gateway/dist next to this binary's
+                             packages/login)
+  --node <path>              the node to run the desktops with, executable by every user (default: node from PATH)
   --site-config <file>       site settings file the desktops read (default /etc/nebula/nebula.conf; see
                              packages/gateway/src/site-settings.ts for its format)
   --encoder <auto|none|nvh264|vaapih264>

@@ -5,7 +5,7 @@ A separate roadmap for restructuring how nebula signs users in and connects thei
 gateway restart, which is no longer
 required), this document is newer and wins for sign-in and session lifetime.
 
-Decided 2026-10-07. Steps 1–6, 10, 11 and 13 are implemented; the rest is not.
+Decided 2026-10-07. Steps 1–7, 10, 11 and 13 are implemented; the rest is not.
 
 ## Why
 
@@ -355,6 +355,55 @@ each worker holds the TLS key, and a Node process per connection costs roughly 5
 - rustls for TLS (TLS 1.3 only), a minimal HTTP layer for static files and the WebSocket upgrade, the same helper
   protocol, the same relay. Workers are started with fork + exec, so each gets a fresh memory layout.
 - Page assets loaded once by the listener into a sealed read-only memfd that each worker maps.
+- As built:
+  - **The crate** is `packages/login/web` (`nebula-web`) in the login workspace, reusing `protocol` and `common`
+    (`Channel`, `spawn_with_fds`, logging). Dependencies: rustls 0.23 without default features (`ring`, `std`: no
+    TLS 1.2 code at all; configured TLS 1.3 only, ALPN `http/1.1`, no session tickets since every connection is a
+    fresh process) and ring 0.17 (also SHA-1 for `Sec-WebSocket-Accept`); pinned in `Cargo.lock`. ring needs only a C
+    compiler; a cold release build of the workspace takes about 10 s, an incremental one well under a second. All
+    unsafe code is in `web/src/sys.rs`.
+  - **Two binaries**: the listener `nebula-web` (`src/bin/listener.rs`) and the worker `nebula-web-worker`
+    (`src/bin/worker.rs`), next to each other and to the helpers in `target/release`. The helpers start the listener
+    through `common/src/web.rs` (`web_binary`, `web_command`): `nebula-web --listen-fd 3 --login-socket <path>
+    --viewer-dir <gateway-dir>/../../viewer/dist --static-dir <gateway-dir>/../static [--cert --key --state-dir
+    --hide-hostname --allowed-origin]`; `--gateway-dir` now names only where `session-process.js` and the page are.
+  - **Listener**: one thread, a `poll` loop over the listening socket and each worker's report socket. Caps (256 in
+    all, 32 per IP), the `ClientAddress` record and the per-IP throttle (20 free failures, doubling blocks from 30 s
+    to 15 min) are as in step 6. It loads the certificate and key (or generates the self-signed pair with `openssl`,
+    as before; the log shows the SHA-256 fingerprint) and builds a server configuration once to check them, and loads
+    `index.html` (host name filled in), `viewer/dist/assets/**` and `gateway/static/**` into a page bundle. Both go
+    into sealed memfds (`F_SEAL_SEAL|SHRINK|GROW|WRITE`).
+  - **Worker start**: fork + exec (`spawn_with_fds`, `PR_SET_PDEATHSIG` = SIGTERM, empty environment) with fd 3 the
+    TCP connection, fd 4 the helper connection (only with `--sign-in helper`), fd 5 a report socket (one byte for a
+    refused sign-in; its EOF is how the listener learns the worker exited), fd 6 the page bundle memfd, fd 7 the TLS
+    memfd (certificate chain and key, PEM); arguments `--sign-in helper|blocked|unavailable` and `--allowed-origin`.
+    Documented in `web/src/lib.rs`; the bundle layout (length-prefixed path and content entries) in
+    `web/src/assets.rs`. The worker refuses memfds without all the seals, marks itself not dumpable first thing
+    (`prctl`, reset by exec, so it does it itself), opens no files and serves only from the mapped bundle (exact path
+    lookup, so no path traversal is possible).
+  - **Worker HTTP**: request heads of at most 16 KiB and 100 headers, HTTP/1.1 keep-alive (or HTTP/1.0), GET/HEAD
+    only (405 with `Allow: GET` and close otherwise; a request announcing a body is answered and the connection
+    closed), the same routes, security headers, CSP, HSTS, cache headers and error pages as the Node worker. Limits:
+    TLS handshake 10 s, the first request head 20 s, a further request's first byte 5 s (keep-alive), each response
+    30 s. The sign-in's limits are unchanged (`begin` 10 s, answers 60 s, helper 90 s), plus 60 s for the desktop's
+    handshake. Sign-in JSON is parsed by a small strict parser (`web/src/websocket.rs`).
+  - **Relay**: non-blocking, one `poll` loop; it reads from the desktop only once TLS has sent everything (at most
+    64 KiB at a time), so data waits in the session's queue; TCP_NODELAY and TCP_NOTSENT_LOWAT 32 KiB on the browser's
+    socket as before. When the desktop closes, what it sent last (e.g. the takeover close frame) is flushed, then
+    close_notify.
+  - **Deleted**: `web.ts`, `web-worker.ts`, `tls.ts`, `pages.ts`, `rate-limit.ts` and `test/web.test.ts` in the
+    gateway (their tests are now Rust unit tests and `web/tests/listener.rs`), and `setNotDumpable` from the poll
+    addon. The gateway keeps `login-protocol.ts` (the session's `Handover`; `unixConnect`, `sendWithFd` and
+    `RecordChannel.write` stay for its test of the shared layout).
+  - **Cost measured** (Chrome, loopback, fresh context per load): a page load takes about 41 ms (Node workers: 145 ms,
+    before step 6: 42 ms); a single HTTPS request with a fresh connection (curl) about 2 ms (Node workers: 44 ms). The
+    e2e suite's total stayed at about 33 s. `auth.sh` checks that TLS 1.2 is refused and that `nebula-web` refuses dev
+    options.
+  - **For later steps**: step 8 can sandbox the worker after it has mapped its memfds and built its TLS
+    configuration (it needs read/write/sendmsg/recvmsg/poll/close/getrandom/exit and nothing that opens files); step 9
+    replaces fd 7 (the key) with a signing channel to the listener; step 12 changes only `http::route` (cache headers)
+    and the bundle; for step 13's socket activation, `nebula-web` takes the listening socket as an inherited fd at any
+    number (`--listen-fd`).
 
 ### 8. Sandbox the workers
 

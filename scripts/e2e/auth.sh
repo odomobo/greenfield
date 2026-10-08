@@ -4,8 +4,8 @@
 #
 # Starts the gateway (the dev login helper, see lib.sh) on $GATEWAY_PORT, then checks:
 #   - unsafe flag combinations are refused, and there is no plain-HTTP mode; the production login helper (nebula-login,
-#     which refuses to run without root) and the web process take no dev options;
-#   - the sign-in page leaks nothing: no product names, no cookies;
+#     which refuses to run without root) and the web front (nebula-web) take no dev options;
+#   - the sign-in page leaks nothing: no product names, no cookies; TLS 1.3 only, no plain HTTP;
 #   - an unknown user and a wrong password look the same: the same message and timing, at least the minimum failure
 #     time;
 #   - nothing is reachable without signing in: no API, the WebSocket refuses a foreign Origin, anything but the
@@ -43,9 +43,10 @@ OUTPUT="$("$PRODUCTION_HELPER" --bind-ip 127.0.0.1 --bind-port "$PORT" 2>&1)" &&
 OUTPUT="$("$PRODUCTION_HELPER" --dev-time-scale 3 --bind-ip 127.0.0.1 --bind-port "$PORT" 2>&1)" &&
   fail "the production login helper accepted a dev option"
 [[ "$OUTPUT" == *"dev login helper"* ]] || fail "the production login helper didn't refuse a dev option"
-# the web process takes no dev options either
-node "$REPO/packages/gateway/dist/web.js" --listen-fd 3 --login-socket /nonexistent --dev-time-scale 3 >/dev/null 2>&1 &&
-  fail "the web process accepted a dev option"
+# the web front takes no dev options either
+OUTPUT="$("$REPO/packages/login/target/release/nebula-web" --listen-fd 3 --login-socket /nonexistent --dev-time-scale 3 2>&1)" &&
+  fail "the web front accepted a dev option"
+[[ "$OUTPUT" == *"unknown option --dev-time-scale"* ]] || fail "the web front didn't refuse a dev option"
 echo "    ok"
 
 step "starting the gateway on :$PORT"
@@ -56,15 +57,17 @@ WSS="wss://127.0.0.1:$PORT"
 
 step "the sign-in page reveals nothing; TLS only"
 HEADERS="$(curl -sk -D - -o "$WORK/login.html" "$BASE/")"
-echo "$HEADERS" | grep -qi '^server:' && fail "Server header present"
-echo "$HEADERS" | grep -qi '^set-cookie:' && fail "a cookie is set"
+# (here-strings, not echo | grep -q: grep stops at the first match, and pipefail would count the echo it cut off)
+grep -qi '^server:' <<<"$HEADERS" && fail "Server header present"
+grep -qi '^set-cookie:' <<<"$HEADERS" && fail "a cookie is set"
 grep -qi -E 'greenfield|gateway|compositor|wayland|node' "$WORK/login.html" && fail "product name on the login page"
-echo "$HEADERS" | grep -qi -E 'greenfield|express|node' && fail "product name in headers"
-echo "$HEADERS" | grep -qi '^cache-control: no-store' || fail "the page may be cached"
-echo "$HEADERS" | grep -qi '^strict-transport-security:' || fail "no HSTS"
+grep -qi -E 'greenfield|express|node' <<<"$HEADERS" && fail "product name in headers"
+grep -qi '^cache-control: no-store' <<<"$HEADERS" || fail "the page may be cached"
+grep -qi '^strict-transport-security:' <<<"$HEADERS" || fail "no HSTS"
 grep -q "$(hostname)" "$WORK/login.html" || fail "hostname not shown"
 [ "$(curl -sk -o /dev/null -w '%{redirect_url}' "$BASE/login")" = "$BASE/" ] || fail "/login doesn't lead to the page"
 [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/" || true)" = 200 ] && fail "the page is served over plain HTTP"
+curl -sk -o /dev/null --max-time 5 --tls-max 1.2 "$BASE/" && fail "TLS 1.2 is accepted (TLS 1.3 only)"
 echo "    ok"
 
 step "unknown user and wrong password look the same"

@@ -1,7 +1,7 @@
 /**
  * The login protocol's records, the TypeScript side of `packages/login/protocol` (the byte layout is documented there,
- * in src/lib.rs): the web process speaks it on `login.sock` with a login helper, and a session receives `Handover`
- * records on its inherited `desktop.sock` listener. Some records carry an fd (a connection), so these sockets are
+ * in src/lib.rs): a session receives `Handover` records on its inherited `desktop.sock` listener (the web front, in
+ * Rust, speaks the rest on `login.sock`; the other records are here for the tests that check the shared layout). Some records carry an fd (a connection), so these sockets are
  * raw fds driven through the fd-passing functions of the compositor proxy's small poll addon.
  */
 import { isIPv4, isIPv6 } from 'node:net'
@@ -228,7 +228,6 @@ type FdPassingModule = {
   receiveWithFds(fd: number, maxBytes: number): { data: Buffer; fds: number[] } | number
   setCloseOnExec(fd: number): number
   closeFd(fd: number): number
-  setNotDumpable(): number
 }
 let fdPassingModule: FdPassingModule | undefined
 

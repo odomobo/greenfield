@@ -1,8 +1,9 @@
 //! nebula-login: the production login helper and the nebula service's entry point. Runs as root.
 //!
 //! What it does (see SIGNIN-ROADMAP.md, steps 4 and 5, and packages/login/README.md):
-//!   - binds the TCP port (or, started by a systemd socket unit, uses the socket systemd passes: LISTEN_FDS) and starts the web process (`node web.js --listen-fd 3 --login-socket <runtime>/login.sock`)
-//!     as the unprivileged web user (`--web-user`, default nebula-web), with the listening socket as fd 3;
+//!   - binds the TCP port (or, started by a systemd socket unit, uses the socket systemd passes: LISTEN_FDS) and starts
+//!     the web process (`nebula-web --listen-fd 3 --login-socket <runtime>/login.sock`, next to this binary) as the
+//!     unprivileged web user (`--web-user`, default nebula-web), with the listening socket as fd 3;
 //!   - accepts the web process's connections on `<runtime>/login.sock` (only from the web user: SO_PEERCRED; the
 //!     listener opens one for every TCP connection, most never become a sign-in), at most MAX_ATTEMPTS at a time, and
 //!     forks a child for each;
@@ -36,6 +37,7 @@ use nebula_login_common::backoff::{self, Policy, Report, Table};
 use nebula_login_common::desktop;
 use nebula_login_common::session_config::{session_config, SESSION_CONFIG_FD, SESSION_LISTEN_FD};
 use nebula_login_common::spawn::{spawn_as, wait_passing_terminate};
+use nebula_login_common::web::{web_binary, web_command, WEB_LISTEN_FD};
 use nebula_login_common::{log, sys};
 use relay::Relay;
 use std::fs;
@@ -61,14 +63,12 @@ const LIMITS: Limits = Limits {
 };
 /// login.sock connections in progress at once (before Begin, and attempts until they are over); more are closed at
 /// once (the web process tells the page signing in is not possible). The web listener opens one for every TCP
-/// connection, and caps those at the same number (MAX_WORKERS in packages/gateway/src/web.ts).
+/// connection, and caps those at the same number (MAX_WORKERS in packages/login/web/src/bin/listener.rs).
 const MAX_ATTEMPTS: usize = 256;
 /// A sign-in child that hasn't finished its attempt by then (PAM stuck, or a page answering very slowly) is ended.
 const ATTEMPT_TIMEOUT_SECONDS: u32 = 180;
 /// How long a stopping helper waits for its desktops (they give their apps 5 s to quit, then kill them).
 const DESKTOP_EXIT_TIMEOUT: Duration = Duration::from_secs(8);
-/// The web process's listening TCP socket.
-const WEB_LISTEN_FD: i32 = 3;
 /// The desktops' PATH (PAM's environment may override it).
 const SESSION_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
@@ -76,6 +76,7 @@ struct Config {
     args: args::Args,
     web: sys::User,
     gateway_dir: PathBuf,
+    web_binary: PathBuf,
     node: PathBuf,
     /// the site settings file the desktops read, if not their default
     site_settings: Option<PathBuf>,
@@ -125,9 +126,10 @@ fn configure() -> Config {
         let exe = std::env::current_exe().unwrap_or_else(|e| fatal(format!("Where am I? {e}")));
         exe.ancestors().nth(4).unwrap_or(Path::new("/")).join("gateway/dist")
     });
-    if !gateway_dir.join("web.js").is_file() || !gateway_dir.join("session-process.js").is_file() {
+    if !gateway_dir.join("session-process.js").is_file() {
         usage_error(&format!("no built gateway in {} (yarn build, or --gateway-dir)", gateway_dir.display()));
     }
+    let web_binary = web_binary().unwrap_or_else(|e| usage_error(&format!("no web front: {e} (yarn build)")));
     let node = args.node.clone().or_else(find_node).unwrap_or_else(|| usage_error("no node in PATH (--node)"));
     let node = std::path::absolute(&node).unwrap_or(node);
     if !Path::new(&format!("/etc/pam.d/{PAM_SERVICE}")).exists() {
@@ -143,6 +145,7 @@ fn configure() -> Config {
         args,
         web,
         gateway_dir,
+        web_binary,
         node,
         site_settings: None,
         lang: std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into()),
@@ -262,18 +265,12 @@ fn listening_socket(bind_ip: IpAddr, bind_port: u16) -> TcpListener {
 
 /// The web process, as the web user, with the listening socket.
 fn start_web(config: &Config, listener: TcpListener) -> io::Result<std::process::Child> {
-    let mut command = Command::new(&config.node);
+    let mut command = web_command(&config.web_binary, &config.gateway_dir, &config.args.runtime_dir.join("login.sock"));
     command
-        .arg(config.gateway_dir.join("web.js"))
-        .arg("--listen-fd")
-        .arg(WEB_LISTEN_FD.to_string())
-        .arg("--login-socket")
-        .arg(config.args.runtime_dir.join("login.sock"))
         .args(config.args.web_args())
         .env_clear()
         .env("PATH", SESSION_PATH)
         .env("LANG", &config.lang)
-        .env("NODE_ENV", "production")
         .stdin(Stdio::null());
     let mut credentials = sys::Credentials::of(&config.web)?;
     credentials.dir = c"/".to_owned();

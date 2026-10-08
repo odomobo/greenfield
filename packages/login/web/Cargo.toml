@@ -1,0 +1,22 @@
+[package]
+name = "nebula-web"
+description = "The web front: the listener (nebula-web) and a worker per TCP connection (nebula-web-worker): TLS, the page, the WebSocket sign-in, the relay to the desktop."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nebula-web"
+path = "src/bin/listener.rs"
+
+[[bin]]
+name = "nebula-web-worker"
+path = "src/bin/worker.rs"
+
+[dependencies]
+libc.workspace = true
+nebula-login-protocol.workspace = true
+nebula-login-common.workspace = true
+# TLS 1.3 only (no tls12 feature), with ring as the crypto provider: it builds with just a C compiler
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+ring = "0.17"
