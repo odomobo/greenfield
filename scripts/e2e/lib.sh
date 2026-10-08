@@ -112,7 +112,7 @@ session_pid() {
 }
 
 # The sign-in probes (scripts/e2e/probe.js): the in-band sign-in on the page's WebSocket, without a browser.
-probe() { NODE_NO_WARNINGS=1 WS_MODULE="$REPO/packages/session/node_modules/ws" node "$E2E_DIR/probe.js" "$@"; }
+probe() { NODE_NO_WARNINGS=1 WS_MODULE="$REPO/node_modules/ws" node "$E2E_DIR/probe.js" "$@"; }
 
 # Sign in on a WebSocket of its own: prints "<ok|fail|closed> <seconds> <close code> <message>" (see probe.js).
 signin_attempt() {
