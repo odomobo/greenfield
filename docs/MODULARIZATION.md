@@ -289,15 +289,141 @@ The components become workspace packages so the compiler enforces the boundaries
   `session`, until it depends on nothing outside its target package; then moving it into the package is mechanical
   and the compiler locks the boundary in. A pure file-move step first makes no sense: today's interfaces cut across
   the target boundaries.
-- Every step leaves all tests green (unit tests, `scripts/test-gateway.sh`, lint) and keeps behavior, logging and
-  `--dev-*` flags.
-- Steps are done by agents (Sonnet by default, Opus for tricky ones), one per step on its own branch and worktree,
-  merged and tested by the orchestrator after each, run in parallel where the dependencies allow.
+- **Behavior changes are steps of their own.** Only steps 4 and 5 (the send queue's redesign) change behavior; every
+  other step is restructuring that keeps behavior, logging and `--dev-*` flags. So a regression after 4 or 5 is the
+  redesign's, and one after any other step is a restructuring mistake.
+- Every step leaves all tests green: unit tests of every package, `scripts/test-gateway.sh`, lint.
+- Steps are done by agents (Sonnet by default, Opus for tricky ones), one per step on its own branch and worktree.
+  Claude, as the orchestrator, merges each agent's branch into the `modularization` integration branch (merged into
+  `master` when done), and tests after each merge (rebuild, all tests, compare test counts with the agent's report),
+  run in parallel where the dependencies allow, at most three at a time (they touch overlapping files: the transport,
+  `SurfaceEncoder`, the CMake build).
+- In a worktree: `npm install` at the worktree root first (new workspace packages must be linked there, not resolved
+  from the main checkout's `node_modules`), then `make all`.
+- Agents take obvious simple approaches for open details, but stop and report "not completed" on a real design gap;
+  steps that depend on a stopped step don't start.
+- `CLAUDE.md` applies: tests under a minute with timeouts of about two minutes, never kill processes by name.
 
-## Open questions
+## Step plan
 
-Settled since the first version of this document: video encoding and capture (a frame component, see "Frames"), what
-QoS owns (two concepts, see "QoS: two concepts"), frames held too long (a warning), the native frame detail (each
-frame carries its own functions), and the package list.
+| # | Step | Changes behavior | After | Agent |
+|---|---|---|---|---|
+| 0 | Scaffolding | No | — | Sonnet |
+| 1 | Software video encoder for tests | No (test only) | 0 | Sonnet |
+| 2 | `congestion` package | No | 0 | Sonnet |
+| 3 | `patch-codec` package | No | 0 | Sonnet |
+| 4 | Queue model: nothing queued is invalidated | **Yes** | 0 | Opus |
+| 5 | Stream readiness | **Yes** | 4 | Opus |
+| 6 | `frames` package | No | 0 | Opus |
+| 7 | `video-codec` package | No | 1, 6 | Opus |
+| 8 | `transport` package | No | 2, 5 | Opus |
+| 9 | `scheduler` package | No | 3, 5 | Sonnet |
+| 10 | `traffic-policy` package | No | 8 | Opus |
+| 11 | Split `SurfaceEncoder` in place into surface, patch renderer and video renderer | No | 7, 9, 10 | Opus |
+| 12 | Extract `surface`, `patch-renderer`, `video-renderer` | No | 11 | Sonnet |
+| 13 | Wiring and docs | No | 12 | Sonnet |
 
-1. **The step plan**, drawn from this document.
+Waves (the steps of a wave don't depend on each other): **0**; **1, 2, 3, 4, 6**; **5, 7**; **8, 9**; **10**; **11**;
+**12**; **13**.
+
+### 0. Scaffolding
+
+- `packages/session-contracts` (`@nebula/session-contracts`) with build, lint and `exports` map, holding the shared
+  types that already cross the future boundaries (`SurfaceClass`, `SendTier`, `Rect`, `EncodedPatch`, `VideoEncoder`,
+  `VideoQuality`, ...), moved there from `session`.
+- `session` builds with `tsc -b` and project references; the Makefile builds the packages first.
+- `eslint-plugin-import` with `no-extraneous-dependencies`; `npm run lint` passes in `session` (54 errors today, almost
+  all formatting fixable with `--fix`); one root command builds, lints and runs every package's unit tests, and is the
+  test gate.
+- A short "Adding a package" template in this document (package.json, tsconfig, lint, tests, native CMake if any) for
+  the later steps.
+
+### 1. Software video encoder for tests
+
+The server's video path (capture → GStreamer → transport → viewer) has no automated test: the e2e scripts run with
+`--encoder none`, and `scripts/e2e/video.sh` only tests the viewer's decoding with pre-encoded frames. Steps 7, 11 and
+12 change that path.
+
+- A dev-only software encoder, GStreamer's `x264enc`, behind a `--dev-*` flag (never a site setting: `encoder = x264`
+  stays rejected), producing the same stream layout as the hardware encoders.
+- An e2e script that streams a busy client as video end to end, and checks that the viewer shows it.
+- The hardware-specific parts stay unverified here (dmabuf frames, `nvh264enc`/`vaapih264enc`, the GPU context): they
+  are in `docs/ROADMAP.md` under "Needs verification on other hardware".
+
+### 2. `congestion` package
+
+`congestion.ts` is already a clean class. Its interface (what the transport and others use) goes into the contracts;
+the controller and its tests (`congestion.test.ts`) move to `@nebula/congestion`. The transport keeps using it through
+the interface.
+
+### 3. `patch-codec` package
+
+`png.ts`, `patch-encoder.ts`, `patch-worker.ts`, `PatchWorkerPool` and `native/patch` (with its own CMake build) move to
+`@nebula/patch-codec`, with `patch-encoder.test.ts`, `PatchWorkerPool.test.ts`, `png.test.ts`.
+
+### 4. Queue model: nothing queued is invalidated
+
+As in "The send queue": the transport's `dropPatches`, the key-frame purge, the decodability gate (`needsKeyFrame`,
+`keyFrameSent`) and `MAX_UNSENT_FRAMES_PER_SURFACE` go away; the queue reports an item unsent only when the transport
+closes. Rendering handles key-frame recovery itself (the viewer's `keyframe` request makes its next frame a key frame).
+The viewer already refuses deltas before a key frame (`KeyFrameNeeded` in `decoder.ts`); check it discards them
+quietly.
+
+### 5. Stream readiness
+
+As in "The transport says when a stream is ready": per-stream readiness (at most one chunk of the stream's data left
+unsent, in bytes) replaces the per-surface slots; one encode at a time per surface; frame callbacks wait for their
+stream to be ready (rate limits unchanged).
+
+### 6. `frames` package
+
+As in "Frames": the native library (frame object with its creator's retain and release functions, size or version
+field and type tag, cross-thread release back to capture's thread, held-too-long warning) and the TypeScript handle.
+Capture creates frames; the patch path reads its pixels through `frame.readPixels` instead of calling the compositor.
+
+### 7. `video-codec` package
+
+The GStreamer encoder (`native/encoding`), the pool of hardware encoder instances (`EncoderPool`) and encoder detection
+(`encoder.ts`) move to `@nebula/video-codec`, as its own addon consuming frames. It opens its own GPU context on the
+frame's device instead of using the compositor's EGL handle. `wlr_core_encoder.c` goes away. Verified with step 1's
+software encoder.
+
+### 8. `transport` package
+
+`ViewerTransport` split into the fair-queueing mechanism (tiers and weights passed in), chunking and the link (WebSocket,
+socket options, the simulated link, receive decoding); it exposes link stats instead of judging them. `BandwidthMonitor`
+moves out to `session` (step 10 packages it). `ViewerHost` stays in `session`. Tests: `ViewerTransport.test.ts`,
+`SendScheduler.test.ts`, `transport-congestion.test.ts`, `audio-transport.test.ts`, `sim-link.ts`.
+
+### 9. `scheduler` package
+
+`PatchPump` (which surface gets the next free patch worker, by tier) and `FramePacing`, as an instance owned by the
+scheduler instead of module globals; `ViewerHost` reports viewer attach and refresh rate through `session`'s wiring.
+Tests: `FramePacing.test.ts`, the pump parts of `SurfaceEncoder.test.ts`.
+
+### 10. `traffic-policy` package
+
+As in "Traffic policy": priority (relentless or not; burst promotion; settling) and bottleneck (CPU- or link-bound,
+`BandwidthMonitor`) as separate measurements, tiers and weights; a decision published per surface. `SurfaceEncoder`
+stops judging the link and promoting itself: it reads its decision. Tests: `policy.test.ts`, `bandwidth.test.ts`, the
+burst parts of `SurfaceEncoder.test.ts`.
+
+### 11. Split `SurfaceEncoder` in place
+
+Inside `session`, `SurfaceEncoder` becomes three modules: the surface (patches or video, the switch), the patch renderer
+and the video renderer, with the interfaces between them settled. Nothing moves to a package yet, so the riskier
+refactor can be reviewed on its own.
+
+### 12. Extract `surface`, `patch-renderer`, `video-renderer`
+
+The three modules move to their packages (the surface package depends on both renderers). Tests: the rest of
+`SurfaceEncoder.test.ts`.
+
+### 13. Wiring and docs
+
+`WlrCompositor` only provides capture; a `session` wiring module creates and connects the packages. `docs/ARCHITECTURE.md`
+updated where it names files or modules that moved; this document's status updated.
+
+## Status
+
+Design and step plan agreed (2026-10-09). No step started.
