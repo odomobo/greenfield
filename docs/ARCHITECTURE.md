@@ -102,7 +102,8 @@ A stray press of the browser's back button (e.g. a mouse side button) must not t
   protocol ids, which apps hand out again (Knights' dialogs got the id of the drag icon of the last piece moved, and
   with it that icon's canvas, still placed at the pointer). The viewer keeps a surface's content (decoder, canvas)
   until a scene lists the surface as `destroyed` (scene protocol 22), whether or not a window shows it; a data item of
-  it still on its way is dropped. The server drops what it still has queued for it (`ViewerTransport.forgetSurface`).
+  it still on its way is ignored. The server takes back nothing it already queued for the viewer: those items still go
+  out and the viewer ignores them (the scene that destroys the surface is a control message, so it arrives first).
 - **Input regions**: clicks outside a surface's input region (`wl_surface.set_input_region`, e.g. most of a client-side
   shadow) go to whatever is underneath; the pointer and cursor follow the same hit test.
 - **Child windows** (dialogs, `xdg_toplevel.set_parent`) are separate windows in the scene with a parent. They are
@@ -251,8 +252,8 @@ sliding 1.5 s window, never promoted a callback-paced client, because the held c
 
 Changing class:
 
-- Normal → streaming with video: drop the surface's queued and unsent patches, start its video with a key frame
-  (as the switch to fast mode does today).
+- Normal → streaming with video: drop the surface's queued (not yet captured) patches, start its video with a key
+  frame. Patches already handed to the transport still go out first; the key frame paints over them.
 - Streaming with video → normal: release the encoder and queue a full-surface patch render so a crisp lossless image
   replaces the video (as the switch to slow mode does today).
 - Without video, a class change changes only the priority. Nothing is dropped or re-sent.
@@ -393,7 +394,7 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
 Each surface is a source with at most **2 slots** (`SURFACE_SLOTS` = 2). An item is one patch or one video frame.
 
 - A slot is taken when an item is captured (patch: pixels read; video: encoding started) and freed when the item is
-  handed to the socket, or dropped.
+  handed to the socket, or reported unsent (only when the viewer's connection closes).
 - A surface may capture only while it has a free slot. So at most two of its items exist between capture and the
   socket; everything else waits as queued rectangles, where new damage merges into it.
 - Because a surface only encodes into free slots, the amount it encodes follows the send schedule: a low-priority
@@ -448,8 +449,17 @@ allows it):
    - With equal-sized patches this behaves like a 3:1 per-message round-robin; byte weighting keeps it fair once
      video frames of very different sizes are mixed in. Normal surfaces are clearly preferred but never starve
      streaming ones.
-3. Video frame rules stay as today: a key frame replaces everything unsent of its surface, at most 3 unsent delta
-   frames per surface before resyncing with a key frame.
+3. Nothing queued is ever dropped, replaced or revised (decided 2026-10-09, `docs/MODULARIZATION.md` "The send
+   queue"): the slots keep the queue short, so there is nothing to gain. The transport doesn't look into the items (it
+   doesn't know what a key frame is). An item is reported unsent only when the transport closes (the viewer
+   disconnects; a new viewer starts over from every surface's whole content). Lifecycle edges need no queue changes:
+   - The viewer's video decoder fails: it sends `keyframe`, and the surface's video makes its next frame a key frame
+     (`SurfaceEncoder.refresh`). The deltas still on their way can't be decoded; the viewer discards them quietly
+     (`KeyFrameNeeded`) and asks for a key frame only once until something decodes.
+   - A surface starts video, is sent whole again (`refresh`), or loses its buffer: the patches already queued go out
+     first, and the newer content paints over them.
+   - A surface is destroyed: its queued items go out, and the viewer ignores items of surfaces it has forgotten.
+   - Video stops while a frame is encoding: rendering discards the result before queueing it (its epoch).
 
 ### Frame callbacks
 

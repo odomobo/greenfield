@@ -164,9 +164,6 @@ const inactiveSink: EncodingSink = {
   queuedBytes: () => 0,
   sendFrame: (_surface, _frame, _class, done) => done(false),
   sendPatch: (_surface, _patch, _tier, done) => done(false),
-  requireKeyFrame: () => undefined,
-  dropPatches: () => undefined,
-  forgetSurface: () => undefined,
 }
 
 export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
@@ -222,9 +219,6 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       queuedBytes: (surface) => this.sink.queuedBytes(surface),
       sendFrame: (surface, frame, surfaceClass, done) => this.sink.sendFrame(surface, frame, surfaceClass, done),
       sendPatch: (surface, patch, tier, done) => this.sink.sendPatch(surface, patch, tier, done),
-      requireKeyFrame: (surface) => this.sink.requireKeyFrame(surface),
-      dropPatches: (surface) => this.sink.dropPatches(surface),
-      forgetSurface: (surface) => this.sink.forgetSurface(surface),
     }
     // without a hardware encoder the pool has size 0 and no video encoder is ever created; one that fails to create is
     // reported once and the pool then behaves the same

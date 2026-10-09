@@ -386,7 +386,7 @@ test("a surface's next item waits for its started one, which then goes in the ne
   assert.ok(order.indexOf(SETTLE) < order.indexOf(SETTLE + 1))
 })
 
-test('a started item is never dropped, an unstarted one is; its done comes with its last chunk', () => {
+test("nothing queued is dropped; an item's done comes with its last chunk", () => {
   const { ws, transport, drain, block } = setup()
   block()
   const done: { serial: number; sent: boolean }[] = []
@@ -402,36 +402,48 @@ test('a started item is never dropped, an unstarted one is; its done comes with 
   send(STREAMING + 1, 50_000)
   ws.sent.shift()!.callback()
   assert.ok(transport.queuedBytes('a') > 85_000)
-  transport.dropPatches('a')
-  assert.deepEqual(done, [{ serial: STREAMING + 1, sent: false }])
-  assert.ok(
-    transport.queuedBytes('a') > 30_000 && transport.queuedBytes('a') < 50_000,
-    'what is left of the started one',
-  )
   // the chunks go one by one (the first is on the socket already); done only once the last is written
   let chunks = 0
-  while (ws.sent.length && done.length === 1) {
+  while (ws.sent.length && done.length === 0) {
     ws.sent.shift()!.callback()
     chunks++
   }
   assert.equal(chunks, Math.ceil(50_000 / CHUNK_MIN_BYTES))
-  assert.deepEqual(done[1], { serial: STREAMING, sent: true })
+  assert.deepEqual(done, [{ serial: STREAMING, sent: true }])
   assert.deepEqual(
     drain().map(({ serial }) => serial),
-    [],
+    [STREAMING + 1],
   )
+  assert.deepEqual(done[1], { serial: STREAMING + 1, sent: true })
   assert.equal(transport.queuedBytes('a'), 0)
 })
 
-test('a key frame replaces unsent items but not a started one', () => {
-  const { ws, transport, queue, drain, block } = setup()
+test('closing reports a started item and the queued ones unsent, and only then', () => {
+  const { ws, transport, block } = setup()
   block()
-  queue('a', 'normal', NORMAL, 50_000)
-  queue('a', 'normal', NORMAL + 1, 500)
+  const done: { serial: number; sent: boolean }[] = []
+  const send = (serial: number, bytes: number) =>
+    transport.send({
+      priority: 'patch',
+      surface: 'a',
+      tier: 'normal',
+      patch: patch(serial, bytes),
+      done: (sent) => done.push({ serial, sent }),
+    })
+  send(NORMAL, 50_000)
+  send(NORMAL + 1, 500)
   ws.sent.shift()!.callback()
-  transport.requireKeyFrame('a')
+  // a's first item started; one of its chunks is on the socket
+  ws.sent.shift()!.callback()
+  assert.deepEqual(done, [])
+  ws.close()
   assert.deepEqual(
-    drain().map(({ serial }) => serial),
-    [NORMAL],
+    done.map(({ sent }) => sent),
+    [false, false],
   )
+  assert.deepEqual(done.map(({ serial }) => serial).sort(), [NORMAL, NORMAL + 1])
+  assert.equal(transport.queuedBytes('a'), 0)
+  // after closing, an item is reported unsent at once
+  send(NORMAL + 2, 500)
+  assert.deepEqual(done[2], { serial: NORMAL + 2, sent: false })
 })
