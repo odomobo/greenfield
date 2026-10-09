@@ -18,7 +18,7 @@ import {
 } from '../encoding/SurfaceEncoder.js'
 import { encodePng } from '../encoding/png.js'
 import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool } from '../encoding/PatchWorkerPool.js'
-import { Rect } from '../encoding/region.js'
+import type { Rect } from '@nebula/session-contracts'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
 import { ControlMessage, SimulatedLink } from '../viewer/ViewerTransport.js'
 import { frameInsets, type SceneRect, type SceneSurface, type SceneWindow } from '@gfld/scene-protocol'
@@ -232,12 +232,21 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     const pool = new EncoderPool<WlrEncoder>(
       () => new WlrEncoder(wlr, h264Encoder!),
       h264Encoder ? config.videoStreams : 0,
-      (error) => logger.error(`Video encoder ${h264Encoder} is unavailable (${error.message}), sending lossless patches only.`),
+      (error) =>
+        logger.error(`Video encoder ${h264Encoder} is unavailable (${error.message}), sending lossless patches only.`),
     )
     pool.warm()
     const streamingPool = new PatchWorkerPool(logger)
     const normalPool = new PatchWorkerPool(logger, NORMAL_ENCODE_WORKERS, NORMAL_ENCODE_NICE)
-    this.encoding = new EncodingContext(forwardingSink, pool, { normal: (rgba, width, height, opaque) => normalPool.encode(rgba, width, height, opaque), streaming: streamingPool }, logger)
+    this.encoding = new EncodingContext(
+      forwardingSink,
+      pool,
+      {
+        normal: (rgba, width, height, opaque) => normalPool.encode(rgba, width, height, opaque),
+        streaming: streamingPool,
+      },
+      logger,
+    )
     this.encoding.patchOrder = config.patchOrder ?? 'oldest'
     this.encoding.patchShape = config.patchShape ?? 'bands'
     this.encoding.startTicking()
@@ -521,7 +530,13 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     const size =
       surface && surface.width > 0 && surface.height > 0 ? { width: surface.width, height: surface.height } : undefined
     cursor.sentSize = JSON.stringify(size)
-    this.send?.({ type: 'cursor', kind: 'surface', surface: this.keyOf(cursor.sid), hotspot: cursor.hotspot, ...(size && { size }) })
+    this.send?.({
+      type: 'cursor',
+      kind: 'surface',
+      surface: this.keyOf(cursor.sid),
+      hotspot: cursor.hotspot,
+      ...(size && { size }),
+    })
   }
 
   private surfaceCommitted(
@@ -636,7 +651,11 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     state: { geometry: [number, number, number, number]; maximized: boolean; fullscreen: boolean },
   ): SceneRect {
     const [x, y, width, height] = state.geometry
-    const insets = frameInsets({ decorated: window?.decorated, maximized: state.maximized, fullscreen: state.fullscreen })
+    const insets = frameInsets({
+      decorated: window?.decorated,
+      maximized: state.maximized,
+      fullscreen: state.fullscreen,
+    })
     return {
       x: x - insets.left,
       y: y - insets.top,
@@ -681,7 +700,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       this.wlr.configure(sid, -1, -1, { activated: true })
       // raise it with its parents (a dialog brings its main window along), its children above it
       const raised = [sid]
-      for (let window = this.windows.get(sid); window?.parent !== undefined && this.windows.has(window.parent); ) {
+      for (let window = this.windows.get(sid); window?.parent !== undefined && this.windows.has(window.parent);) {
         if (raised.includes(window.parent)) {
           break
         }
@@ -900,7 +919,11 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       }
       // maximized and fullscreen windows cover the output (a maximized decorated one below its title bar); their own
       // position is kept for when they're restored
-      const insets = frameInsets({ decorated: window.decorated, maximized: state.maximized, fullscreen: state.fullscreen })
+      const insets = frameInsets({
+        decorated: window.decorated,
+        maximized: state.maximized,
+        fullscreen: state.fullscreen,
+      })
       const { x, y } =
         state.maximized || state.fullscreen
           ? { x: insets.left - state.geometry[0], y: insets.top - state.geometry[1] }
@@ -1147,7 +1170,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   }
 
   private pointerMotion(message: ControlMessage) {
-    const sid = typeof message.surface === 'string' ? this.sids.get(message.surface) ?? 0 : 0
+    const sid = typeof message.surface === 'string' ? (this.sids.get(message.surface) ?? 0) : 0
     if (sid === 0) {
       this.send?.({ type: 'cursor', kind: 'default' })
     }
@@ -1196,7 +1219,12 @@ export function axisEvents(
     const wheel = Number(horizontal ? message.wheelX : message.wheelY) || 0
     if (mode === DOM_DELTA_LINE) {
       const clicks = delta / LINES_PER_CLICK
-      events.push({ horizontal, value: clicks * CLICK_AXIS_VALUE, discrete: Math.round(clicks * V120_CLICK), finger: false })
+      events.push({
+        horizontal,
+        value: clicks * CLICK_AXIS_VALUE,
+        discrete: Math.round(clicks * V120_CLICK),
+        finger: false,
+      })
     } else if (mode === DOM_DELTA_PAGE) {
       events.push({
         horizontal,
@@ -1205,7 +1233,12 @@ export function axisEvents(
         finger: false,
       })
     } else if (wheel !== 0) {
-      events.push({ horizontal, value: (wheel / V120_CLICK) * CLICK_AXIS_VALUE, discrete: Math.round(wheel), finger: false })
+      events.push({
+        horizontal,
+        value: (wheel / V120_CLICK) * CLICK_AXIS_VALUE,
+        discrete: Math.round(wheel),
+        finger: false,
+      })
     } else {
       events.push({ horizontal, value: delta / 3, discrete: 0, finger: true })
     }
@@ -1267,7 +1300,12 @@ export function startWlrootsCompositor(config: {
   const { startPoll } = require('../addons/proxy-poll-addon') as typeof import('../addons/proxy-poll-addon')
   /* eslint-enable @typescript-eslint/no-var-requires */
   const compositor = new WlrCompositor(
-    { h264Encoder: config.h264Encoder, videoStreams: config.videoStreams ?? 4, patchOrder: config.patchOrder, patchShape: config.patchShape },
+    {
+      h264Encoder: config.h264Encoder,
+      videoStreams: config.videoStreams ?? 4,
+      patchOrder: config.patchOrder,
+      patchShape: config.patchShape,
+    },
     native,
     (fd, readable) => {
       startPoll(fd, readable)

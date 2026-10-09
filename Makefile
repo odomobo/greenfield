@@ -1,4 +1,4 @@
-.PHONY: all scene-protocol session viewer gatekeeper clean
+.PHONY: all check lint test scene-protocol session-contracts session viewer gatekeeper clean
 
 all: session viewer gatekeeper
 
@@ -7,11 +7,31 @@ all: session viewer gatekeeper
 scene-protocol:
 	cd packages/scene-protocol && npx tsc
 
-session: scene-protocol
-	cd packages/session && rm -rf dist types && npm run build:native && npx tsc && node dist/build-dconf.js && node dist/build-audio.js
+# Packages are built in dependency order: tsc -b builds a package's project references first, and the Makefile
+# targets say the same, so a package is built after the packages it imports.
+session-contracts: scene-protocol
+	cd packages/session-contracts && npm run build
+
+session: session-contracts
+	cd packages/session && rm -rf dist types && npm run build:native && npx tsc -b && node dist/build-dconf.js && node dist/build-audio.js
 
 viewer: scene-protocol
 	cd packages/viewer && npm run build:wasm && npx tsc --noEmit && npx vite build
+
+# --- the test gate ---
+
+# Builds everything, lints and runs every package's unit tests. Fails if any part fails. (The end-to-end suite,
+# scripts/test-gateway.sh, is run separately.)
+check: all lint test
+
+lint:
+	cd packages/session-contracts && npm run lint
+	cd packages/session && npm run lint
+
+test:
+	cd packages/session-contracts && npm test
+	cd packages/session && npm test
+	cd packages/viewer && npm test
 
 # --- packages (Rust) ---
 
@@ -22,6 +42,7 @@ gatekeeper:
 
 clean:
 	rm -rf packages/scene-protocol/dist packages/scene-protocol/types
+	rm -rf packages/session-contracts/dist packages/session-contracts/types
 	rm -rf packages/session/build packages/session/dist packages/session/types
 	rm -rf packages/viewer/dist
 	cd packages/gatekeeper && cargo clean

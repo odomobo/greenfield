@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { area, disjoint, Rect, splitRect, splitTiles, subtract, subtractRect } from '../region.js'
+import type { Rect } from '@nebula/session-contracts'
+import { area, disjoint, splitRect, splitTiles, subtract, subtractRect } from '../region.js'
 
 const r = (x: number, y: number, width: number, height: number): Rect => ({ x, y, width, height })
 

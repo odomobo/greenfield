@@ -103,7 +103,9 @@ export function parseSessionConfig(text: string): { config: SessionConfig; devFl
 }
 
 /** Read the record from fd 3 to EOF (at most MAX_SESSION_CONFIG_BYTES), then close the fd. */
-export function readSessionConfig(fd: number = SESSION_CONFIG_FD): Promise<{ config: SessionConfig; devFlags: DevFlags }> {
+export function readSessionConfig(
+  fd: number = SESSION_CONFIG_FD,
+): Promise<{ config: SessionConfig; devFlags: DevFlags }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0

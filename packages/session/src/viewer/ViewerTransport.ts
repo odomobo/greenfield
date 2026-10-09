@@ -2,13 +2,16 @@ import { WebSocket } from 'ws'
 import { Socket } from 'node:net'
 import { performance } from 'node:perf_hooks'
 import { createLogger } from '../Logger.js'
-import type { SendTier, SurfaceClass } from '../encoding/policy.js'
+import type { SendTier, SurfaceClass } from '@nebula/session-contracts'
 import { setSocketSendBuffer, setTcpNotSentLowat } from '../socket-options.js'
 import { CongestionController } from './congestion.js'
 import { BandwidthMonitor } from './bandwidth.js'
 
 /** What the transport needs of a congestion controller (tests pass one that never holds anything back). */
-export type Congestion = Pick<CongestionController, 'canSend' | 'nextSendTime' | 'onSend' | 'onAck' | 'setDataWaiting'> &
+export type Congestion = Pick<
+  CongestionController,
+  'canSend' | 'nextSendTime' | 'onSend' | 'onAck' | 'setDataWaiting'
+> &
   Partial<Pick<CongestionController, 'bandwidthEstimate'>>
 import {
   AudioPacket,
@@ -152,8 +155,7 @@ const LINK_AUDIO_WAIT_LOG_MS = 30
 const MAX_UNSENT_FRAMES_PER_SURFACE = 3
 
 type QueuedEntry = { readonly tier: SendTier; readonly done?: (sent: boolean) => void } & (
-  | { readonly kind: 'frame'; readonly frame: Uint8Array }
-  | { readonly kind: 'patch'; readonly envelope: Uint8Array }
+  { readonly kind: 'frame'; readonly frame: Uint8Array } | { readonly kind: 'patch'; readonly envelope: Uint8Array }
 )
 
 /**

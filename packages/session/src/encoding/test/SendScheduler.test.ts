@@ -2,15 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
-import {
-  ChunkAssembler,
-  decodeChunk,
-  decodeEnvelope,
-  isChunkEnvelope,
-  Patch,
-  PatchFormat,
-} from '@gfld/scene-protocol'
-import type { SendTier } from '../policy.js'
+import { ChunkAssembler, decodeChunk, decodeEnvelope, isChunkEnvelope, Patch, PatchFormat } from '@gfld/scene-protocol'
+import type { SendTier } from '@nebula/session-contracts'
 import {
   CHUNK_MAX_BYTES,
   CHUNK_MIN_BYTES,
@@ -411,7 +404,10 @@ test('a started item is never dropped, an unstarted one is; its done comes with 
   assert.ok(transport.queuedBytes('a') > 85_000)
   transport.dropPatches('a')
   assert.deepEqual(done, [{ serial: STREAMING + 1, sent: false }])
-  assert.ok(transport.queuedBytes('a') > 30_000 && transport.queuedBytes('a') < 50_000, 'what is left of the started one')
+  assert.ok(
+    transport.queuedBytes('a') > 30_000 && transport.queuedBytes('a') < 50_000,
+    'what is left of the started one',
+  )
   // the chunks go one by one (the first is on the socket already); done only once the last is written
   let chunks = 0
   while (ws.sent.length && done.length === 1) {

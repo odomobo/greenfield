@@ -151,9 +151,7 @@ export class FileDrops {
     const bytes = data.subarray(0, Math.max(0, upload.size - upload.received))
     upload.received += bytes.length
     const copy = Buffer.from(bytes)
-    upload.chain = upload.chain
-      .then(() => fs.appendFile(upload.path, copy))
-      .catch((e) => this.failed(upload, e))
+    upload.chain = upload.chain.then(() => fs.appendFile(upload.path, copy)).catch((e) => this.failed(upload, e))
     if (upload.received >= upload.size) {
       upload.done = true
       void upload.chain.then(() => this.checkComplete(upload.drop))

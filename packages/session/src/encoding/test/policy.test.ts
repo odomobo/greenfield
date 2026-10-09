@@ -8,7 +8,8 @@ import {
   PROMOTE_FRACTION,
   RelentlessMeter,
 } from '../policy.js'
-import { area, Rect } from '../region.js'
+import type { Rect } from '@nebula/session-contracts'
+import { area } from '../region.js'
 
 const r = (x: number, y: number, width: number, height: number): Rect => ({ x, y, width, height })
 

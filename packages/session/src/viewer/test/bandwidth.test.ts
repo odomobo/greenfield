@@ -168,7 +168,11 @@ const link = { rate: () => mbit(20), baseRtt: () => 40 }
 
 test('a stream the link cannot keep up with makes it limited within a few seconds', () => {
   const observer = monitored()
-  simulate({ ...link, ...observer }, saturating(() => 30_000), 8000)
+  simulate(
+    { ...link, ...observer },
+    saturating(() => 30_000),
+    8000,
+  )
   assert.ok(observer.changes.length > 0, 'limited')
   assert.equal(observer.changes[0].limited, true)
   assert.ok(observer.changes[0].time <= 4 * PERIOD, `limited at ${observer.changes[0].time} ms`)

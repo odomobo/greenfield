@@ -265,6 +265,33 @@ The components become workspace packages so the compiler enforces the boundaries
   compositor-owned buffers in place (GPU memory, locked until it's done). That's why frames are their own component
   (see "Frames"), not a buffer handed around by workarounds.
 
+### Adding a package
+
+`packages/session-contracts` is the template: copy it, then:
+
+- **`package.json`**: name `@nebula/<name>`, `"type": "commonjs"`, `"private": true`, license `AGPL-3.0-or-later`,
+  `main`/`types` pointing at `dist/index.js` and `types/index.d.ts`, and an `exports` map with only `"."`. Every
+  package it imports goes in `dependencies` (`"*"` for workspace packages), the tooling in `devDependencies` (as in the
+  template). Scripts: `build` (`npx tsc -b`), `test` (`node --test --test-force-exit dist/test/`), `lint`
+  (`eslint src --ext .ts`), `format`.
+- **`tsconfig.json`**: extends `@tsconfig/node18`, `composite: true`, `rootDir` `src`, `outDir` `dist`, `declarationDir`
+  `types`. For each workspace package it imports, add `"references": [{ "path": "../<package>" }]`, to this package's
+  tsconfig and to the tsconfig of each package that imports it (`session`'s lists `../session-contracts`). `tsc -b`
+  then builds in dependency order and a cycle fails the build. Packages that only exist as `scene-protocol` (not
+  composite) are used by their built `types/` and need a Makefile dependency instead.
+- **Lint**: copy `.eslintrc.js` and `.prettierrc.js` (same rules as `session`, including
+  `import/no-extraneous-dependencies`), and `.gitignore` (`dist`, `types`, `*.tsbuildinfo`).
+- **Tests**: unit tests in `src/test/*.test.ts` with `node:test`, run from the compiled `dist/`. They must be fast
+  (see `CLAUDE.md`).
+- **Native code** lives in the package that owns it, under `native/`, with its own `CMakeLists.txt` and a
+  `build:native` script (`mkdir -p build && cmake -G Ninja -B./build -S./ && ninja -C ./build install`) that installs
+  the `.node` addon under `dist/addons/`. The Makefile target runs it before `tsc -b`, as `session`'s does.
+- **Root**: add a target to the `Makefile` (after the packages it depends on), and the package to the `lint` and `test`
+  targets that `make check` runs. Run `npm install` at the repo root afterwards: npm links the new workspace package
+  into `node_modules`, and without it nothing can import it (also in a new worktree).
+- `make check` builds, lints and runs every package's unit tests; it is the test gate, together with
+  `scripts/test-gateway.sh`.
+
 ## Package list
 
 | Package | Contains | Depends on |

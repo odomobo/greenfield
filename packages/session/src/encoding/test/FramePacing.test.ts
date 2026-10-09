@@ -1,12 +1,22 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { FrameCallbackQueue, MAX_FRAME_HOLD_MS, MAX_FRAME_RATE, MIN_FRAME_RATE, tickIntervalFor } from '../../FramePacing.js'
+import {
+  FrameCallbackQueue,
+  MAX_FRAME_HOLD_MS,
+  MAX_FRAME_RATE,
+  MIN_FRAME_RATE,
+  tickIntervalFor,
+} from '../../FramePacing.js'
 
 test('a frame callback is held while the surface has no free slot and released at the next tick once it has one', () => {
   const queue = new FrameCallbackQueue()
   let slotFree = false
   const called: number[] = []
-  queue.schedule(0, () => slotFree, (time) => called.push(time))
+  queue.schedule(
+    0,
+    () => slotFree,
+    (time) => called.push(time),
+  )
 
   queue.tick(16, 100)
   queue.tick(16, 116)
@@ -24,7 +34,11 @@ test('a surface that stays busy still gets a frame callback at least 10 times a 
   assert.equal(MIN_FRAME_RATE, 10)
   const queue = new FrameCallbackQueue()
   const called: number[] = []
-  queue.schedule(0, () => false, (time) => called.push(time))
+  queue.schedule(
+    0,
+    () => false,
+    (time) => called.push(time),
+  )
   let time = 0
   for (let waited = 25; waited < MAX_FRAME_HOLD_MS; waited += 25) {
     queue.tick(25, (time += 25))
@@ -33,7 +47,11 @@ test('a surface that stays busy still gets a frame callback at least 10 times a 
   queue.tick(25, (time += 25))
   assert.equal(called[0], MAX_FRAME_HOLD_MS)
   // the hold counts only after the minimum wait (no pacing viewer)
-  queue.schedule(1000, () => false, (time) => called.push(time))
+  queue.schedule(
+    1000,
+    () => false,
+    (time) => called.push(time),
+  )
   for (let i = 0; i < (1000 + MAX_FRAME_HOLD_MS) / 25 - 1; i++) {
     queue.tick(25, (time += 25))
   }
@@ -46,7 +64,12 @@ test('a surface streamed as video is never forced: its callback waits until it i
   const queue = new FrameCallbackQueue()
   const called: number[] = []
   let ready = false
-  queue.schedule(0, () => ready, (time) => called.push(time), () => false)
+  queue.schedule(
+    0,
+    () => ready,
+    (time) => called.push(time),
+    () => false,
+  )
   for (let time = 25; time <= 4 * MAX_FRAME_HOLD_MS; time += 25) {
     queue.tick(25, time)
   }
@@ -59,7 +82,11 @@ test('a surface streamed as video is never forced: its callback waits until it i
 test('the viewer decode time delays the callback even when a slot is free', () => {
   const queue = new FrameCallbackQueue()
   const called: number[] = []
-  queue.schedule(30, () => true, (time) => called.push(time))
+  queue.schedule(
+    30,
+    () => true,
+    (time) => called.push(time),
+  )
   queue.tick(16, 1)
   assert.deepEqual(called, [])
   queue.tick(16, 2)
@@ -70,11 +97,23 @@ test('callbacks are independent and one scheduled from a callback waits for the 
   const queue = new FrameCallbackQueue()
   const called: string[] = []
   let aFree = false
-  queue.schedule(0, () => aFree, () => called.push('a'))
-  queue.schedule(0, () => true, () => {
-    called.push('b')
-    queue.schedule(0, () => true, () => called.push('c'))
-  })
+  queue.schedule(
+    0,
+    () => aFree,
+    () => called.push('a'),
+  )
+  queue.schedule(
+    0,
+    () => true,
+    () => {
+      called.push('b')
+      queue.schedule(
+        0,
+        () => true,
+        () => called.push('c'),
+      )
+    },
+  )
   queue.tick(16, 1)
   assert.deepEqual(called, ['b'])
   aFree = true

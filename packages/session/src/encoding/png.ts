@@ -93,7 +93,6 @@ export function filterRows(rgba: Uint8Array, width: number, height: number): Uin
   return out
 }
 
-
 function assemble(width: number, height: number, compressed: Uint8Array): Buffer {
   const header = Buffer.alloc(13)
   header.writeUInt32BE(width, 0)

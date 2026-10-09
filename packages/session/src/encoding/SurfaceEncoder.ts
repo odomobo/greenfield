@@ -16,18 +16,18 @@
  */
 import { isLossyPatchFormat, type Patch } from '@gfld/scene-protocol'
 import { EncoderPool } from './EncoderPool.js'
-import type { EncodedPatch } from './patch-encoder.js'
-import {
-  BURST_MS,
-  MAX_PATCH_PIXELS,
-  MAX_PATCH_RECTS,
-  PeriodFractions,
-  planPatches,
-  RelentlessMeter,
+import type {
+  EncodedPatch,
+  PatchOrder,
+  PatchShape,
+  Rect,
   SendTier,
   SurfaceClass,
-} from './policy.js'
-import { area, boundingBox, clip, disjoint, intersect, PatchShape, Rect, subtract } from './region.js'
+  VideoEncoder,
+  VideoQuality,
+} from '@nebula/session-contracts'
+import { BURST_MS, MAX_PATCH_PIXELS, MAX_PATCH_RECTS, PeriodFractions, planPatches, RelentlessMeter } from './policy.js'
+import { area, boundingBox, clip, disjoint, intersect, subtract } from './region.js'
 
 /** Items (patches or video frames) of one surface that may exist between capture and the socket. */
 export const SURFACE_SLOTS = 2
@@ -48,25 +48,8 @@ export type BufferInfo = {
   height: number
 }
 
-/**
- * The order a surface's queued patches (damage, and settling) are captured in: oldest first, or (an experiment, the
- * gateway's --dev-patch-order) at random within batches: each commit's new patches are a batch (and settling's plan
- * one), batches go oldest first, the patches of a batch in random order. So a large repaint fills in as a random mosaic,
- * and no patch waits for more than the patches queued before or with it. Either is correct: queued rectangles are
- * disjoint and read the latest pixels when captured, so only the order the viewer sees a repaint arrive in changes.
- */
-export type PatchOrder = 'oldest' | 'random'
-export type { PatchShape }
-
-/** Video has a fixed quality target (and a variable bitrate): higher, or lower while bandwidth is short. */
-export type VideoQuality = 'high' | 'low'
-
-export interface VideoEncoder {
-  requestKeyUnit(): void
-  /** the quality of the frames encoded from now on (cheap when it doesn't change) */
-  setQuality(quality: VideoQuality): void
-  destroy(): void
-}
+/** Shared types, re-exported for the code that has always imported them from here. */
+export type { PatchOrder, PatchShape, VideoEncoder, VideoQuality }
 
 /** Where encoded frames and patches go: the attached viewer. */
 export interface EncodingSink {
@@ -201,7 +184,11 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     private readonly context: EncodingContext<V>,
   ) {
     // demoted only once it has no damage left and is fully settled (video: stopping it sends a crisp image)
-    this.meter = new RelentlessMeter(context.now(), undefined, () => !this.hasDamageWork && (this.lease !== undefined || this.lossyArea.length === 0))
+    this.meter = new RelentlessMeter(
+      context.now(),
+      undefined,
+      () => !this.hasDamageWork && (this.lease !== undefined || this.lossyArea.length === 0),
+    )
     context.surfaces.add(this)
   }
 

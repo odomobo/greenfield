@@ -55,7 +55,11 @@ export function nebulaKdeGlobals(accent: [number, number, number] = NEBULA_ACCEN
     ForegroundPositive: '39,174,96',
     ForegroundVisited: '155,89,182',
   }
-  const colors = (normal: string, alternate: string) => ({ BackgroundAlternate: alternate, BackgroundNormal: normal, ...text })
+  const colors = (normal: string, alternate: string) => ({
+    BackgroundAlternate: alternate,
+    BackgroundNormal: normal,
+    ...text,
+  })
   return {
     'ColorEffects:Disabled': {
       Color: '56,56,56',
@@ -99,7 +103,13 @@ export function nebulaKdeGlobals(accent: [number, number, number] = NEBULA_ACCEN
 /** A KConfig file's text */
 export function toKConfig(file: KConfigFile): string {
   return Object.entries(file)
-    .map(([group, keys]) => `[${group}]\n` + Object.entries(keys).map(([key, value]) => `${key}=${value}\n`).join(''))
+    .map(
+      ([group, keys]) =>
+        `[${group}]\n` +
+        Object.entries(keys)
+          .map(([key, value]) => `${key}=${value}\n`)
+          .join(''),
+    )
     .join('\n')
 }
 

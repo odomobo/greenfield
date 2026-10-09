@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { PatchFormat } from '@gfld/scene-protocol'
-import { encodePatch, type EncodedPatch } from '../patch-encoder.js'
+import type { EncodedPatch } from '@nebula/session-contracts'
+import { encodePatch } from '../patch-encoder.js'
 
 // --- reference decoders (independent of the native code: plain JS ports of the QOI spec and the LZ4 block format) ---
 
@@ -314,7 +315,7 @@ test('lossy: noise goes out as a 4:4:4 JPEG, much smaller than lossless', () => 
   assert.deepEqual(jpegFrame(encoded.data), { width: 64, height: 48, sampling: [0x11, 0x11, 0x11] })
 })
 
-test('lossy with alpha: the color JPEG and a grayscale JPEG of the alpha, after the color JPEG\'s length', () => {
+test("lossy with alpha: the color JPEG and a grayscale JPEG of the alpha, after the color JPEG's length", () => {
   const rgba = noise(40, 30, false)
   const encoded = encodePatch(rgba, 40, 30, false, true)
   assert.equal(encoded.format, PatchFormat.JPEG_ALPHA)
