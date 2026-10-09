@@ -111,9 +111,6 @@ export class ViewerHost {
           done(false)
         }
       },
-      requireKeyFrame: (surfaceKey) => this.transport?.requireKeyFrame(surfaceKey),
-      dropPatches: (surfaceKey) => this.transport?.dropPatches(surfaceKey),
-      forgetSurface: (surfaceKey) => this.transport?.forgetSurface(surfaceKey),
     })
   }
 
@@ -153,7 +150,6 @@ export class ViewerHost {
       unencodedBytes: () => this.content.unencodedBytes?.() ?? 0,
     })
     this.transport = transport
-    transport.onKeyFrameNeeded = (surface) => this.content.requestKeyFrame(surface)
     transport.onMessage = (message) => this.onMessage(transport, message)
     transport.onFileChunk = (id, data) => this.scene.handleFileChunk?.(id, data)
     transport.onClose = (code, reason) => {
@@ -218,8 +214,9 @@ export class ViewerHost {
         onViewerFeedback(Number(message.refreshInterval) || 0)
         break
       case 'keyframe':
+        // the viewer's decoder failed: the surface's content makes its next frame a key frame (the viewer discards the
+        // deltas still on the way, which it can't decode)
         if (typeof message.surface === 'string') {
-          transport.requireKeyFrame(message.surface)
           this.content.requestKeyFrame(message.surface)
         }
         break

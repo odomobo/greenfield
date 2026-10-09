@@ -49,8 +49,6 @@ class FakeSink implements EncodingSink {
   autoDone = true
   frames: { surface: string; frame: Uint8Array; surfaceClass: SurfaceClass }[] = []
   patches: { surface: string; patch: Patch; tier: SendTier }[] = []
-  keyFramesRequired: string[] = []
-  patchesDropped: string[] = []
   /** items handed over and not yet "sent" (autoDone off) */
   held: Held[] = []
 
@@ -90,28 +88,9 @@ class FakeSink implements EncodingSink {
     }
   }
 
-  requireKeyFrame(surface: string) {
-    this.keyFramesRequired.push(surface)
-  }
-
-  /** like the transport: unsent items of the surface are dropped and reported */
-  dropPatches(surface: string) {
-    this.patchesDropped.push(surface)
-    const dropped = this.held.filter((item) => item.surface === surface)
-    this.held = this.held.filter((item) => item.surface !== surface)
-    for (const item of dropped) {
-      item.done(false)
-    }
-  }
-
-  surfacesForgotten: string[] = []
-
-  /** like the transport: everything unsent of the surface is dropped */
-  forgetSurface(surface: string) {
-    this.surfacesForgotten.push(surface)
-    const dropped = this.held.filter((item) => item.surface === surface)
-    this.held = this.held.filter((item) => item.surface !== surface)
-    for (const item of dropped) {
+  /** the network went away: everything held is reported unsent (the only time the transport does that) */
+  dropHeld() {
+    for (const item of this.held.splice(0)) {
       item.done(false)
     }
   }
@@ -308,7 +287,6 @@ test('a new surface is normal and sends patches, not video', async () => {
   await settle()
   await settle()
   assert.equal(env.sink.frames.length, 0)
-  assert.deepEqual(env.sink.keyFramesRequired, [])
   assert.equal(area(env.sink.patches.map(({ patch }) => patch.rect)), 1000 * 1000)
   assert.ok(env.sink.patches.every(({ tier }) => tier === 'normal'))
   assert.equal(env.pool.available, 2)
@@ -347,8 +325,6 @@ test('without a video encoder a streaming surface keeps sending patches, on the 
   assert.equal(encoder.surfaceClass, 'streaming')
   assert.equal(env.created, 0, 'no video encoder is ever created')
   assert.equal(env.sink.frames.length, 0)
-  assert.deepEqual(env.sink.keyFramesRequired, [])
-  assert.equal(env.sink.patchesDropped.length, 0, 'a class change without video drops nothing')
   // new patches are streaming class and go to the workers
   const callsBefore = env.streaming.calls
   env.sink.sendHeld()
@@ -358,16 +334,25 @@ test('without a video encoder a streaming surface keeps sending patches, on the 
   assert.ok(env.sink.patches.some(({ tier }) => tier === 'streaming'))
 })
 
-test('with an encoder, promotion switches to video with a key frame and drops the unsent patches', async () => {
+test('with an encoder, promotion switches to video with a key frame, after the patches already handed over', async () => {
   const env = setup(2)
   const { encoder, host } = env.surface('a')
   await relentless(env, encoder, host)
   assert.equal(encoder.surfaceClass, 'streaming')
   assert.ok(encoder.usesVideo)
   assert.equal(env.pool.available, 1, 'one encoder lent out')
-  assert.ok(env.sink.patchesDropped.includes('a'))
-  assert.ok(env.sink.keyFramesRequired.includes('a'))
-  assert.equal(encoder.queuedPatches.length, 0)
+  assert.ok(
+    env.encoders.some(({ keyUnits }) => keyUnits >= 1),
+    'the first frame is a key frame',
+  )
+  assert.equal(encoder.queuedPatches.length, 0, 'patches not handed over yet are superseded')
+  // the patches handed over are not taken back: they go out first, the key frame paints over them
+  const heldPatches = env.sink.held.length
+  assert.ok(heldPatches > 0)
+  assert.equal(env.sink.frames.length, 0, 'the key frame waits for a slot')
+  env.sink.sendHeld()
+  await settle()
+  await settle()
   assert.ok(env.sink.frames.length >= 1)
   assert.ok(env.sink.frames.every(({ surfaceClass }) => surfaceClass === 'streaming'))
 })
@@ -468,7 +453,7 @@ test('a surface has at most SURFACE_SLOTS items between capture and the socket',
   assert.equal(area(env.sink.patches.map(({ patch }) => patch.rect)), 1000 * 1000)
 })
 
-test('a dropped item gives its slot back too', async () => {
+test('an item reported unsent gives its slot back too', async () => {
   const env = setup()
   const { encoder, host } = env.surface('a')
   env.sink.autoDone = false
@@ -476,10 +461,51 @@ test('a dropped item gives its slot back too', async () => {
   await settle()
   await settle()
   assert.ok(!encoder.hasFreeSlot)
-  await encoder.refresh() // drops the unsent patches, queues the whole surface again
-  assert.equal(env.sink.patchesDropped.at(-1), 'a')
+  assert.ok(encoder.hasQueuedPatches)
+  const handedOver = env.sink.patches.length
+  env.sink.dropHeld()
   await settle()
+  assert.equal(env.sink.held.length, SURFACE_SLOTS, 'the next queued patches take the slots')
+  assert.equal(env.sink.patches.length, handedOver + SURFACE_SLOTS)
+})
+
+test('refresh takes back nothing handed over: the whole surface is queued behind it', async () => {
+  const env = setup()
+  const { encoder, host } = env.surface('a')
+  env.sink.autoDone = false
+  await encoder.commit(full(host))
+  await settle()
+  await settle()
+  const handedOver = env.sink.patches.length
+  const held = [...env.sink.held]
+  assert.equal(held.length, SURFACE_SLOTS)
+  await encoder.refresh()
+  await settle()
+  assert.deepEqual(env.sink.held, held, 'still waiting to go out')
+  assert.equal(env.sink.patches.length, handedOver, 'the refresh waits for a slot')
+  assert.equal(area([...encoder.queuedPatches]), 1000 * 1000)
+  env.sink.flowFreely()
+  for (let i = 0; i < 20 && encoder.hasQueuedPatches; i++) {
+    await settle()
+  }
+  assert.equal(area(env.sink.patches.slice(handedOver).map(({ patch }) => patch.rect)), 1000 * 1000)
+})
+
+test('destroying a surface takes back nothing handed over', async () => {
+  const env = setup()
+  const { encoder, host } = env.surface('a')
+  env.sink.autoDone = false
+  await encoder.commit(full(host))
+  await settle()
+  await settle()
+  const patches = env.sink.patches.length
   assert.equal(env.sink.held.length, SURFACE_SLOTS)
+  encoder.destroy()
+  assert.equal(env.sink.held.length, SURFACE_SLOTS, 'its items still go out, the viewer ignores them')
+  env.sink.flowFreely()
+  await settle()
+  await settle()
+  assert.equal(env.sink.patches.length, patches, 'nothing new of it is captured')
 })
 
 test('at most MAX_NORMAL_ENCODES normal patches are encoded at once; streaming ones wait for their workers', async () => {
@@ -557,7 +583,6 @@ test('video that finishes encoding after the surface was destroyed is dropped an
   host.encodes[0].resolve(new Uint8Array([1]))
   await settle()
   assert.equal(env.sink.frames.length, framesBefore, 'the stale frame is not sent')
-  assert.deepEqual(env.sink.surfacesForgotten, ['a'], 'the transport drops what it still has of the surface')
   assert.ok(encoder.hasFreeSlot)
   assert.equal(env.pool.available, 2)
 })
@@ -693,10 +718,13 @@ test('refresh resends the whole surface, as a key frame for video and as patches
   await relentless(env, encoder, host)
   assert.ok(encoder.usesVideo)
   env.sink.flowFreely()
-  const keyFrames = env.sink.keyFramesRequired.length
+  const keyUnits = () => env.encoders.reduce((sum, { keyUnits }) => sum + keyUnits, 0)
+  const keyFrames = keyUnits()
+  const frames = env.sink.frames.length
   await encoder.refresh()
   await settle()
-  assert.equal(env.sink.keyFramesRequired.length, keyFrames + 1)
+  assert.equal(keyUnits(), keyFrames + 1, 'the next frame is a key frame')
+  assert.ok(env.sink.frames.length > frames)
 })
 
 test('nothing is encoded without a viewer', async () => {

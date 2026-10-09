@@ -64,18 +64,16 @@ export interface EncodingSink {
   readonly linkBandwidth: number | undefined
   /** The bytes of the surface's items waiting to be sent, except settling patches. */
   queuedBytes(surface: string): number
-  /** `done` must be called exactly once: when the frame was handed to the network (true) or dropped (false) */
+  /**
+   * `done` must be called exactly once: when the frame was handed to the network (true) or not sent (false: the viewer
+   * went away). A queued item is never dropped otherwise, also not when the surface is destroyed.
+   */
   sendFrame(surface: string, frame: Uint8Array, surfaceClass: SurfaceClass, done: (sent: boolean) => void): void
   /**
-   * `done` must be called exactly once: when the patch was handed to the network (true) or dropped (false). `tier`: the
+   * `done` must be called exactly once: when the patch was handed to the network (true) or not sent (false). `tier`: the
    * surface's class, or settle for a settling patch.
    */
   sendPatch(surface: string, patch: Patch, tier: SendTier, done: (sent: boolean) => void): void
-  /** drop everything unsent of the surface, its video restarts with a key frame */
-  requireKeyFrame(surface: string): void
-  dropPatches(surface: string): void
-  /** the surface is gone: drop everything unsent of it */
-  forgetSurface(surface: string): void
 }
 
 /** The surface's buffer, as the encoder sees it. */
@@ -127,11 +125,11 @@ export interface PatchSource {
   readonly hasFreeSlot: boolean
   /** the tier of its next patch: its class for damage, settle when it settles */
   readonly sendTier: SendTier
-  /** Takes a slot, which the pump gives back with `releaseSlot` once the patch is sent or dropped. */
+  /** Takes a slot, which the pump gives back with `releaseSlot` once the patch is sent or reported unsent. */
   capturePatch(): CapturedPatch | undefined
   /** A captured patch goes to the sink now, encoded (called in capture order). */
   patchSending(captured: CapturedPatch, encoded: EncodedPatch): void
-  /** The patch was handed to the socket, or dropped (sent or not). */
+  /** The patch was handed to the socket, or reported unsent (sent or not). */
   releaseSlot(captured?: CapturedPatch): void
   /** false if results captured at this epoch are stale (class switched, surface destroyed) */
   isCurrent(epoch: number): boolean
@@ -153,7 +151,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   private patchUnsupported = false
   private unsupportedLogged = false
   private _destroyed = false
-  /** slots in use: items captured (or video encoding started) and not yet handed to the socket or dropped */
+  /** slots in use: items captured (or video encoding started) and not yet handed to the socket or reported unsent */
   private slotsUsed = 0
   /** the video needs a new frame (a key frame, or a delta of the latest content) as soon as a slot is free */
   private videoWanted?: 'delta' | 'key'
@@ -401,8 +399,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       this.logUnsupported()
       return resolved
     }
+    // (patches already handed to the sink still go out: the whole surface sent after them paints over them)
     this.queued = []
-    this.context.sink.dropPatches(this.key)
     this.queuePatches([boundsOf(buffer)], boundsOf(buffer))
     this.updateBusy()
     return resolved
@@ -413,7 +411,6 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this.queued = []
     this.settleQueue = []
     this.videoWanted = undefined
-    this.context.sink.dropPatches(this.key)
     this.updateBusy()
   }
 
@@ -428,8 +425,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this.encoding.clear()
     this.videoWanted = undefined
     this.releaseLease()
+    // (what's queued in the sink still goes out: the viewer ignores the items of surfaces it has forgotten)
     this.context.surfaces.delete(this)
-    this.context.sink.forgetSurface(this.key)
   }
 
   /**
@@ -529,7 +526,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this.losslessPixels = this.losslessPixels * BYTES_PER_PIXEL_DECAY + rect.width * rect.height
   }
 
-  /** An item was handed to the socket or dropped: its slot is free again. */
+  /** An item was handed to the socket or reported unsent (or discarded): its slot is free again. */
   releaseSlot(captured?: CapturedPatch): void {
     if (captured) {
       this.encoding.delete(captured)
@@ -664,8 +661,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   }
 
   /**
-   * Start streaming video: unsent patches are superseded by the key frame. Undefined if there is no encoder to start
-   * it with.
+   * Start streaming video, from a key frame (patches already handed to the sink go out first, the key frame paints
+   * over them). Undefined if there is no encoder to start it with.
    */
   private startVideo(): Promise<void> | undefined {
     if (this.lease === undefined) {
@@ -678,7 +675,6 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this.queued = []
     this.settleQueue = []
     this.encoding.clear()
-    this.context.sink.dropPatches(this.key)
     const buffer = this.host.currentBuffer()
     if (buffer) {
       // video is lossy all over
@@ -705,8 +701,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
 
   private requestVideo(keyFrame: boolean): Promise<void> {
     if (keyFrame) {
+      // the encoder's next frame is a key frame (video starts, or the viewer's decoder failed and asked for one)
       this.videoWanted = 'key'
-      this.context.sink.requireKeyFrame(this.key)
       this.lease?.requestKeyUnit()
     } else {
       this.videoWanted ??= 'delta'

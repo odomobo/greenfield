@@ -23,7 +23,6 @@ import {
   encodeControl,
   encodeFrame,
   encodePatch,
-  isKeyFrame,
   Patch,
   ViewerAck,
 } from './protocol.js'
@@ -41,7 +40,7 @@ export type OutgoingMessage =
   | { readonly priority: 'audio'; readonly packet: AudioPacket }
   /**
    * Video frames and patches carry their surface's priority class, and `done`, which is called once: sent true when
-   * handed to the socket, false when dropped unsent.
+   * handed to the socket, false if the transport closed before it was.
    */
   | {
       readonly priority: 'frame'
@@ -74,27 +73,11 @@ export interface ViewerTransport {
    * order, so a surface's items wait in the highest tier of any of them. Items larger than the chunk size (chunkSize)
    * go out in chunks (CHUNK envelopes): control messages and audio go between any two, a higher tier's items too, but a
    * tier sends one item at a time (its started item continues until done), and a surface's next item waits for its
-   * started one. A started item is never dropped. A video key frame replaces everything unsent
-   * of its surface (it covers the whole surface),
-   * delta frames are chained behind it up to a small limit. Patches are never coalesced or dropped, except by a later
-   * key frame or the calls below.
+   * started one. Nothing queued is ever dropped, replaced or revised: the transport doesn't look into the items (a video
+   * key frame is just an item); every item goes out, in order, until the transport closes, which reports all that is
+   * unsent as not sent. Items of a surface the viewer has forgotten (destroyed) still go out: the viewer ignores them.
    */
   send(message: OutgoingMessage): void
-
-  /**
-   * Drop what is queued for this surface and only send video for it again from its next key frame on (e.g. the
-   * viewer's decoder failed and asked for one, or the surface starts streaming video).
-   */
-  requireKeyFrame(surface: string): void
-
-  /** Drop the unsent patches of this surface. */
-  dropPatches(surface: string): void
-
-  /**
-   * The surface is gone: drop what is queued for it and what the transport remembers about it (its started item, if
-   * any, still goes out: the viewer drops it).
-   */
-  forgetSurface(surface: string): void
 
   /**
    * The link is short of bandwidth for the streaming class (see bandwidth.ts): its surfaces go lossy (JPEG patches,
@@ -118,14 +101,9 @@ export interface ViewerTransport {
   /** The viewer acknowledged data envelopes and reported its backlog (see the scene protocol's ACK). */
   onAck: (ack: ViewerAck) => void
   onClose: (code: number, reason: string) => void
-  /**
-   * A frame for this surface had to be dropped and the following frames can't be decoded without a key frame.
-   */
-  onKeyFrameNeeded: (surface: string) => void
 }
 
-// Keep the kernel's unsent backlog small, so frames wait in our queue where they can still be coalesced and control
-// messages can overtake them.
+// Keep the kernel's unsent backlog small, so frames wait in our queue where control messages can overtake them.
 const TCP_NOTSENT_LOWAT_BYTES = 32 * 1024
 // Same idea when the viewer is relayed to us over a Unix socket (by the gateway): cap the kernel send buffer.
 const UNIX_SEND_BUFFER_BYTES = 32 * 1024
@@ -151,8 +129,6 @@ export const CHUNK_MIN_BYTES = 10 * 1024
 export const CHUNK_MAX_BYTES = 300 * 1024
 // The simulated link logs audio waiting longer than this behind other data (see noteLinkAudioWait).
 const LINK_AUDIO_WAIT_LOG_MS = 30
-// Max unsent delta frames per surface. Beyond that the viewer is too far behind: drop them and resync with a key frame.
-const MAX_UNSENT_FRAMES_PER_SURFACE = 3
 
 type QueuedEntry = { readonly tier: SendTier; readonly done?: (sent: boolean) => void } & (
   { readonly kind: 'frame'; readonly frame: Uint8Array } | { readonly kind: 'patch'; readonly envelope: Uint8Array }
@@ -166,7 +142,7 @@ type QueuedEntry = { readonly tier: SendTier; readonly done?: (sent: boolean) =>
  */
 export type SimulatedLink = { bytesPerMs: number }
 
-function dropEntries(entries: QueuedEntry[]) {
+function reportUnsent(entries: QueuedEntry[]) {
   for (const entry of entries) {
     entry.done?.(false)
   }
@@ -185,7 +161,7 @@ type NextSend = {
   entry: QueuedEntry
   /** what to write: the whole envelope, or a CHUNK of it */
   data: Uint8Array
-  /** its first piece (a key frame is sent from here on) */
+  /** its first piece (the item leaves its surface's chain) */
   first: boolean
   /** its last piece (the item is done once it's written) */
   last: boolean
@@ -215,20 +191,17 @@ export class WebSocketViewerTransport implements ViewerTransport {
   onClose: (code: number, reason: string) => void = () => {
     /* noop */
   }
-  onKeyFrameNeeded: (surface: string) => void = () => {
-    /* noop */
-  }
 
   private readonly controlQueue: Buffer[] = []
   /**
-   * Unsent frames and patches per surface, in order. Video in a chain starts with a key frame or continues a stream
-   * the viewer already decodes. Map iteration order (insertion) is the round-robin order between surfaces: a surface
+   * Unsent frames and patches per surface, in order; a surface's entry goes once nothing of it is waiting (its
+   * started item aside). Map iteration order (insertion) is the round-robin order between surfaces: a surface
    * goes to the back after each of its items is sent. A surface's tier is the highest of its items' (see tierOf).
    */
   private readonly pendingFrames = new Map<string, QueuedEntry[]>()
   /**
    * Items being sent in chunks, at most one per surface (its next item waits) and one per tier (a tier continues its
-   * started item before it starts another). They are out of their surface's chain: never dropped.
+   * started item before it starts another). They are out of their surface's chain.
    */
   private readonly started = new Map<string, StartedItem>()
   private nextItemId = 0
@@ -239,11 +212,6 @@ export class WebSocketViewerTransport implements ViewerTransport {
   private drrTurn: SendTier = 'normal'
   private drrQuantumGiven = false
   private readonly drrDeficit: Record<SendTier, number> = { normal: 0, streaming: 0, settle: 0 }
-  /**
-   * Surfaces whose next frame must be a key frame because a frame was dropped.
-   */
-  private readonly needsKeyFrame = new Set<string>()
-  private readonly keyFrameSent = new Set<string>()
   private readonly congestion: Congestion
   private readonly now: () => number
   /** wakes the pump when the controller's pacing lets the next item go */
@@ -318,7 +286,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
       this._closed = true
       this.clearPacingTimer()
       this.clearLink()
-      this.dropAll()
+      this.closeQueue()
       this.onClose(code, reason.toString())
     })
     ws.on('error', (error) => logger.error(`Viewer connection error: ${error.message}`))
@@ -395,50 +363,18 @@ export class WebSocketViewerTransport implements ViewerTransport {
     this._closed = true
     this.clearPacingTimer()
     this.clearLink()
-    this.dropAll()
+    this.closeQueue()
     this.controlQueue.length = 0
     this.ws.close(code, reason)
   }
 
-  requireKeyFrame(surface: string): void {
-    this.dropQueued(surface)
-    this.needsKeyFrame.add(surface)
-  }
-
-  dropPatches(surface: string): void {
-    const chain = this.pendingFrames.get(surface)
-    if (chain === undefined) {
-      return
-    }
-    const kept = chain.filter((entry) => entry.kind !== 'patch')
-    dropEntries(chain.filter((entry) => entry.kind === 'patch'))
-    if (kept.length) {
-      this.pendingFrames.set(surface, kept)
-    } else {
-      this.pendingFrames.delete(surface)
-    }
-  }
-
-  forgetSurface(surface: string): void {
-    this.dropQueued(surface)
-    this.needsKeyFrame.delete(surface)
-    this.keyFrameSent.delete(surface)
-  }
-
-  private dropQueued(surface: string) {
-    const chain = this.pendingFrames.get(surface)
-    this.pendingFrames.delete(surface)
-    if (chain) {
-      dropEntries(chain)
-    }
-  }
-
-  private dropAll() {
+  /** The transport closed: everything queued or started is reported unsent (the only time an item is). */
+  private closeQueue() {
     for (const chain of this.pendingFrames.values()) {
-      dropEntries(chain)
+      reportUnsent(chain)
     }
     this.pendingFrames.clear()
-    dropEntries([...this.started.values()].map(({ entry }) => entry))
+    reportUnsent([...this.started.values()].map(({ entry }) => entry))
     this.started.clear()
   }
 
@@ -474,39 +410,14 @@ export class WebSocketViewerTransport implements ViewerTransport {
   }
 
   private queueFrame(surface: string, frame: Uint8Array, surfaceClass: SurfaceClass, done?: (sent: boolean) => void) {
-    const entry: QueuedEntry = { kind: 'frame', frame, tier: surfaceClass, done }
-    if (isKeyFrame(frame)) {
-      // everything unsent is superseded, a key frame covers the whole surface
-      this.dropQueued(surface)
-      this.pendingFrames.set(surface, [entry])
-      this.needsKeyFrame.delete(surface)
-      return
-    }
-
-    const chain = this.pendingFrames.get(surface)
-    const decodable = !this.needsKeyFrame.has(surface) && (this.keyFrameSent.has(surface) || chain !== undefined)
-    if (!decodable) {
-      // the viewer can't decode this, wait for a key frame
-      done?.(false)
-      this.requestKeyFrame(surface)
-      return
-    }
-
-    const unsentVideo = chain?.filter((entry) => entry.kind === 'frame').length ?? 0
-    if (chain === undefined) {
-      this.pendingFrames.set(surface, [entry])
-    } else if (unsentVideo < MAX_UNSENT_FRAMES_PER_SURFACE) {
-      chain.push(entry)
-    } else {
-      // too far behind, resync
-      done?.(false)
-      this.dropQueued(surface)
-      this.requestKeyFrame(surface)
-    }
+    this.enqueue(surface, { kind: 'frame', frame, tier: surfaceClass, done })
   }
 
   private queuePatch(surface: string, patch: Patch, tier: SendTier, done?: (sent: boolean) => void) {
-    const entry: QueuedEntry = { kind: 'patch', envelope: encodePatch(surface, patch), tier, done }
+    this.enqueue(surface, { kind: 'patch', envelope: encodePatch(surface, patch), tier, done })
+  }
+
+  private enqueue(surface: string, entry: QueuedEntry) {
     const chain = this.pendingFrames.get(surface)
     if (chain === undefined) {
       this.pendingFrames.set(surface, [entry])
@@ -606,7 +517,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
         }
         this.drrDeficit[turn] -= cost
         if (next.first) {
-          // out of the chain: from here on it's sent, whatever is dropped
+          // out of the chain: from here on it's sent
           const chain = this.pendingFrames.get(head.surface)!
           chain.shift()
           if (chain.length === 0) {
@@ -633,14 +544,6 @@ export class WebSocketViewerTransport implements ViewerTransport {
       this.drrTurn = nextTier(turn)
     }
     return nothingTaken()
-  }
-
-  private requestKeyFrame(surface: string) {
-    if (this.needsKeyFrame.has(surface)) {
-      return
-    }
-    this.needsKeyFrame.add(surface)
-    this.onKeyFrameNeeded(surface)
   }
 
   private pump() {
@@ -683,10 +586,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
         }
         break
       }
-      const { surface, entry, data } = next
-      if (next.first && entry.kind === 'frame' && isKeyFrame(entry.frame)) {
-        this.keyFrameSent.add(surface)
-      }
+      const { entry, data } = next
       this.congestion.onSend(data.length, now)
       // The callback fires once the data was handed to the kernel. With TCP_NOTSENT_LOWAT that means most of it has
       // actually left; the item's slot is free from then on (once its last chunk is).

@@ -962,9 +962,6 @@ function holdingSink() {
     queuedBytes: () => 0,
     sendFrame: (_surface, _frame, _class, done) => held.push(done),
     sendPatch: (_surface, _patch, _class, done) => held.push(done),
-    requireKeyFrame: () => undefined,
-    dropPatches: () => undefined,
-    forgetSurface: () => undefined,
   }
   return { sink, held }
 }
