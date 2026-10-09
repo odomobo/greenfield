@@ -46,6 +46,9 @@
  * - No send quantum (an item is sent whole) and no offload budget.
  */
 
+import type { ViewerAck } from '@gfld/scene-protocol'
+import type { Congestion } from '@nebula/session-contracts'
+
 /** Typical TCP payload per packet, the draft's C.SMSS, for the draft's per-packet constants (MinPipeCwnd, headroom). */
 export const SMSS = 1448
 /** C.InitialCwnd: the in-flight limit before there is any estimate. */
@@ -94,16 +97,6 @@ export type CongestionState =
   'Startup' | 'Drain' | 'ProbeBW_DOWN' | 'ProbeBW_CRUISE' | 'ProbeBW_REFILL' | 'ProbeBW_UP' | 'ProbeRTT'
 
 type AckPhase = 'ACKS_INIT' | 'ACKS_PROBE_STARTING' | 'ACKS_PROBE_STOPPING' | 'ACKS_PROBE_FEEDBACK' | 'ACKS_REFILLING'
-
-/** What the viewer reports in an ACK envelope (see the scene protocol). */
-export type ViewerAck = {
-  /** cumulative count of data envelopes received on this connection, mod 2^32 */
-  received: number
-  /** bytes of data envelopes received but not yet applied */
-  backlogBytes: number
-  /** the largest single item in that backlog */
-  largestPendingBytes: number
-}
 
 /** Per-item state (the draft's per-packet state P). */
 type SentItem = {
@@ -169,7 +162,7 @@ class WindowedMax {
   }
 }
 
-export class CongestionController {
+export class CongestionController implements Congestion {
   // connection state (the draft's C.*)
   private sent: SentItem[] = []
   /** items acked so far (mod 2^32, compared with the viewer's `received`) */

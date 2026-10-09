@@ -3,14 +3,8 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
 import { ChunkAssembler, decodeChunk, decodeEnvelope, isChunkEnvelope, Patch, PatchFormat } from '@gfld/scene-protocol'
-import type { SendTier } from '@nebula/session-contracts'
-import {
-  CHUNK_MAX_BYTES,
-  CHUNK_MIN_BYTES,
-  CHUNK_MS,
-  Congestion,
-  WebSocketViewerTransport,
-} from '../../viewer/ViewerTransport.js'
+import type { Congestion, SendTier } from '@nebula/session-contracts'
+import { CHUNK_MAX_BYTES, CHUNK_MIN_BYTES, CHUNK_MS, WebSocketViewerTransport } from '../../viewer/ViewerTransport.js'
 import { CHUNK_HEADER_BYTES } from '@gfld/scene-protocol'
 
 /** Just enough of a ws WebSocket: sends complete when the test says so. */

@@ -3,8 +3,9 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
 import { decodeEnvelope, encodeAck, encodePatch, Patch, PatchFormat } from '@gfld/scene-protocol'
-import { CongestionController } from '../congestion.js'
-import { Congestion, WebSocketViewerTransport } from '../ViewerTransport.js'
+import { CongestionController } from '@nebula/congestion'
+import type { Congestion } from '@nebula/session-contracts'
+import { WebSocketViewerTransport } from '../ViewerTransport.js'
 
 /** Just enough of a ws WebSocket: sends are handed to the kernel at once (their callbacks run right away). */
 class FakeWebSocket extends EventEmitter {

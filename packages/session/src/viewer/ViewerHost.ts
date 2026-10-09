@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws'
+import { CongestionController } from '@nebula/congestion'
 import { createLogger } from '../Logger.js'
 import { onViewerFeedback, setViewerAttached } from '../FramePacing.js'
 import type { EncodingSink } from '../encoding/SurfaceEncoder.js'
@@ -146,6 +147,7 @@ export class ViewerHost {
     }
 
     const transport = new WebSocketViewerTransport(ws, {
+      congestion: new CongestionController({ now: performance.now() }),
       link: this.options.link,
       unencodedBytes: () => this.content.unencodedBytes?.() ?? 0,
     })
