@@ -20,6 +20,7 @@ manager, the desktop shell, and the input handling. Sign-in is PAM, over TLS, pr
 | `packages/scene-protocol` | TypeScript | Wire protocol (windows, frames, control messages) |
 | `packages/viewer` | TypeScript, React, C→WASM | Browser client: sign-in, desktop shell, window management, decoding |
 | `packages/session` | TypeScript, C (Node addons, wlroots) | Per-user desktop: compositor, encoding, transport, shell service, audio |
+| `packages/patch-codec` | TypeScript, C (Node addon) | Patch encoding: PNG, QOI / LZ4 / JPEG in a native addon, the worker pools |
 | `packages/gatekeeper` | Rust | Login helpers (PAM + dev), web front (TLS, HTTP, WebSocket, seccomp sandbox) |
 | `scripts/` | Bash, JS, C | End-to-end test suite |
 

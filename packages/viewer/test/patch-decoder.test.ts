@@ -5,7 +5,7 @@ import { decodeEnvelope, encodePatch, PatchFormat } from '@gfld/scene-protocol'
 import { PatchDecoder } from '../src/patch/patch-decoder.js'
 
 // the real native encoder (built with the compositor proxy): the decoder is tested against what the server sends
-const addon = createRequire(import.meta.url)('../../../session/dist/addons/nebula-patch-addon.node') as {
+const addon = createRequire(import.meta.url)('../../../patch-codec/dist/addons/nebula-patch-addon.node') as {
   encodePatch(
     rgba: Uint8Array,
     width: number,

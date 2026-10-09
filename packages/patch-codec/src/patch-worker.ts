@@ -3,8 +3,7 @@
  * (the native QOI cascade, or JPEG), one at a time.
  */
 import { parentPort, workerData } from 'node:worker_threads'
-import { setThreadNice } from '../socket-options.js'
-import { encodePatch } from './patch-encoder.js'
+import { encodePatch, setThreadNice } from './patch-encoder.js'
 import type { WorkerReply, WorkerRequest } from './PatchWorkerPool.js'
 
 const port = parentPort!

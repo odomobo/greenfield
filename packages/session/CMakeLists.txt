@@ -25,8 +25,6 @@ pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl>=1.5)
 pkg_check_modules(OPENGL REQUIRED IMPORTED_TARGET opengl>=3.3)
 pkg_check_modules(GBM REQUIRED gbm IMPORTED_TARGET)
 pkg_check_modules(LIBDRM REQUIRED libdrm IMPORTED_TARGET)
-# libjpeg-turbo (Ubuntu: libjpeg-dev), for lossy patches
-pkg_check_modules(JPEG REQUIRED libjpeg IMPORTED_TARGET)
 
 add_library(proxy-poll-addon SHARED
         ${CMAKE_CURRENT_SOURCE_DIR}/native/poll/src/poll.c
@@ -41,20 +39,6 @@ target_include_directories(proxy-poll-addon PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/native/node-api
 )
 set_target_properties(proxy-poll-addon PROPERTIES PREFIX "" SUFFIX ".node")
-
-# The patch encoder (QOI + LZ4, vendored in native/patch/vendor with their licences, and JPEG from the system's
-# libjpeg-turbo), loaded by the patch encoding worker threads.
-add_library(nebula-patch-addon SHARED
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/patch/src/patch_encode.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/patch/vendor/lz4.c
-)
-target_include_directories(nebula-patch-addon PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/patch/vendor
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/node-api
-)
-target_compile_options(nebula-patch-addon PRIVATE -O3)
-target_link_libraries(nebula-patch-addon PRIVATE PkgConfig::JPEG)
-set_target_properties(nebula-patch-addon PROPERTIES PREFIX "" SUFFIX ".node")
 
 # The session's D-Bus connection (src/shell/dbus.ts): sd_bus from libsystemd (Ubuntu: libsystemd-dev).
 pkg_check_modules(LIBSYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
@@ -145,4 +129,4 @@ target_link_libraries(wlr-core-addon PRIVATE
         rt
         m
 )
-install(TARGETS wlr-core-addon proxy-poll-addon nebula-patch-addon nebula-dbus-addon DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/dist/addons)
+install(TARGETS wlr-core-addon proxy-poll-addon nebula-dbus-addon DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/dist/addons)

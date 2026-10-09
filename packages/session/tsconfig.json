@@ -11,6 +11,6 @@
     "sourceMap": true,
     "strict": true
   },
-  "references": [{ "path": "../session-contracts" }],
+  "references": [{ "path": "../session-contracts" }, { "path": "../patch-codec" }],
   "exclude": ["dist", "types", "build", "native", ".eslintrc.js", ".prettierrc.js"]
 }

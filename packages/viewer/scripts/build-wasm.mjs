@@ -1,5 +1,5 @@
 /**
- * Builds the patch decoder (wasm/qoi_wasm.c + wasm/lz4_wasm.c, LZ4 from the proxy's vendor directory) with plain
+ * Builds the patch decoder (wasm/qoi_wasm.c + wasm/lz4_wasm.c, LZ4 from the patch-codec package's vendor directory) with plain
  * `clang --target=wasm32` and `wasm-ld`: no Emscripten, no libc. The result, about 2 KB, is written as a TypeScript
  * module (src/patch/wasm-bytes.ts, generated, not committed) so the viewer and its tests import the bytes directly.
  *
@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const buildDir = path.join(root, 'wasm', 'build')
-const lz4Dir = path.join(root, '..', 'session', 'native', 'patch', 'vendor')
+const lz4Dir = path.join(root, '..', 'patch-codec', 'native', 'vendor')
 const output = path.join(root, 'src', 'patch', 'wasm-bytes.ts')
 
 function run(command, args) {

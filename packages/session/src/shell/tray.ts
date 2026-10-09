@@ -10,7 +10,7 @@
  * All D-Bus goes through dbus.ts.
  */
 import { createLogger } from '../Logger.js'
-import { encodePng } from '../encoding/png.js'
+import { encodePng } from '@nebula/patch-codec'
 import {
   DBUS_NAME,
   DBusConnection,

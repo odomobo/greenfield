@@ -264,7 +264,7 @@ Changing class:
 - Only the damaged areas are sent, as lossless patches of at most `MAX_PATCH_PIXELS` = 64k pixels; larger areas
   are split (`planPatches`). A commit's damage in more than `MAX_PATCH_RECTS` = 32 pieces is sent as its bounding box.
   Each patch is encoded with the QOI cascade (raw / QOI / QOI + LZ4, next section; native `nebula-patch-addon`, on
-  worker threads, `patch-encoder.ts`), and decoded in the viewer by a wasm decoder in a Web Worker. (It was PNG until
+  worker threads, `patch-encoder.ts`; all in `packages/patch-codec`), and decoded in the viewer by a wasm decoder in a Web Worker. (It was PNG until
   item 5b phase 1.)
 - The viewer applies patches as soon as they arrive. A streaming surface's frame can therefore tear across patches;
   accepted, as holding patches back until a whole frame is there would add latency.
@@ -342,7 +342,7 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
   longer bandwidth-limited: ..."). The sink tells the encoders (`EncodingSink.bandwidthLimited`).
 - **JPEG or lossless, whichever is smaller** (a deviation from "JPEG patches while limited"): a streaming surface's
   patches captured while limited are encoded with the lossless cascade *and* as JPEG (quality 70, 4:4:4,
-  libjpeg-turbo, `JPEG_QUALITY` in `patch-encoder.ts`), and the smaller goes out. UI content is often smaller
+  libjpeg-turbo, `JPEG_QUALITY` in `packages/patch-codec/src/patch-encoder.ts`), and the smaller goes out. UI content is often smaller
   losslessly (QOI + LZ4), and then nothing needs refreshing; QOI costs a fraction of the JPEG encode.
 - **Lossy areas** are tracked per surface (`SurfaceEncoder.lossyArea`, at most 32 rectangles, else their bounding
   box), updated in send order (each patch as it goes to the sink, so a later lossless patch always clears an earlier
@@ -407,15 +407,15 @@ surfaces' patches are encoded on threads with a low OS priority, and the kernel'
 that nothing else wants.
 
 - **Normal surfaces**: a pool of `NORMAL_ENCODE_WORKERS` = 4 worker threads at normal priority (nice 0; the same
-  `PatchWorkerPool` class and `patch-worker.ts`). At most `MAX_NORMAL_ENCODES` = 4 patches encoding at once.
+  `PatchWorkerPool` class and `patch-worker.ts`, in `packages/patch-codec`). At most `MAX_NORMAL_ENCODES` = 4 patches encoding at once.
 - **Streaming surfaces**: a separate pool of `STREAMING_ENCODE_WORKERS` = 2 Node `worker_threads`, each started with
   its own OS thread at nice `STREAMING_ENCODE_NICE` = 19. A worker does the whole encode (the native QOI
   cascade, synchronously, on the worker's own thread, so the nice level applies to it), one patch at a time.
   The captured pixels are passed as a transferred `ArrayBuffer` (no copy) and the encoded patch comes back the same way.
   The libuv thread pool can't be used for this: its threads are shared with everything else in the process (file
   I/O, DNS, normal patches), and an unprivileged process can raise a thread's nice level but never lower it back.
-- Setting the nice level: a small native function in the existing `poll` addon (next to `setTcpNotSentLowat`),
-  `setThreadNice(n)`: `setpriority(PRIO_PROCESS, gettid(), n)`, which on Linux applies to the calling thread only.
+- Setting the nice level: a small native function in the patch addon (`packages/patch-codec/native`, which the workers load
+  anyway), `setThreadNice(n)`: `setpriority(PRIO_PROCESS, gettid(), n)`, which on Linux applies to the calling thread only.
   Each worker calls it first thing; if it fails, the worker logs once and carries on at normal priority. No
   privileges are needed to lower one's own priority.
 - Nice 19 has a scheduler weight of 15 against 1024 for nice 0: with a busy normal-priority thread on the same core,
