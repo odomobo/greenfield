@@ -84,6 +84,15 @@ export interface ViewerTransport {
   /** The bytes of the surface's frames and patches waiting to be sent, except settling patches. */
   queuedBytes(surface: string): number
 
+  /**
+   * Whether the surface's stream is ready for its next item: at most one chunk (the current chunk size, see CHUNK_MS)
+   * of its data is left unsent, counted in bytes (its queued items and what's left of its started one). So small items
+   * may be queued until about a chunk's worth waits, and a large one (a key frame) isn't followed by the next until it's
+   * nearly sent. `exceptSettling`: settling patches don't count (new damage comes before settling). A closed transport
+   * is always ready (nothing is sent anymore). A stream found not ready gets `onStreamReady` once it is.
+   */
+  streamReady(surface: string, exceptSettling?: boolean): boolean
+
   close(code: number, reason: string): void
 
   readonly closed: boolean
@@ -93,6 +102,11 @@ export interface ViewerTransport {
   onFileChunk: (id: number, data: Uint8Array) => void
   /** The viewer acknowledged data envelopes and reported its backlog (see the scene protocol's ACK). */
   onAck: (ack: ViewerAck) => void
+  /**
+   * A surface's stream that `streamReady` found not ready is ready now (called once per such answer, after the
+   * transport's state is updated; never while it's closed).
+   */
+  onStreamReady: (surface: string) => void
   onClose: (code: number, reason: string) => void
 }
 
@@ -131,7 +145,7 @@ type QueuedEntry = { readonly tier: SendTier; readonly done?: (sent: boolean) =>
  * DEVELOPMENT ONLY (the session's --dev-link-kbps): a simulated bottleneck of this many bytes per ms between the
  * transport and the socket. Everything sent (control messages and audio too, in order) waits in a FIFO and leaves at
  * that rate, as through a slow link with a deep buffer, so the congestion controller sees the queue and the bandwidth.
- * As with a real socket, a write is done (the item's slot is free) as soon as the FIFO took it.
+ * As with a real socket, a write is done (the item counts as sent) as soon as the FIFO took it.
  */
 export type SimulatedLink = { bytesPerMs: number }
 
@@ -181,6 +195,9 @@ export class WebSocketViewerTransport implements ViewerTransport {
   onAck: (ack: ViewerAck) => void = () => {
     /* noop */
   }
+  onStreamReady: (surface: string) => void = () => {
+    /* noop */
+  }
   onClose: (code: number, reason: string) => void = () => {
     /* noop */
   }
@@ -198,6 +215,8 @@ export class WebSocketViewerTransport implements ViewerTransport {
    */
   private readonly started = new Map<string, StartedItem>()
   private nextItemId = 0
+  /** surfaces whose stream was found not ready (streamReady): told when it is (see notifyReady) */
+  private readonly waitingForReady = new Set<string>()
   private readonly chunkBytes: { min: number; max: number }
   /** FRAME envelopes encoded while asking whether they may go (the controller may say not yet) */
   private readonly frameEnvelopes = new WeakMap<QueuedEntry, Uint8Array>()
@@ -299,17 +318,59 @@ export class WebSocketViewerTransport implements ViewerTransport {
   }
 
   queuedBytes(surface: string): number {
+    return this.unsentBytes(surface, true)
+  }
+
+  streamReady(surface: string, exceptSettling = false): boolean {
+    if (this._closed) {
+      return true
+    }
+    const ready = this.unsentBytes(surface, exceptSettling) <= this.chunkSize
+    if (!ready) {
+      this.waitingForReady.add(surface)
+    }
+    return ready
+  }
+
+  /** The bytes of the surface's items not sent yet: its queued items and what's left of its started one. */
+  private unsentBytes(surface: string, exceptSettling: boolean): number {
     let bytes = 0
     const started = this.started.get(surface)
-    if (started !== undefined && started.entry.tier !== 'settle') {
+    if (started !== undefined && !(exceptSettling && started.entry.tier === 'settle')) {
       bytes += started.envelope.length - started.sent
     }
     for (const entry of this.pendingFrames.get(surface) ?? []) {
-      if (entry.tier !== 'settle') {
+      if (!(exceptSettling && entry.tier === 'settle')) {
         bytes += sizeOf(entry)
       }
     }
     return bytes
+  }
+
+  /**
+   * Tell the surfaces found not ready whose streams are ready now (their data went out, or the chunk size grew). Called
+   * at the end of a pump, once its state is settled: a surface told may start its next item at once.
+   */
+  private notifyReady() {
+    if (this.waitingForReady.size === 0) {
+      return
+    }
+    const chunkSize = this.chunkSize
+    const ready: string[] = []
+    for (const surface of this.waitingForReady) {
+      if (this.unsentBytes(surface, false) <= chunkSize) {
+        ready.push(surface)
+      }
+    }
+    for (const surface of ready) {
+      this.waitingForReady.delete(surface)
+    }
+    for (const surface of ready) {
+      if (this._closed) {
+        return
+      }
+      this.onStreamReady(surface)
+    }
   }
 
   private queuedBacklogBytes(): number {
@@ -370,6 +431,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
     this.pendingFrames.clear()
     reportUnsent([...this.started.values()].map(({ entry }) => entry))
     this.started.clear()
+    this.waitingForReady.clear()
   }
 
   private get dataWaiting(): boolean {
@@ -583,7 +645,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
       const { entry, data } = next
       this.congestion.onSend(data.length, now)
       // The callback fires once the data was handed to the kernel. With TCP_NOTSENT_LOWAT that means most of it has
-      // actually left; the item's slot is free from then on (once its last chunk is).
+      // actually left; the item is done from then on (once its last chunk is).
       this.write(
         data,
         next.last
@@ -596,6 +658,7 @@ export class WebSocketViewerTransport implements ViewerTransport {
     }
     this.congestion.setDataWaiting(this.dataWaiting)
     this.bandwidth.setHeld(held && this.findHead('streaming') !== undefined, this.now())
+    this.notifyReady()
   }
 
   private flushControl() {

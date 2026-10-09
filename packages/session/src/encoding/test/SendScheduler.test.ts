@@ -441,3 +441,78 @@ test('closing reports a started item and the queued ones unsent, and only then',
   send(NORMAL + 2, 500)
   assert.deepEqual(done[2], { serial: NORMAL + 2, sent: false })
 })
+
+test('a stream is ready while at most one chunk of its data is unsent: small items may wait up to a chunk', () => {
+  const { transport, queue, block } = setup()
+  block()
+  assert.ok(transport.streamReady('a'), 'nothing of it waits')
+  // 3 KB each: three are under the minimum chunk (10 KB), a fourth is over it
+  for (let i = 0; i < 3; i++) {
+    queue('a', 'normal', NORMAL + i, 3000)
+    assert.ok(transport.streamReady('a'), `${i + 1} waiting`)
+  }
+  queue('a', 'normal', NORMAL + 3, 3000)
+  assert.ok(!transport.streamReady('a'))
+  assert.ok(transport.streamReady('b'), 'per stream')
+})
+
+test("a large item isn't followed by the next until it's nearly sent; the stream is told once it's ready", () => {
+  const { ws, transport, queue, block } = setup()
+  block()
+  const ready: { surface: string; left: number }[] = []
+  transport.onStreamReady = (surface) => ready.push({ surface, left: transport.queuedBytes(surface) })
+  queue('a', 'streaming', STREAMING, 50_000)
+  assert.ok(!transport.streamReady('a'))
+  let sends = 0
+  while (ready.length === 0 && ws.sent.length) {
+    ws.sent.shift()!.callback()
+    if (ready.length === 0) {
+      assert.ok(transport.queuedBytes('a') > CHUNK_MIN_BYTES, 'not ready while more than a chunk is left')
+    }
+    sends++
+  }
+  assert.deepEqual(
+    ready.map(({ surface }) => surface),
+    ['a'],
+  )
+  assert.ok(ready[0].left > 0 && ready[0].left <= CHUNK_MIN_BYTES, `${ready[0].left} bytes left`)
+  assert.ok(sends >= 4)
+  assert.ok(transport.streamReady('a'))
+  // told once per "not ready" answer
+  while (ws.sent.length) {
+    ws.sent.shift()!.callback()
+  }
+  assert.equal(ready.length, 1)
+})
+
+test('readiness follows the chunk size: a larger bandwidth estimate lets more wait', () => {
+  // 10 MB/s: 100 KB chunks
+  const { transport, queue, block } = setup(10_000)
+  block()
+  queue('a', 'streaming', STREAMING, 50_000)
+  assert.ok(transport.streamReady('a'))
+  queue('a', 'streaming', STREAMING + 1, 60_000)
+  assert.ok(!transport.streamReady('a'))
+})
+
+test('settling patches count for readiness, unless asked without them (new damage comes before settling)', () => {
+  const { transport, queue, block } = setup()
+  block()
+  queue('a', 'settle', SETTLE, 20_000)
+  assert.ok(!transport.streamReady('a'))
+  assert.ok(transport.streamReady('a', true))
+  queue('a', 'normal', NORMAL, 20_000)
+  assert.ok(!transport.streamReady('a', true))
+})
+
+test('a closed transport is ready (nothing waits anymore) and tells no one', () => {
+  const { ws, transport, queue, block } = setup()
+  block()
+  const ready: string[] = []
+  transport.onStreamReady = (surface) => ready.push(surface)
+  queue('a', 'normal', NORMAL, 50_000)
+  assert.ok(!transport.streamReady('a'))
+  ws.close()
+  assert.ok(transport.streamReady('a'))
+  assert.deepEqual(ready, [])
+})
