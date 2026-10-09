@@ -4,7 +4,7 @@
 #   1. a busy client (scripts/e2e/busy-client.c, built here with wayland-scanner and gcc) that behaves like a vsync game:
 #      it commits a new full-surface frame on every frame callback, forever. The test checks that it is shown (patches
 #      arrive) and that frame callbacks pace it (it keeps committing, but not unboundedly: its frame rate is what the
-#      slots, the link and the CPU allow);
+#      stream's readiness, the link and the CPU allow);
 #   2. foot, an interactive terminal: while the busy client runs, typing into foot reaches the screen within a few
 #      seconds. (The busy surface becomes a streaming surface, so its patches go out behind normal ones.)
 # No GPU acceleration is assumed: the gateway runs with --encoder none (lib.sh).

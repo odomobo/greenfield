@@ -952,18 +952,29 @@ test('X11 windows tell the app tracker their process, and their icon reaches the
   assert.deepEqual(tracked, ['mapped 1 4321', 'gone 1'])
 })
 
-/** A sink that takes patches and frames and never sends them: the surfaces' slots stay taken until they are released. */
+/**
+ * A sink that takes patches and frames and never sends them until `release` (the network takes the oldest). Each item
+ * counts as a chunk, so a surface's stream is ready while at most one of its items is held.
+ */
 function holdingSink() {
-  const held: ((sent: boolean) => void)[] = []
+  const held: { surface: string; done: (sent: boolean) => void }[] = []
   const sink: EncodingSink = {
     active: true,
     bandwidthLimited: false,
     linkBandwidth: undefined,
     queuedBytes: () => 0,
-    sendFrame: (_surface, _frame, _class, done) => held.push(done),
-    sendPatch: (_surface, _patch, _class, done) => held.push(done),
+    streamReady: (surface) => held.filter((item) => item.surface === surface).length <= 1,
+    sendFrame: (surface, _frame, _class, done) => held.push({ surface, done }),
+    sendPatch: (surface, _patch, _class, done) => held.push({ surface, done }),
   }
-  return { sink, held }
+  const release = () => {
+    const item = held.shift()
+    if (item) {
+      item.done(true)
+      sink.onStreamReady?.(item.surface)
+    }
+  }
+  return { sink, held, release }
 }
 
 function readablePixels() {
@@ -990,23 +1001,23 @@ test('without a hardware encoder no video encoder is ever created, whatever the 
   assert.equal(core.encodersCreated, 0)
 })
 
-test('frame callbacks are held while both of the surface’s slots are taken, and released once one is free', async () => {
+test('frame callbacks are held while the surface’s stream is not ready, and released once it is', async () => {
   setViewerAttached(true)
   onViewerFeedback(16)
-  const { sink, held } = holdingSink()
+  const { sink, held, release } = holdingSink()
   compositor.setFrameSink(sink)
   readablePixels()
   try {
     core.newWindow(1, { width: 400, height: 256 })
     await waitFor(() => held.length === 2)
     core.commit(1, 400, 256, true)
-    // a frame clock tick or two pass with no free slot: the callback is held (for up to MAX_FRAME_HOLD_MS)
+    // a frame clock tick or two pass while its stream isn't ready: the callback is held (for up to MAX_FRAME_HOLD_MS)
     await new Promise((resolve) => setTimeout(resolve, 50))
     assert.deepEqual(core.frameDone, [])
-    // the network takes the surface's items one by one; its queued patches refill the slots until they are all out
+    // the network takes the surface's items one by one; its queued patches follow until they are all out
     const start = Date.now()
     while (core.frameDone.length === 0 && Date.now() - start < 2000) {
-      held.shift()?.(true)
+      release()
       await new Promise((resolve) => setTimeout(resolve, 5))
     }
     assert.deepEqual(core.frameDone, [1])
@@ -1015,7 +1026,7 @@ test('frame callbacks are held while both of the surface’s slots are taken, an
   }
 })
 
-test('a surface whose slots stay taken still gets its frame callback after MAX_FRAME_HOLD_MS (10 a second)', async () => {
+test('a surface whose stream stays not ready still gets its frame callback after MAX_FRAME_HOLD_MS (10 a second)', async () => {
   setViewerAttached(true)
   onViewerFeedback(16)
   const { sink, held } = holdingSink()

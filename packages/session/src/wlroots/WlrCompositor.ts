@@ -162,6 +162,7 @@ const inactiveSink: EncodingSink = {
   bandwidthLimited: false,
   linkBandwidth: undefined,
   queuedBytes: () => 0,
+  streamReady: () => true,
   sendFrame: (_surface, _frame, _class, done) => done(false),
   sendPatch: (_surface, _patch, _tier, done) => done(false),
 }
@@ -175,6 +176,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private readonly fileDrops: FileDrops
   private send?: (message: ControlMessage) => void
   private sink: EncodingSink = inactiveSink
+  /** what the encoders send into: the current sink */
+  private readonly forwardingSink: EncodingSink
   private readonly encoding: EncodingContext<WlrEncoder>
   private readonly surfaces = new Map<number, Surface>()
   private readonly sids = new Map<string, number>()
@@ -206,7 +209,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     dropsDirectory?: string,
   ) {
     const currentSink = () => this.sink
-    const forwardingSink: EncodingSink = {
+    const forwardingSink: EncodingSink = (this.forwardingSink = {
       get active() {
         return currentSink().active
       },
@@ -217,9 +220,10 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         return currentSink().linkBandwidth
       },
       queuedBytes: (surface) => this.sink.queuedBytes(surface),
+      streamReady: (surface, exceptSettling) => this.sink.streamReady(surface, exceptSettling),
       sendFrame: (surface, frame, surfaceClass, done) => this.sink.sendFrame(surface, frame, surfaceClass, done),
       sendPatch: (surface, patch, tier, done) => this.sink.sendPatch(surface, patch, tier, done),
-    }
+    })
     // without a hardware encoder the pool has size 0 and no video encoder is ever created; one that fails to create is
     // reported once and the pool then behaves the same
     const h264Encoder = config.h264Encoder
@@ -272,6 +276,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   setFrameSink(sink: EncodingSink): void {
     this.sink = sink
+    sink.onStreamReady = (surface) => this.forwardingSink.onStreamReady?.(surface)
   }
 
   unencodedBytes(): number {
@@ -580,8 +585,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
     if (hasFrameCallbacks && !surface.frameScheduled) {
       surface.frameScheduled = true
-      // held while the surface's slots are full of damage: an app slows down to what can be sent (but see MIN_FRAME_RATE;
-      // not for video, a whole frame at a time)
+      // held until the surface's stream is ready (settling aside): an app slows down to what can be sent (but see
+      // MIN_FRAME_RATE; not for video, a whole frame at a time)
       scheduleFrameCallback(
         () => surface.encoder?.readyForFrame ?? true,
         (time) => {

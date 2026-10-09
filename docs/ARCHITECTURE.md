@@ -218,7 +218,7 @@ sending the old. Defined precisely, on **discrete periods** (fixed, back to back
 750 ms; a surface is only judged on whole periods):
 
 - A surface has **unsent work**, and is **busy**, while any of these exist: queued (not yet captured) patch rectangles,
-  items in its slots (captured, being encoded, or encoded and waiting to be sent; see below), or a video frame being
+  its items (captured, being encoded, or encoded and waiting in the transport; see below), or a video frame being
   encoded or waiting in the transport. "Sent" means handed to the socket by the scheduler.
 - During a period the time the surface was busy and the time it was backlogged are added up. At the end of the period
   the two fractions (of the period) are kept as the *previous period's* and the counters start again.
@@ -235,11 +235,11 @@ sending the old. Defined precisely, on **discrete periods** (fixed, back to back
 
 Why this works:
 
-- A callback-paced client (frame callbacks are held until a slot is free, see Frame callbacks) never commits while its
-  previous frame is unsent, so "commit while there is unsent work" can't see it. Busy time can: a client that is busy
-  most of a period is the one the link or CPU can't keep up with, and its commits in the next period are backlogged.
-  Measured: a 1920x1080 busy client was busy 86-94% of each period and promoted at the end of its second period (about
-  1.5 s after it started); a 640x480 one was busy 40-45% on loopback and stayed normal.
+- A callback-paced client (frame callbacks are held until its stream is ready, see Frame callbacks) never commits while
+  its previous frame is unsent, so "commit while there is unsent work" can't see it. Busy time can: a client that is
+  busy most of a period is the one the link or CPU can't keep up with, and its commits in the next period are
+  backlogged. Measured: a 1920x1080 busy client was busy 86-94% of each period and promoted at the end of its second
+  period (about 1.5 s after it started); a 640x480 one was busy 40-45% on loopback and stayed normal.
 - A one-off big repaint (launch, a view switch) is a single damage after a quiet period, so it is never backlogged,
   however long it takes to drain.
 - A needy surface that is busy less than 60% of the time stays normal: it isn't causing contention, and if the link and
@@ -322,8 +322,8 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
     slightly transparent (in the shared shader, so video gets it too).
   - Limited, with GPU: real-time video at a lower quality, still enough to read text.
   - Video always has a **fixed quality target and variable bitrate**, no bitrate cap. Under contention the frame rate
-    drops instead: that is what the per-surface two slots are for (frames are only taken when a slot is free), and they
-    are believed to work. If they don't, rewrite them; don't add bitrate caps.
+    drops instead: that is what stream readiness is for (a frame is only taken when the surface's stream is ready, see
+    "Stream readiness"), and it is believed to work. If it doesn't, rework it; don't add bitrate caps.
 - **Refreshes are intelligent.** Track per surface which areas are lossy (JPEG or video) and which are known lossless.
   Whenever a surface leaves a lossy mode (bandwidth recovers, or it returns to the normal class), refresh only the
   areas known to be lossy, losslessly, and only after its pending damage has been sent. Flapping between lossless and
@@ -347,8 +347,8 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
 - **Lossy areas** are tracked per surface (`SurfaceEncoder.lossyArea`, at most 32 rectangles, else their bounding
   box), updated in send order (each patch as it goes to the sink, so a later lossless patch always clears an earlier
   lossy one), the whole surface while it streams video. Settling (phase 3; phase 2 refreshed only once the surface
-  no longer went lossy, at normal priority): whenever the surface has no damage to send (none queued, none in its
-  slots), its lossy areas are planned as lossless patches and sent in the transport's lowest tier, whatever the link
+  no longer went lossy, at normal priority): whenever the surface has no damage to send (none queued, encoding or
+  unsent), its lossy areas are planned as lossless patches and sent in the transport's lowest tier, whatever the link
   (logged: "sending its N lossy pixels again, losslessly (settling)").
 - **Phase 3, bursts and settling** (built 2026-10-05):
   - Each surface keeps a pixel-weighted, decayed (0.8 per patch) average of its lossless bytes per pixel, from all its
@@ -361,15 +361,15 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
     on every tick): while the normal surfaces' predicted backlog is over `BURST_MS` (200 ms, `policy.ts`), the normal
     surface with the largest is promoted ("is now streaming (a burst: ...)"). The total backlog (all surfaces) over
     `BURST_MS` makes the link bandwidth-limited at once, so a burst's first patches already go out as JPEG.
-  - **Settling** may fill both of the surface's slots, but new damage is captured first as soon as one frees, and
-    drops the settling patches it covers. An app's frame callbacks wait for `readyForFrame`: a free slot, or one
-    holding a settling patch (unless damage already waits for it). Settling doesn't make the surface busy or
-    backlogged for the relentless measure.
+  - **Settling** takes the surface's stream like any item (up to about a chunk of settling patches may wait), but new
+    damage is captured first as soon as the stream is ready, and drops the settling patches it covers. An app's frame
+    callbacks wait for `readyForFrame`: the surface's stream is ready, not counting its settling patches unless damage
+    already waits. Settling doesn't make the surface busy or backlogged for the relentless measure.
   - **Minimum frame rate** (`FramePacing.ts`, `MIN_FRAME_RATE` 10): a frame callback held because the surface isn't
-    ready goes anyway after `MAX_FRAME_HOLD_MS` (100 ms). The app's next frame is queued as damage and read when a
-    slot frees, so a slow repaint may show parts of different frames (tearing), but the app keeps responding while a
-    page takes the link seconds to send. Not for a surface streamed as video: a video frame is the whole surface, there
-    is no partial repaint to get ahead of, so its callbacks wait until it's ready.
+    ready goes anyway after `MAX_FRAME_HOLD_MS` (100 ms). The app's next frame is queued as damage and read when its
+    stream is ready, so a slow repaint may show parts of different frames (tearing), but the app keeps responding while
+    a page takes the link seconds to send. Not for a surface streamed as video: a video frame is the whole surface,
+    there is no partial repaint to get ahead of, so its callbacks wait until it's ready.
   - Experiment (dev only): `--dev-patch-order random` (with `--dev-auth`) makes surfaces capture their queued patches
     (damage and settling) in random order within batches instead of oldest first: each commit's new patches are a
     batch (settling's plan one), batches go oldest first. A large repaint fills in as a random mosaic, and no patch is
@@ -389,16 +389,31 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
   alpha's two images are combined on the main thread by the shared WebGL compositor (`alpha-video.ts`,
   `AlphaCompositor.combineImages`), which also gives video its alpha; alpha of 254 or more counts as opaque there.
 
-### Per-surface slots
+### Stream readiness
 
-Each surface is a source with at most **2 slots** (`SURFACE_SLOTS` = 2). An item is one patch or one video frame.
+(Decided 2026-10-09, `docs/MODULARIZATION.md` "The transport says when a stream is ready"; it replaced the fixed two
+slots per surface, `SURFACE_SLOTS`.) Each surface is a stream of items in the transport; an item is one patch or one
+video frame.
 
-- A slot is taken when an item is captured (patch: pixels read; video: encoding started) and freed when the item is
-  handed to the socket, or reported unsent (only when the viewer's connection closes).
-- A surface may capture only while it has a free slot. So at most two of its items exist between capture and the
-  socket; everything else waits as queued rectangles, where new damage merges into it.
-- Because a surface only encodes into free slots, the amount it encodes follows the send schedule: a low-priority
-  surface encodes only as fast as it's allowed to send. How its encoding competes for the CPU is the next section.
+- **The transport says when a stream is ready** for its next item (`ViewerTransport.streamReady`): when at most one
+  chunk of that surface's data is left unsent, counted in bytes (its queued items plus what's left of its started
+  one), at the current chunk size (`CHUNK_MS` = 10 ms of the congestion controller's bandwidth estimate, 10 to
+  300 KB). A stream found not ready is told when it is (`onStreamReady`, at the end of the transport's pump, once its
+  state is settled; the sink passes it on to the surface's encoder). It's the same idea as `TCP_NOTSENT_LOWAT`, one
+  level up.
+- **One encode at a time per surface**, patches and video alike, started only when its stream is ready (different
+  surfaces still encode in parallel). No reservation is needed: a stream has a single producer and one encode in
+  flight, so nothing else can use the readiness it saw. The encoded item goes to the transport whatever the stream's
+  state by then, so a surface's patches reach the transport in capture order.
+- So several small items (patches) may be queued until about one chunk's worth waits, and a large one (a key frame)
+  isn't followed by the next until it's nearly sent: the next item is captured from fresher content. Everything else
+  waits as queued rectangles, where new damage merges into it (or, for video, as one wanted frame of the latest
+  content).
+- One chunk of lead time is enough: a chunk is about 10 ms of the link, and producing the next item is faster (a
+  patch is at most 64K pixels).
+- Because a surface only encodes when its stream is ready, the amount it encodes follows the send schedule: a
+  low-priority surface encodes only as fast as it's allowed to send. How its encoding competes for the CPU is the next
+  section.
 
 ### Encode scheduling: streaming patches at low CPU priority
 
@@ -424,7 +439,7 @@ that nothing else wants.
 - Where it applies: apps started by the session (and from its terminals) share the session process's scheduling
   group, so nice works against them directly. Other users' sessions live in their own systemd slices (pam_systemd),
   which the kernel already balances against ours; within ours, the streaming threads give way.
-- A streaming surface captures into a free slot only when a streaming worker is free (or about to be: at most one
+- A streaming surface captures (its stream ready) only when a streaming worker is free (or about to be: at most one
   patch waiting per worker), so its patches never pile up waiting for a worker. Workers are picked round-robin between
   streaming surfaces. Normal and streaming encodes never wait for each other.
 - When a surface changes class, patches already being encoded finish where they are; only new captures go to the
@@ -450,8 +465,8 @@ allows it):
      video frames of very different sizes are mixed in. Normal surfaces are clearly preferred but never starve
      streaming ones.
 3. Nothing queued is ever dropped, replaced or revised (decided 2026-10-09, `docs/MODULARIZATION.md` "The send
-   queue"): the slots keep the queue short, so there is nothing to gain. The transport doesn't look into the items (it
-   doesn't know what a key frame is). An item is reported unsent only when the transport closes (the viewer
+   queue"): stream readiness keeps the queue short, so there is nothing to gain. The transport doesn't look into the
+   items (it doesn't know what a key frame is). An item is reported unsent only when the transport closes (the viewer
    disconnects; a new viewer starts over from every surface's whole content). Lifecycle edges need no queue changes:
    - The viewer's video decoder fails: it sends `keyframe`, and the surface's video makes its next frame a key frame
      (`SurfaceEncoder.refresh`). The deltas still on their way can't be decoded; the viewer discards them quietly
@@ -463,13 +478,14 @@ allows it):
 
 ### Frame callbacks
 
-- A surface's frame callbacks are held while both of its slots are taken; they're released at the next tick of the
-  frame clock (`FramePacing.ts`) once a slot is free. The clock ticks at 30 Hz (`MAX_FRAME_RATE`, user decision
-  2026-10-04: everything apps draw goes over the network, and 30 frames a second is the minimum for smooth motion, so
-  nothing above it is targeted), or at the viewer's display rate if that's slower. Moving windows, the cursor and the
-  shell are the browser's and run at the display's own rate. So an app slows down to what we
-  can send (a game rendering on the CPU with llvmpipe doesn't render frames that would only be merged away), and a
-  vsync game runs at exactly the rate it's given.
+- A surface's frame callbacks are held while its stream isn't ready (more than a chunk of its data unsent, settling
+  patches aside unless damage waits, see Stream readiness); they're released at the next tick of the frame clock
+  (`FramePacing.ts`) once it is, so an app draws at the rate its output leaves. The clock ticks at 30 Hz
+  (`MAX_FRAME_RATE`, user decision 2026-10-04: everything apps draw goes over the network, and 30 frames a second is the
+  minimum for smooth motion, so nothing above it is targeted), or at the viewer's display rate if that's slower. Moving
+  windows, the cursor and the shell are the browser's and run at the display's own rate. So an app slows down to what we
+  can send (a game rendering on the CPU with llvmpipe doesn't render frames that would only be merged away), and a vsync
+  game runs at exactly the rate it's given.
 - This replaces the delay by the server's average processing time (`ProcessingDuration`). The viewer's decode-time
   part stays until 2b replaces the viewer feedback with acks.
 - Without an attached viewer, callbacks stay throttled to about 1 per second, as today.
@@ -628,13 +644,14 @@ single large item never stalls the link. Initial window before any estimate: 64 
   slower than the server encodes, which should be rare. While holding, the connection counts as app-limited.
 - RTT is measured on the server only (send time to ack receipt): no clock sync.
 - The acks replace the `feedback` message's `decodeDuration` (removed); `refreshInterval` stays for the frame clock.
-  Frame callbacks then depend only on the slots (see [Frame callbacks](#frame-callbacks)).
+  Frame callbacks then depend only on stream readiness (see [Frame callbacks](#frame-callbacks)).
 
 ### Transport integration
 
 - The send scheduler (see [Send scheduling](#send-scheduling)) asks the controller before handing a data item to the
   socket: allowed by the backlog hold, the in-flight limit (or the 2-item floor) and the pacing time. If not, the item
-  stays in its surface's slot, the surface's frame callbacks stay held, and its damage keeps merging in its queue.
+  stays queued, so its surface's stream doesn't become ready: its frame callbacks stay held, and its damage keeps
+  merging in its queue.
 - The old gate (one data message at a time, `bufferedAmount ≤ 64 KB`) is replaced by the controller's, but a local
   safety limit stays: never hand a data item to the socket while `ws.bufferedAmount` is over 256 KB (should never
   happen with the controller working; log once if it does). The kernel buffer settings stay.

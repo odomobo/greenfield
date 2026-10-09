@@ -13,7 +13,6 @@ import {
   PatchPump,
   PatchSource,
   StreamingEncodePool,
-  SURFACE_SLOTS,
   SurfaceEncoder,
   SurfaceHost,
   VideoQuality,
@@ -39,7 +38,23 @@ class FakeEncoder {
   }
 }
 
-type Held = { surface: string; done: (sent: boolean) => void; bytes: number }
+type Held = {
+  surface: string
+  done: (sent: boolean) => void
+  /** its bytes as queuedBytes counts them (settling patches don't) */
+  bytes: number
+  /** its size for the stream's readiness (see FakeSink.sizeOf) */
+  size: number
+  settle: boolean
+}
+
+/**
+ * Like the transport: a surface's stream is ready while at most one chunk of its items is held (not sent). Each item
+ * counts as a chunk unless a test says otherwise (sizeOf), so a surface that the network takes nothing of has
+ * ITEMS_HELD items held: one waiting, and the one encoded while that was all.
+ */
+const FAKE_CHUNK = 1000
+const ITEMS_HELD = 2
 
 class FakeSink implements EncodingSink {
   active = true
@@ -51,15 +66,29 @@ class FakeSink implements EncodingSink {
   patches: { surface: string; patch: Patch; tier: SendTier }[] = []
   /** items handed over and not yet "sent" (autoDone off) */
   held: Held[] = []
+  /** an item's size for readiness, against a chunk of FAKE_CHUNK bytes */
+  sizeOf: (data: Uint8Array) => number = () => FAKE_CHUNK
+  onStreamReady?: (surface: string) => void
+  /** surfaces found not ready, told when they are */
+  private readonly waiting = new Set<string>()
+  /** streams found not ready, and told when they were ready again, for tests */
+  notReadyAnswers = 0
+  readyNotifications: string[] = []
 
   sendFrame(surface: string, frame: Uint8Array, surfaceClass: SurfaceClass, done: (sent: boolean) => void) {
     this.frames.push({ surface, frame, surfaceClass })
-    this.take({ surface, done, bytes: frame.length })
+    this.take({ surface, done, bytes: frame.length, size: this.sizeOf(frame), settle: false })
   }
 
   sendPatch(surface: string, patch: Patch, tier: SendTier, done: (sent: boolean) => void) {
     this.patches.push({ surface, patch, tier })
-    this.take({ surface, done, bytes: tier === 'settle' ? 0 : patch.data.length })
+    this.take({
+      surface,
+      done,
+      bytes: tier === 'settle' ? 0 : patch.data.length,
+      size: this.sizeOf(patch.data),
+      settle: tier === 'settle',
+    })
   }
 
   /** like the transport: what's held of the surface, except settling patches */
@@ -67,11 +96,49 @@ class FakeSink implements EncodingSink {
     return this.held.filter((item) => item.surface === surface).reduce((sum, { bytes }) => sum + bytes, 0)
   }
 
+  streamReady(surface: string, exceptSettling = false) {
+    const ready = this.heldSize(surface, exceptSettling) <= FAKE_CHUNK
+    if (!ready) {
+      this.notReadyAnswers++
+      this.waiting.add(surface)
+    }
+    return ready
+  }
+
+  private heldSize(surface: string, exceptSettling: boolean) {
+    return this.held
+      .filter((item) => item.surface === surface && !(exceptSettling && item.settle))
+      .reduce((sum, { size }) => sum + size, 0)
+  }
+
   private take(item: Held) {
     if (this.autoDone) {
       item.done(true)
-    } else {
-      this.held.push(item)
+      return
+    }
+    // sent or not: it leaves the queue, the streams found not ready that are now are told, then its done
+    const done = item.done
+    const entry: Held = {
+      ...item,
+      done: (sent) => {
+        const index = this.held.indexOf(entry)
+        if (index >= 0) {
+          this.held.splice(index, 1)
+        }
+        this.notifyReady()
+        done(sent)
+      },
+    }
+    this.held.push(entry)
+  }
+
+  private notifyReady() {
+    for (const surface of [...this.waiting]) {
+      if (this.heldSize(surface, false) <= FAKE_CHUNK) {
+        this.waiting.delete(surface)
+        this.readyNotifications.push(surface)
+        this.onStreamReady?.(surface)
+      }
     }
   }
 
@@ -349,7 +416,7 @@ test('with an encoder, promotion switches to video with a key frame, after the p
   // the patches handed over are not taken back: they go out first, the key frame paints over them
   const heldPatches = env.sink.held.length
   assert.ok(heldPatches > 0)
-  assert.equal(env.sink.frames.length, 0, 'the key frame waits for a slot')
+  assert.equal(env.sink.frames.length, 0, 'the key frame waits for the stream to be ready')
   env.sink.sendHeld()
   await settle()
   await settle()
@@ -420,53 +487,125 @@ test('demotion without video changes only the priority', async () => {
   // nothing was re-sent (only what was queued already went out)
   const queuedArea = encoder.queuedPatches.reduce((sum, rect) => sum + rect.width * rect.height, 0)
   assert.equal(queuedArea, 0)
-  assert.ok(env.sink.patches.length - patchesBefore <= queuedBefore + SURFACE_SLOTS)
+  assert.ok(env.sink.patches.length - patchesBefore <= queuedBefore + ITEMS_HELD)
 })
 
-test('a surface has at most SURFACE_SLOTS items between capture and the socket', async () => {
+test('a surface captures its next patch only while its stream is ready: the rest waits in its queue', async () => {
   const env = setup()
   const { encoder, host } = env.surface('a')
   env.sink.autoDone = false
   await encoder.commit(full(host))
   await settle()
   await settle()
-  assert.equal(env.sink.held.length, SURFACE_SLOTS)
-  assert.equal(host.reads.length, SURFACE_SLOTS)
-  assert.ok(!encoder.hasFreeSlot)
+  // each item a chunk: the first is captured, then a second while one chunk waits, then the stream isn't ready
+  assert.equal(env.sink.held.length, ITEMS_HELD)
+  assert.equal(host.reads.length, ITEMS_HELD)
+  assert.ok(!encoder.mayCapture)
   const queued = encoder.queuedPatches.length
   assert.ok(queued > 0)
 
-  // one is handed to the socket: its slot is free, the next patch is captured
+  // one is sent: the stream is ready (the sink says so), the next patch is captured
   env.sink.held.shift()!.done(true)
+  assert.deepEqual(env.sink.readyNotifications, ['a'])
   await settle()
   await settle()
-  assert.equal(host.reads.length, SURFACE_SLOTS + 1)
+  assert.equal(host.reads.length, ITEMS_HELD + 1)
   assert.equal(encoder.queuedPatches.length, queued - 1)
-  assert.ok(!encoder.hasFreeSlot)
+  assert.ok(!encoder.mayCapture)
 
   // everything goes out eventually
   for (let i = 0; i < 100 && encoder.hasUnsentWork; i++) {
     env.sink.sendHeld()
     await settle()
   }
-  assert.ok(encoder.hasFreeSlot)
+  assert.ok(encoder.mayCapture)
   assert.equal(area(env.sink.patches.map(({ patch }) => patch.rect)), 1000 * 1000)
 })
 
-test('an item reported unsent gives its slot back too', async () => {
+test('several small items are encoded until about a chunk of the surface waits', async () => {
+  const env = setup()
+  const { encoder, host } = env.surface('a')
+  env.sink.autoDone = false
+  // a tenth of a chunk each: ten fit in a chunk, so an eleventh is encoded while ten wait
+  env.sink.sizeOf = () => FAKE_CHUNK / 10
+  await encoder.commit(full(host))
+  for (let i = 0; i < 40; i++) {
+    await settle()
+  }
+  assert.equal(env.sink.held.length, 11)
+  assert.ok(!encoder.mayCapture)
+  assert.ok(encoder.hasQueuedPatches)
+})
+
+test('a large item holds the next back until the stream is ready again', async () => {
+  const env = setup()
+  const { encoder, host } = env.surface('a', 300, 200)
+  env.sink.autoDone = false
+  // the first item is three chunks
+  let first = true
+  env.sink.sizeOf = () => {
+    const size = first ? 3 * FAKE_CHUNK : 1
+    first = false
+    return size
+  }
+  await encoder.commit([r(0, 0, 10, 10)])
+  await settle()
+  await encoder.commit([r(20, 20, 10, 10)])
+  await settle()
+  await settle()
+  assert.equal(env.sink.held.length, 1, 'the next waits')
+  assert.equal(encoder.queuedPatches.length, 1)
+  assert.equal(host.reads.length, 1)
+  env.sink.held.shift()!.done(true)
+  await settle()
+  await settle()
+  assert.equal(host.reads.length, 2, 'captured once the stream is ready')
+})
+
+test('one encode at a time per surface; different surfaces encode in parallel', async () => {
+  const env = setup(0)
+  env.holdNormal(true)
+  const a = env.surface('a')
+  const b = env.surface('b')
+  await a.encoder.commit(full(a.host))
+  assert.equal(env.normalStarted, 1, 'the stream is ready, but one patch of a surface encodes at a time')
+  assert.ok(!a.encoder.mayCapture)
+  await b.encoder.commit(full(b.host))
+  assert.equal(env.normalStarted, 2)
+  env.normalCalls.shift()!.resolve()
+  await settle()
+  assert.equal(env.normalStarted, 3, "a's next patch once its first was handed to the sink")
+  assert.equal(env.sink.patches.length, 1)
+})
+
+test("frame callbacks wait for the surface's stream to be ready", async () => {
+  const env = setup()
+  const { encoder, host } = env.surface('a')
+  assert.ok(encoder.readyForFrame)
+  env.sink.autoDone = false
+  await encoder.commit(full(host))
+  await settle()
+  await settle()
+  assert.ok(!encoder.readyForFrame, 'more than a chunk waits')
+  env.sink.held.shift()!.done(true)
+  assert.ok(encoder.readyForFrame, 'a chunk left: the app may draw')
+})
+
+test('an item reported unsent counts as gone too', async () => {
   const env = setup()
   const { encoder, host } = env.surface('a')
   env.sink.autoDone = false
   await encoder.commit(full(host))
   await settle()
   await settle()
-  assert.ok(!encoder.hasFreeSlot)
+  assert.ok(!encoder.mayCapture)
   assert.ok(encoder.hasQueuedPatches)
   const handedOver = env.sink.patches.length
   env.sink.dropHeld()
   await settle()
-  assert.equal(env.sink.held.length, SURFACE_SLOTS, 'the next queued patches take the slots')
-  assert.equal(env.sink.patches.length, handedOver + SURFACE_SLOTS)
+  await settle()
+  assert.equal(env.sink.held.length, ITEMS_HELD, 'the next queued patches follow')
+  assert.equal(env.sink.patches.length, handedOver + ITEMS_HELD)
 })
 
 test('refresh takes back nothing handed over: the whole surface is queued behind it', async () => {
@@ -478,11 +617,11 @@ test('refresh takes back nothing handed over: the whole surface is queued behind
   await settle()
   const handedOver = env.sink.patches.length
   const held = [...env.sink.held]
-  assert.equal(held.length, SURFACE_SLOTS)
+  assert.equal(held.length, ITEMS_HELD)
   await encoder.refresh()
   await settle()
   assert.deepEqual(env.sink.held, held, 'still waiting to go out')
-  assert.equal(env.sink.patches.length, handedOver, 'the refresh waits for a slot')
+  assert.equal(env.sink.patches.length, handedOver, 'the refresh waits for the stream to be ready')
   assert.equal(area([...encoder.queuedPatches]), 1000 * 1000)
   env.sink.flowFreely()
   for (let i = 0; i < 20 && encoder.hasQueuedPatches; i++) {
@@ -499,9 +638,9 @@ test('destroying a surface takes back nothing handed over', async () => {
   await settle()
   await settle()
   const patches = env.sink.patches.length
-  assert.equal(env.sink.held.length, SURFACE_SLOTS)
+  assert.equal(env.sink.held.length, ITEMS_HELD)
   encoder.destroy()
-  assert.equal(env.sink.held.length, SURFACE_SLOTS, 'its items still go out, the viewer ignores them')
+  assert.equal(env.sink.held.length, ITEMS_HELD, 'its items still go out, the viewer ignores them')
   env.sink.flowFreely()
   await settle()
   await settle()
@@ -548,14 +687,14 @@ test('a streaming surface captures only while a streaming worker can take its pa
 test('new damage over a queued patch is not queued again, over a captured one it is', async () => {
   const env = setup()
   const { encoder, host } = env.surface('a')
-  env.sink.autoDone = false // patches stay unsent, the surface runs out of slots
+  env.sink.autoDone = false // patches stay unsent, the surface's stream isn't ready
   await encoder.commit(full(host))
   await settle()
   await settle()
   const queued = encoder.queuedPatches.length
   assert.ok(queued > 0)
   const captured = env.sink.patches.map(({ patch }) => patch.rect)
-  assert.equal(captured.length, SURFACE_SLOTS)
+  assert.equal(captured.length, ITEMS_HELD)
   const queuedRect = encoder.queuedPatches[encoder.queuedPatches.length - 1]
 
   await encoder.commit([r(queuedRect.x + 1, queuedRect.y + 1, 10, 10)])
@@ -566,7 +705,7 @@ test('new damage over a queued patch is not queued again, over a captured one it
   assert.deepEqual(encoder.queuedPatches[queued], r(captured[0].x + 1, captured[0].y + 1, 10, 10))
 })
 
-test('video that finishes encoding after the surface was destroyed is dropped and gives its slot back', async () => {
+test('video that finishes encoding after the surface was destroyed is dropped, and its encode is over', async () => {
   const env = setup(2)
   const { encoder, host } = env.surface('a')
   await relentless(env, encoder, host)
@@ -578,23 +717,23 @@ test('video that finishes encoding after the surface was destroyed is dropped an
   void encoder.commit(full(host))
   const framesBefore = env.sink.frames.length
   assert.equal(host.encodes.length, 1)
-  assert.ok(!encoder.hasFreeSlot || encoder.hasUnsentWork)
+  assert.ok(!encoder.mayCapture, 'encoding')
   encoder.destroy()
   host.encodes[0].resolve(new Uint8Array([1]))
   await settle()
   assert.equal(env.sink.frames.length, framesBefore, 'the stale frame is not sent')
-  assert.ok(encoder.hasFreeSlot)
+  assert.ok(encoder.mayCapture)
   assert.equal(env.pool.available, 2)
 })
 
-test('a video frame wanted while both slots are taken is encoded when one frees up', async () => {
+test('a video frame wanted while the stream is not ready is encoded once it is', async () => {
   const env = setup(2)
   const { encoder, host } = env.surface('a')
   await relentless(env, encoder, host)
   assert.ok(encoder.usesVideo)
   await settle()
-  // fill both slots with frames the network doesn't take
-  while (encoder.hasFreeSlot) {
+  // fill the stream with frames the network doesn't take
+  while (encoder.mayCapture) {
     host.touch()
     await encoder.commit(full(host))
     await settle()
@@ -602,11 +741,36 @@ test('a video frame wanted while both slots are taken is encoded when one frees 
   const encodes = host.videoEncodes
   host.touch()
   await encoder.commit(full(host))
-  assert.equal(host.videoEncodes, encodes, 'no slot, no encode')
+  assert.equal(host.videoEncodes, encodes, 'not ready, no encode')
   assert.ok(encoder.hasUnsentWork)
   env.sink.held.shift()!.done(true)
   await settle()
-  assert.equal(host.videoEncodes, encodes + 1, 'the latest content is encoded once a slot is free')
+  assert.equal(host.videoEncodes, encodes + 1, 'the latest content is encoded once the stream is ready')
+})
+
+test('video: one frame encodes at a time; frames wanted meanwhile become one frame of the latest content', async () => {
+  const env = setup(2)
+  const { encoder, host } = env.surface('a')
+  await relentless(env, encoder, host)
+  assert.ok(encoder.usesVideo)
+  env.sink.flowFreely()
+  await settle()
+  await settle()
+  host.autoEncode = false
+  const encodes = host.videoEncodes
+  host.touch()
+  void encoder.commit(full(host))
+  assert.equal(host.videoEncodes, encodes + 1)
+  host.touch()
+  void encoder.commit(full(host))
+  host.touch()
+  void encoder.commit(full(host))
+  assert.equal(host.videoEncodes, encodes + 1, 'the stream is ready, but the encode in flight comes first')
+  const frames = env.sink.frames.length
+  host.encodes.shift()!.resolve(new Uint8Array([1]))
+  await settle()
+  assert.equal(env.sink.frames.length, frames + 1)
+  assert.equal(host.videoEncodes, encodes + 2, 'then one frame of the latest content')
 })
 
 test('small surfaces are never video, whatever their class', async () => {
@@ -737,7 +901,7 @@ test('nothing is encoded without a viewer', async () => {
   assert.equal(env.sink.patches.length + env.sink.frames.length, 0)
 })
 
-test("a surface's patches are sent in capture order, even when their encodings finish out of order", async () => {
+test('the pump encodes one patch of a surface at a time: its patches reach the sink in capture order', async () => {
   const sink = new FakeSink()
   const encodings: ((encoded: EncodedPatch) => void)[] = []
   const streaming = new FakeStreamingPool()
@@ -746,7 +910,8 @@ test("a surface's patches are sent in capture order, even when their encodings f
   })
   const rects = [r(0, 0, 100, 100), r(10, 10, 5, 5)]
   let serial = 0
-  let slots = 0
+  let encoding = false
+  let unsent = 0
   const source: PatchSource = {
     key: 'a',
     destroyed: false,
@@ -754,11 +919,12 @@ test("a surface's patches are sent in capture order, even when their encodings f
     get hasQueuedPatches() {
       return serial < rects.length
     },
-    get hasFreeSlot() {
-      return slots < SURFACE_SLOTS
+    get mayCapture() {
+      return !encoding
     },
     capturePatch() {
-      slots++
+      encoding = true
+      unsent++
       const rect = rects[serial++]
       return {
         rect,
@@ -772,24 +938,28 @@ test("a surface's patches are sent in capture order, even when their encodings f
       }
     },
     patchSending: () => undefined,
-    releaseSlot() {
-      slots--
+    encodeDone() {
+      encoding = false
+      pump.schedule(source)
+    },
+    itemDone() {
+      unsent--
     },
     isCurrent: () => true,
   }
   pump.schedule(source)
-  assert.equal(encodings.length, 2)
-  // the newer, smaller patch finishes encoding first
-  encodings[1](fakeEncoded(new Uint8Array([2])))
-  await settle()
-  assert.equal(sink.patches.length, 0)
+  assert.equal(encodings.length, 1, 'one at a time')
   encodings[0](fakeEncoded(new Uint8Array([1])))
+  await settle()
+  assert.equal(sink.patches.length, 1)
+  assert.equal(encodings.length, 2, 'the next once the first was handed to the sink')
+  encodings[1](fakeEncoded(new Uint8Array([2])))
   await settle()
   assert.deepEqual(
     sink.patches.map(({ patch }) => patch.contentSerial),
     [1, 2],
   )
-  assert.equal(slots, 0)
+  assert.equal(unsent, 0)
   assert.equal(pump.normalEncoding, 0)
 })
 
@@ -873,11 +1043,12 @@ test('new damage pre-empts settling, and the settling patches it covers are drop
   const { encoder, host } = env.surface('a')
   await lossyStreaming(env, encoder, host)
   await sendUntil(env, () => env.sink.patches.some(({ tier }) => tier === 'settle'))
-  // settling fills both slots, but the app may still draw (its frame callbacks wait for readyForFrame)
-  assert.equal(env.sink.held.length, 2)
-  assert.ok(!encoder.hasFreeSlot)
+  // settling fills the stream, but the app may still draw (its frame callbacks wait for readyForFrame, which doesn't
+  // count settling)
+  assert.equal(env.sink.held.length, ITEMS_HELD)
+  assert.ok(!encoder.mayCapture)
   assert.ok(encoder.readyForFrame)
-  // damage in a corner not settled yet, which comes out lossless: it goes as soon as a slot frees
+  // damage in a corner not settled yet, which comes out lossless: it goes as soon as the stream is ready
   env.streaming.jpegWins = false
   host.touch()
   await encoder.commit([r(990, 990, 10, 10)])
@@ -943,7 +1114,8 @@ test('random patch order: every queued rectangle is still sent once, just not ol
   env.holdNormal(true)
   const { encoder, host } = env.surface('a', 1000, 1000)
   await encoder.commit(full(host))
-  const planned = encoder.queuedPatches.length + SURFACE_SLOTS
+  // (one is encoding already)
+  const planned = encoder.queuedPatches.length + env.normalCalls.length
   for (let i = 0; i < 200 && env.normalCalls.length > 0; i++) {
     env.normalCalls.shift()!.resolve()
     await settle()
@@ -964,7 +1136,7 @@ test("random patch order: each commit's patches are a batch, batches go oldest f
   env.context.patchOrder = 'random'
   env.holdNormal(true)
   const { encoder, host } = env.surface('a', 1000, 1000)
-  // two commits while the slots are taken: the top half, then the bottom half
+  // two commits while a patch encodes: the top half, then the bottom half
   await encoder.commit([r(0, 0, 1000, 500)])
   host.touch()
   await encoder.commit([r(0, 500, 1000, 500)])
@@ -1000,7 +1172,7 @@ test("a surface's lossless bytes per pixel: measured on all its lossless patches
   await settle()
   await settle()
   const handed = env.sink.patches.slice(before)
-  assert.equal(handed.length, SURFACE_SLOTS)
+  assert.equal(handed.length, ITEMS_HELD)
   assert.deepEqual(formatsOf(handed), new Set([PatchFormat.JPEG_ALPHA]))
   assert.equal(big.encoder.bytesPerPixel, measured)
   // a patch that could have been lossy but came out lossless (the smaller) does
@@ -1059,7 +1231,7 @@ test("a burst's first patches already go out lossy when bandwidth is short", asy
   await settle()
   assert.equal(encoder.surfaceClass, 'streaming')
   assert.equal(env.normalStarted, 0)
-  assert.equal(env.streaming.lossyCalls, SURFACE_SLOTS)
+  assert.equal(env.streaming.lossyCalls, ITEMS_HELD)
   assert.deepEqual(formatsOf(env.sink.patches), new Set([PatchFormat.JPEG_ALPHA]))
 })
 

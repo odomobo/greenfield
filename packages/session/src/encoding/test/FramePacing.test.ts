@@ -8,22 +8,22 @@ import {
   tickIntervalFor,
 } from '../../FramePacing.js'
 
-test('a frame callback is held while the surface has no free slot and released at the next tick once it has one', () => {
+test("a frame callback is held while the surface's stream is not ready and released at the next tick once it is", () => {
   const queue = new FrameCallbackQueue()
-  let slotFree = false
+  let streamReady = false
   const called: number[] = []
   queue.schedule(
     0,
-    () => slotFree,
+    () => streamReady,
     (time) => called.push(time),
   )
 
   queue.tick(16, 100)
   queue.tick(16, 116)
-  assert.deepEqual(called, [], 'held while both slots are taken')
+  assert.deepEqual(called, [], 'held while its stream is not ready')
   assert.equal(queue.length, 1)
 
-  slotFree = true
+  streamReady = true
   assert.deepEqual(called, [], 'not between ticks')
   queue.tick(16, 132)
   assert.deepEqual(called, [132])
@@ -79,7 +79,7 @@ test('a surface streamed as video is never forced: its callback waits until it i
   assert.deepEqual(called, [1000])
 })
 
-test('the viewer decode time delays the callback even when a slot is free', () => {
+test('the viewer decode time delays the callback even when the stream is ready', () => {
   const queue = new FrameCallbackQueue()
   const called: number[] = []
   queue.schedule(

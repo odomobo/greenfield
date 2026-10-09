@@ -72,6 +72,8 @@ export class ViewerHost {
   private transport?: ViewerTransport
   private shellEndpoint?: ShellEndpoint
   private audioEndpoint?: AudioEndpoint
+  /** what the surface contents send into (the current transport, if any) */
+  private readonly sink: EncodingSink
   /**
    * The viewer asked to log out (`session.logout`). The session stops taking connections and ends; it calls `done`
    * once a new sign-in can no longer reach it, and the viewer is closed with CLOSE_LOGGED_OUT then.
@@ -86,7 +88,7 @@ export class ViewerHost {
     const isAttached = () => this.transport !== undefined
     const isBandwidthLimited = () => this.transport?.bandwidthLimited ?? false
     const linkBandwidth = () => this.transport?.linkBandwidth
-    content.setFrameSink({
+    this.sink = {
       get active() {
         return isAttached()
       },
@@ -97,6 +99,7 @@ export class ViewerHost {
         return linkBandwidth()
       },
       queuedBytes: (surfaceKey) => this.transport?.queuedBytes(surfaceKey) ?? 0,
+      streamReady: (surfaceKey, exceptSettling) => this.transport?.streamReady(surfaceKey, exceptSettling) ?? true,
       sendFrame: (surfaceKey, frame, surfaceClass, done) => {
         if (this.transport) {
           this.transport.send({ priority: 'frame', surface: surfaceKey, frame, surfaceClass, done })
@@ -111,7 +114,8 @@ export class ViewerHost {
           done(false)
         }
       },
-    })
+    }
+    content.setFrameSink(this.sink)
   }
 
   set shell(shell: ShellEndpoint) {
@@ -152,6 +156,11 @@ export class ViewerHost {
     this.transport = transport
     transport.onMessage = (message) => this.onMessage(transport, message)
     transport.onFileChunk = (id, data) => this.scene.handleFileChunk?.(id, data)
+    transport.onStreamReady = (surface) => {
+      if (this.transport === transport) {
+        this.sink.onStreamReady?.(surface)
+      }
+    }
     transport.onClose = (code, reason) => {
       if (this.transport !== transport) {
         return
