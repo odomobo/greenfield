@@ -82,7 +82,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 20
+export const PROTOCOL_VERSION = 21
 
 /**
  * The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). The
@@ -333,6 +333,11 @@ export type ServerMessage =
    * the menu); without it, the menu changed while open: update it if it's still shown.
    */
   | { type: 'shell.tray-menu'; item: string; menu: ShellTrayMenuItem[]; show?: { x: number; y: number } }
+  /**
+   * The session host's clock, which the taskbar shows (not the browser's): its time (ms since the epoch) and its IANA
+   * time zone. Sent on attach and every minute (the zone may change, the clocks drift apart).
+   */
+  | { type: 'shell.clock'; time: number; timeZone: string }
   /**
    * Whether the session has audio (its own PipeWire is running); sent on attach and when it changes. Without it the
    * session works silently and `audio.mute` has no effect.

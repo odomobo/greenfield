@@ -215,6 +215,8 @@ export class Desktop {
   private swallowRelease = false
 
   private layoutScheduled = false
+  /** the window peeked at, see peek() */
+  private peeked: string | undefined
   private lastFrameTimestamp = 0
   private refreshInterval = 16
 
@@ -702,6 +704,17 @@ export class Desktop {
         interaction.startPointer = this.pointer
         interaction.menu.nudge = { x: 0, y: 0 }
       }
+    }
+  }
+
+  /**
+   * Peek at a window (hovering its taskbar preview): it's the only one shown, minimized or not, every other window fades
+   * out. undefined: show them all again. Only how it looks changes, nothing is sent.
+   */
+  peek(id: string | undefined): void {
+    if (this.peeked !== id) {
+      this.peeked = id
+      this.scheduleLayout()
     }
   }
 
@@ -1587,12 +1600,15 @@ export class Desktop {
     const animating = this.advanceAnimations()
     this.refreshFrames()
     const pixelRatio = window.devicePixelRatio || 1
+    // (a peeked window that closed: show them all)
+    const peeked = this.windows.some((window) => window.id === this.peeked) ? this.peeked : undefined
     for (const window of this.windows) {
       const view = this.windowViews.get(window.id)
       if (view === undefined) {
         continue
       }
       const kind = this.animations.get(this.rootOf(window).id)?.kind
+      const peekShown = peeked !== undefined && this.rootOf(window).id === peeked
       const { x, y, scaleX, scaleY } = this.windowTransform(window)
       view.layout({
         x,
@@ -1601,8 +1617,9 @@ export class Desktop {
         scaleY,
         // (a new window that isn't ready to be shown is there, transparent)
         opacity: this.opened.has(window.id) ? (this.animatedState(window)?.opacity ?? 1) : 0,
-        hidden: this.isHidden(window),
-        inert: kind === 'minimize' || kind === 'restore' || !this.opened.has(window.id),
+        hidden: this.isHidden(window) && !peekShown,
+        inert: kind === 'minimize' || kind === 'restore' || !this.opened.has(window.id) || this.isHidden(window),
+        peekFaded: peeked !== undefined && !peekShown,
         pixelRatio,
         surfaces: window.surfaces.map(({ x, y, width, height }) => ({ x, y, width, height })),
         geometry: window.geometry,

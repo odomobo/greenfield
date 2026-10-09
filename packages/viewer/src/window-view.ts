@@ -18,6 +18,8 @@ export type WindowLayout = {
   hidden: boolean
   /** not pickable (minimizing, restoring) */
   inert: boolean
+  /** another window is being peeked at (hovering its taskbar preview): this one fades out */
+  peekFaded: boolean
   pixelRatio: number
   /** the surfaces' rects in the window's coordinates, in the order of `setSurfaces` */
   surfaces: Rect[]
@@ -78,8 +80,10 @@ export class WindowView {
   }
 
   layout(layout: WindowLayout): void {
-    const { x, y, scaleX, scaleY, opacity, hidden, inert, pixelRatio } = layout
-    for (const style of [this.element.style, this.popups.style]) {
+    const { x, y, scaleX, scaleY, opacity, hidden, inert, peekFaded, pixelRatio } = layout
+    for (const element of [this.element, this.popups]) {
+      element.classList.toggle('peek-faded', peekFaded)
+      const style = element.style
       style.display = hidden ? 'none' : ''
       style.pointerEvents = inert ? 'none' : ''
       style.opacity = opacity === 1 ? '' : String(opacity)

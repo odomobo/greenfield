@@ -4,9 +4,10 @@ import type { ContextPopup, MenuItem, PopupEntry, PreviewPopup, Submenu } from '
 import { glyphs } from './glyphs'
 import { usePresence } from './presence'
 import { WindowPreview } from './previews'
+import { TaskbarOverflow } from './taskbar'
 
 /**
- * Renders the popups that come and go (see popups.ts): context menus and window previews, in stack order (a nested
+ * Renders the popups that come and go (see popups.ts): context menus, window previews and the taskbar's overflow, in stack order (a nested
  * one above its parent). The Apps menu and the notification panel stay in the document (hidden when closed) and are
  * rendered by the desktop view.
  */
@@ -21,6 +22,9 @@ export function PopupLayer() {
         }
         if (entry.kind === 'preview' && !leaving) {
           return <WindowPreview key={keyOf(entry)} entry={entry} />
+        }
+        if (entry.kind === 'overflow' && !leaving) {
+          return <TaskbarOverflow key={keyOf(entry)} />
         }
         return null
       })}
@@ -152,7 +156,11 @@ function ContextMenu({ entry, leaving }: { entry: ContextPopup; leaving: boolean
                 return
               }
               // close this menu and what it was opened from
-              closePopup()
+              if (item.keepOpener) {
+                closeAbove(Math.max(0, stackIndex()))
+              } else {
+                closePopup()
+              }
               item.action()
             }}
           >

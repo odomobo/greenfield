@@ -60,11 +60,23 @@ desktops of the same user never see any of it. All of it comes from `packages/se
   - The sides of the bar share the leftover space equally (so the title is truly centered) but never shrink below the
     icon's square and the buttons: in a narrow window the title moves off center, then shrinks with an ellipsis,
     instead of covering the buttons or vanishing.
+  - Narrower than the icon's square and the buttons, the buttons slide off to the left under the icon's edge
+    (clipped there, the icon stays): minimize goes first, then maximize; close stays at the right edge the longest.
 
 ## Taskbar and Apps menu
 
 - **Taskbar**: 48 px high, at the top. The Apps button is a 3 × 3 grid of dots.
+- **Taskbar buttons** (apps, pinned and running, one per app): pinned and running ones mixed, in an order the user
+  sets by dragging them (the others slide aside to make room). Pinned apps keep their order among themselves across
+  sessions; where running apps sit is this viewer's own. New ones are added at the end.
+  - Buttons that don't fit go into a **flyout under a '…' button** at the end of the strip (three dots in a row): the
+    same buttons, in rows of up to six, with their click, right click and previews (shown under the flyout).
+  - **Window previews** of an app list its windows in the order they were opened (not their stacking order). Resting
+    the pointer on a preview card for 400 ms **peeks** at its window: it's the only one shown (minimized or not),
+    the others fade out (150 ms) until the pointer leaves the card, and then come back at once.
 - **Tray**: the apps' tray icons, the mute toggle, then the notification bell with the clock.
+  - The **clock** shows the session host's time in the host's time zone (sent by the session), not the browser's;
+    notification times too.
   - Icons are simple solid shapes: a solid speaker with bold sound waves (a bold ✕ when muted, still white; grey
     only when audio is unavailable), a solid bell, a solid user silhouette, a bold power symbol.
   - **No connection indicator.** It only showed connected/not connected, and a dropped connection shows the sign-in
@@ -72,6 +84,7 @@ desktops of the same user never see any of it. All of it comes from `packages/se
     report it, it's too late to be useful.
   - **Apps' tray icons** (system tray): 20 px, all shown inline in the order they came (no overflow flyout for now);
     they grow in and shrink away like taskbar buttons. Menus open under the icon; a second click closes them.
+- The **browser's own context menu** never shows, except on text fields (for pasting).
 - **Context menus** may have a column of check marks / radio dots and one of icons (only when an entry has one), and
   submenus: a chevron, opened by pointing at the entry for 150 ms or clicking it, beside the menu (on its left if
   there's no room on the right).

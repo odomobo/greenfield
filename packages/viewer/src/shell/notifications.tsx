@@ -4,6 +4,7 @@ import { ShellNotification } from '../protocol'
 import { shellStore } from '../state'
 import { usePopupStack } from '../popups'
 import { useStore } from '../store'
+import { formatTime } from './clock'
 import { glyphs } from './glyphs'
 import { appById } from './groups'
 import { AppIcon } from './icons'
@@ -98,7 +99,7 @@ function NotificationCard({
       <AppIcon name={notification.icon ?? app?.icon} size={24} />
       <div className="notification-text">
         <div className="notification-meta">
-          {[notification.appName || app?.name, formatTime(notification.time)].filter(Boolean).join(' · ')}
+          {[notification.appName || app?.name, formatTime(notification.time, state.clock)].filter(Boolean).join(' · ')}
         </div>
         <div className="notification-summary">{notification.summary}</div>
         {notification.body ? <div className="notification-body">{notification.body}</div> : null}
@@ -116,8 +117,4 @@ function NotificationCard({
       />
     </div>
   )
-}
-
-function formatTime(time: number): string {
-  return new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }

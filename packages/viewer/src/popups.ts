@@ -23,6 +23,8 @@ export type MenuItem =
       icon?: string
       /** opens a submenu (pointing at it or clicking it) instead of acting */
       submenu?: Submenu
+      /** clicking it closes only this menu, not the popup it was opened from (Unpin in the Apps menu) */
+      keepOpener?: boolean
     }
   | { separator: true }
   | { heading: string }
@@ -52,7 +54,10 @@ export type NotificationsPopup = { kind: 'notifications'; owner: 'notifications-
 /** Window previews of a taskbar group, under the group's button. pinned: stay until clicked/closed, not on hover-out. */
 export type PreviewPopup = { kind: 'preview'; owner: string; anchorRect: DOMRect; pinned: boolean }
 
-export type PopupEntry = ContextPopup | AppsPopup | NotificationsPopup | PreviewPopup
+/** The taskbar buttons that don't fit, under its '…' button (taskbar.tsx). */
+export type OverflowPopup = { kind: 'overflow'; owner: 'taskbar-overflow' }
+
+export type PopupEntry = ContextPopup | AppsPopup | NotificationsPopup | PreviewPopup | OverflowPopup
 
 type PopupState = { stack: PopupEntry[] }
 

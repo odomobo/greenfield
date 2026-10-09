@@ -8,12 +8,14 @@ import { computeGroups, Group, groupName } from './groups'
 import { GroupIcon } from './icons'
 import { glyphs } from './glyphs'
 import { windowMenuItems } from './menus'
-import { cancelPreviewClose, schedulePreviewClose } from './preview'
+import { cancelPreviewClose, closePreview, schedulePreviewClose } from './preview'
 import type { PreviewPopup } from '../popups'
 
 const PREVIEW_WIDTH = 200
 const PREVIEW_HEIGHT = 120
 const PREVIEW_REFRESH_MS = 250
+/** rest the pointer on a card this long and its window is the only one shown (desktop.peek) */
+const PEEK_DELAY_MS = 400
 
 /**
  * The window previews of a taskbar group, shown under its button: one card per window with its title, a close button and a
@@ -28,10 +30,13 @@ export function WindowPreview({ entry }: { entry: PreviewPopup }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvases = useRef(new Map<string, HTMLCanvasElement>())
 
+  // the peek (see PreviewCard) ends with the preview
+  useEffect(() => () => desktop.peek(undefined), [desktop])
+
   // the group is gone (its last window closed): put the preview away
   useEffect(() => {
     if (group === undefined || group.windows.length === 0) {
-      closePopup()
+      closePreview()
     }
   }, [group])
 
@@ -108,7 +113,16 @@ function PreviewCard({ window, group, canvases }: PreviewCardProps) {
     }
   }, [window.id, canvases])
 
+  // resting on the card peeks at its window, leaving it (or a menu over it) ends that
+  const peekTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const endPeek = () => {
+    clearTimeout(peekTimer.current)
+    desktop.peek(undefined)
+  }
+  useEffect(() => () => clearTimeout(peekTimer.current), [])
+
   const activate = () => {
+    endPeek()
     closePopup()
     desktop.activateWindow(window.id)
   }
@@ -121,6 +135,13 @@ function PreviewCard({ window, group, canvases }: PreviewCardProps) {
       tabIndex={0}
       title={window.title}
       onClick={activate}
+      onPointerEnter={(event) => {
+        if (event.pointerType === 'mouse') {
+          clearTimeout(peekTimer.current)
+          peekTimer.current = setTimeout(() => desktop.peek(window.id), PEEK_DELAY_MS)
+        }
+      }}
+      onPointerLeave={endPeek}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
@@ -129,6 +150,7 @@ function PreviewCard({ window, group, canvases }: PreviewCardProps) {
       }}
       onContextMenu={(event) => {
         event.preventDefault()
+        endPeek()
         // (nested: the menu opens above the preview)
         openPopup(
           {

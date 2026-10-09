@@ -58,7 +58,12 @@ export type ShellState = {
   icons: Record<string, string | null>
   /** the system tray's items, in the order they came (passive ones too: the taskbar hides them) */
   tray: ShellTrayItem[]
+  /** the session host's clock (see shell/clock.ts); undefined until it's sent */
+  clock: HostClock | undefined
 }
+
+/** The host's clock: how far ahead of the browser's it is (ms), and the host's time zone. */
+export type HostClock = { offset: number; timeZone: string }
 
 export const shellStore = createStore<ShellState>({
   username: '',
@@ -70,6 +75,7 @@ export const shellStore = createStore<ShellState>({
   toasts: [],
   icons: {},
   tray: [],
+  clock: undefined,
 })
 
 /** The session's audio as the taskbar's mute toggle shows it. Published by the AudioPlayer (audio/player.ts). */

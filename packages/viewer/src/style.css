@@ -92,6 +92,32 @@
   overflow: hidden;
 }
 
+/* the '…' button of the buttons that don't fit (their flyout: #taskbar-overflow) */
+.taskbar-button.overflow {
+  width: calc(var(--taskbar-height) - 2px);
+}
+
+/* dragging an app button into another place (taskbar.tsx useReorderDrag): it follows the pointer, the others make room */
+.taskbar-button.app {
+  touch-action: none;
+}
+
+#taskbar-items.reordering .taskbar-button.app {
+  transition: transform 150ms ease-out;
+}
+
+#taskbar-items.reordering .taskbar-button.app.dragging {
+  z-index: 1;
+  transition: none;
+  background: var(--color-subtle-hover);
+}
+
+#taskbar-overflow {
+  display: grid;
+  gap: 2px;
+  padding: 4px;
+}
+
 .taskbar-button.app .indicator {
   position: absolute;
   left: 50%;
@@ -892,6 +918,20 @@
   pointer-events: auto;
 }
 
+/* peeking at another window (hovering its taskbar preview): fade out, come back at once (desktop.ts peek) */
+#output .window.peek-faded,
+#output .window-popups.peek-faded {
+  opacity: 0 !important;
+  transition: opacity 150ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #output .window.peek-faded,
+  #output .window-popups.peek-faded {
+    transition: none;
+  }
+}
+
 /* a window's element is its surfaces' coordinate system, moved and stretched by a transform (desktop.ts); its popups'
    element (in the popup layer) gets the same one */
 #output .window,
@@ -961,9 +1001,12 @@
   display: grid;
   /* The sides share what the title leaves equally (so it's centered), but never get less than the icon's square and the
      buttons (a dialog has only one): in a narrow window the title moves off center, then shrinks, instead of covering
-     them. */
+     them. Narrower still, the buttons' side gets only what the icon leaves, and the buttons slide off to the left
+     under the icon's edge (.frame-buttons clips them): close stays the longest. */
   --frame-side: calc(3 * var(--frame-title-height));
-  grid-template-columns: minmax(var(--frame-title-height), 1fr) minmax(0, auto) minmax(var(--frame-side), 1fr);
+  grid-template-columns:
+    minmax(var(--frame-title-height), 1fr) minmax(0, auto)
+    minmax(max(0px, min(var(--frame-side), 100% - var(--frame-title-height))), 1fr);
   align-items: center;
   overflow: hidden;
   background: var(--color-frame-inactive);
@@ -1003,14 +1046,18 @@
 
 #output .frame-buttons {
   display: flex;
-  justify-self: end;
+  justify-content: flex-end;
+  justify-self: stretch;
   align-self: stretch;
+  min-width: 0;
+  overflow: hidden;
 }
 
 /* square buttons, as wide as the title bar is high, with square highlights */
 #output .frame-button {
   display: inline-grid;
   place-items: center;
+  flex: none;
   width: var(--frame-title-height);
   border-radius: 0;
   height: 100%;

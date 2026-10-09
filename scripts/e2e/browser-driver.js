@@ -6,7 +6,8 @@
 // Usage: node browser-driver.js <port-file>     (prints nothing; writes the port it listens on into <port-file>)
 //
 // Commands (body = arguments):
-//   open <url>            start a fresh browser (closing any earlier one), HTTPS errors ignored, 1280x800 viewport
+//   open <url>            start a fresh browser (closing any earlier one), HTTPS errors ignored, 1280x800 viewport,
+//                         in the time zone E2E_BROWSER_TZ if set
 //   close                 close the browser
 //   eval <function>       evaluate a function expression in the page, answer its result as JSON
 //   mousemove x y | mousedown [right|middle] | mouseup [right|middle] | wheel dx dy | type <text> | press <key> | keydown <key> | keyup <key>
@@ -64,7 +65,12 @@ const commands = {
   async open(url) {
     if (browser) await browser.close().catch(() => {})
     browser = await launch()
-    context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } })
+    // (E2E_BROWSER_TZ: the browser's time zone, to tell it apart from the session host's)
+    context = await browser.newContext({
+      ignoreHTTPSErrors: true,
+      viewport: { width: 1280, height: 800 },
+      ...(process.env.E2E_BROWSER_TZ ? { timezoneId: process.env.E2E_BROWSER_TZ } : {}),
+    })
     // the clipboard tests read and write the page's clipboard (the browser would ask the user otherwise)
     await context.grantPermissions(['clipboard-read', 'clipboard-write'])
     pages = []

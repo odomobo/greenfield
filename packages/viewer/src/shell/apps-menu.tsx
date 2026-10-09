@@ -169,7 +169,7 @@ export function AppsMenu({ actions }: { actions: AppsMenuActions }) {
                       owner: `tile:${app.id}`,
                       items: [
                         { label: 'Open', action: () => launch(app.id), testId: 'launch' },
-                        { label: 'Unpin', action: () => actions.togglePin(app.id), testId: 'unpin' },
+                        { label: 'Unpin', action: () => actions.togglePin(app.id), testId: 'unpin', keepOpener: true },
                       ],
                       x: event.clientX,
                       y: event.clientY,

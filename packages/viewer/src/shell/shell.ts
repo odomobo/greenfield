@@ -1,7 +1,7 @@
 import { shellStore } from '../state'
 import { ServerMessage, ShellNotification, ViewerMessage } from '../protocol'
 import { closePopup, isKindOpen, openPopup } from '../popups'
-import { appById, resetGroupOrder } from './groups'
+import { appById, resetGroupOrder, setGroupOrder } from './groups'
 import { IconCache } from './icons'
 import { TrayController } from './tray'
 
@@ -43,6 +43,7 @@ export class ShellController {
       notifications: [],
       unseen: false,
       toasts: [],
+      clock: undefined,
     })
   }
 
@@ -77,6 +78,9 @@ export class ShellController {
       case 'shell.notification-closed':
         this.remove(message.id)
         break
+      case 'shell.clock':
+        shellStore.update({ clock: { offset: message.time - Date.now(), timeZone: message.timeZone } })
+        break
       case 'shell.launch-failed': {
         const app = appById(shellStore.get().apps, message.app)
         this.local(`${app?.name ?? 'The app'} could not be started.`)
@@ -88,6 +92,17 @@ export class ShellController {
   launch(app: string): void {
     this.send({ type: 'shell.launch', app })
     // apps take a moment; the window shows up in the taskbar when it maps
+  }
+
+  /** The taskbar's buttons were dragged into this order (group keys): save the pinned apps' new order. */
+  reorderTaskbar(keys: string[]): void {
+    const current = shellStore.get().pinned
+    const pinned = setGroupOrder(keys, current)
+    // (a new array either way: the taskbar re-renders in the new order)
+    shellStore.update({ pinned })
+    if (pinned.some((id, i) => id !== current[i])) {
+      this.send({ type: 'shell.pin', apps: pinned })
+    }
   }
 
   togglePin(app: string): void {

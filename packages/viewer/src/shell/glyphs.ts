@@ -41,6 +41,12 @@ export const glyphs = {
     glyph(
       '<path fill="currentColor" d="M14.5 3.5 20.5 9.5 17 11l-3.5 3.5.5 4-1.5 1.5-8-8L6 10.5l4 .5L13.5 7.5z"/><path d="M8.5 16 4 20.5"/>',
     ),
+  /** three dots in a row: more (the taskbar's overflow) */
+  more: (size = 18) =>
+    glyph(
+      [5, 12, 19].map((x) => `<circle cx="${x}" cy="12" r="2.1" fill="currentColor" stroke="none"/>`).join(''),
+      size,
+    ),
   check: (size = 16) => glyph('<path d="m5 12.5 4.5 4.5L19 7.5"/>', size),
   chevronRight: (size = 14) => glyph('<path d="m9.5 6 6 6-6 6"/>', size),
   close: (size = 14) => glyph('<path d="m6 6 12 12M18 6 6 18"/>', size),

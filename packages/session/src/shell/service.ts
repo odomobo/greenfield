@@ -7,7 +7,7 @@
 import { createLogger } from '../Logger.js'
 import type { ShellEndpoint } from '../viewer/ViewerHost.js'
 import type { ControlMessage } from '../viewer/ViewerTransport.js'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { DesktopEntry, findProgram, loadDesktopEntries, parseExec, terminalCommand } from './desktop-entries'
 import { IconResolver } from './icons'
@@ -20,6 +20,38 @@ const MAX_PINNED = 32
 const MAX_ICON_REQUEST = 64
 /** re-read .desktop files at most this often (apps get installed while a session runs) */
 const APPS_REFRESH_MS = 30_000
+/** resend the host's clock this often (its time zone may change, and the viewer's clock drifts from it) */
+const CLOCK_INTERVAL_MS = 60_000
+
+/**
+ * The host's IANA time zone, read each time (Node's own, Intl's, is fixed when the process starts): TZ if set, else
+ * where /etc/localtime points.
+ */
+export function hostTimeZone(): string {
+  const tz = process.env.TZ?.replace(/^:/, '')
+  if (tz && isTimeZone(tz)) {
+    return tz
+  }
+  try {
+    const target = readlinkSync('/etc/localtime')
+    const zone = target.slice(target.indexOf('zoneinfo/') + 'zoneinfo/'.length)
+    if (target.includes('zoneinfo/') && isTimeZone(zone)) {
+      return zone
+    }
+  } catch {
+    // not a link (or none): Node's own idea
+  }
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+}
+
+function isTimeZone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: zone })
+    return true
+  } catch {
+    return false
+  }
+}
 
 export type ShellApp = {
   id: string
@@ -58,6 +90,7 @@ export class ShellService implements ShellEndpoint {
   private readonly icons = new IconResolver()
   private readonly notifications = new NotificationServer()
   private readonly tray: TrayHost
+  private clockTimer: ReturnType<typeof setInterval> | undefined
   private readonly pinnedFile: string
 
   constructor(private readonly apps: AppLauncher) {
@@ -87,10 +120,20 @@ export class ShellService implements ShellEndpoint {
     send({ type: 'shell.pinned', apps: this.pinned })
     send({ type: 'shell.notifications', notifications: this.notifications.all })
     send({ type: 'shell.tray', items: this.tray.all })
+    this.sendClock()
+    clearInterval(this.clockTimer)
+    this.clockTimer = setInterval(() => this.sendClock(), CLOCK_INTERVAL_MS)
   }
 
   detach(): void {
     this.send = undefined
+    clearInterval(this.clockTimer)
+    this.clockTimer = undefined
+  }
+
+  /** The host's clock for the taskbar (see `shell.clock`). */
+  private sendClock(): void {
+    this.send?.({ type: 'shell.clock', time: Date.now(), timeZone: hostTimeZone() })
   }
 
   handleMessage(message: ControlMessage): void {
