@@ -123,6 +123,8 @@ no_animations() { echo "() => !Object.keys(window.__viewerTest.animations()).len
 
 step "signing in in the browser"
 pw open "$BASE/?test=1" >/dev/null
+# the sign-in form says where: its heading and the tab's title
+wait_for "() => document.querySelector('#login-view h1')?.textContent === 'Sign in to $(hostname)' && document.title === 'Sign in to $(hostname)'" "'Sign in to $(hostname)'" 5
 browser_login
 
 step "another tab is not signed in"

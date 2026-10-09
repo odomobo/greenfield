@@ -101,3 +101,9 @@ export function userAtHost(username: string, hostname: string): string {
   const host = hostname.trim()
   return host ? `${username}@${host}` : username
 }
+
+/** The sign-in form's heading and the tab's title while it shows: "Sign in to hostname" (or just "Sign in"). */
+export function signInTitle(hostname: string): string {
+  const host = hostname.trim()
+  return host ? `Sign in to ${host}` : 'Sign in'
+}

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import type { RefObject } from 'react'
-import { appStore } from '../state'
+import { appStore, signInTitle } from '../state'
 import { useStore } from '../store'
 
 /**
@@ -48,8 +48,7 @@ export function LoginView({
     <div id="login-view" className="page" hidden={!visible}>
       <main className="card">
         <img className="logo" src="/static/logo.png" alt="" draggable={false} />
-        <h1>Sign in</h1>
-        <p className="subtitle">{hostname}</p>
+        <h1>{signInTitle(hostname)}</h1>
         <p className="error" role="alert" hidden={view.loginError === undefined}>
           {view.loginError}
         </p>

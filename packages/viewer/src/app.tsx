@@ -10,7 +10,7 @@ import { AppsMenuActions } from './shell/apps-menu'
 import { appForWindow, groupKey } from './shell/groups'
 import { windowMenuItems } from './shell/menus'
 import { openPopup } from './popups'
-import { appStore, shellStore, userAtHost } from './state'
+import { appStore, shellStore, signInTitle, userAtHost } from './state'
 import { DesktopView } from './views/desktop'
 import { LoginView } from './views/login'
 
@@ -89,7 +89,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
       loginBusy: false,
       loginFocusNonce: appStore.get().loginFocusNonce + 1,
     })
-    document.title = 'Sign in'
+    document.title = signInTitle(hostname)
   }, [])
 
   /** Log out: the desktop ends; the sign-in form shows once it did (the connection closes). */

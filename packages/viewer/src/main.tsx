@@ -1,5 +1,6 @@
 import { createRoot } from 'react-dom/client'
 import { App } from './app'
+import { signInTitle } from './state'
 
 /*
  * Entry point: the gateway serves this one page and injects the host name into index.html (into the placeholder in
@@ -9,6 +10,7 @@ import { App } from './app'
 // the host name shown on the sign-in form without needing a request
 const hostname = document.getElementById('hostname')?.textContent ?? ''
 const testMode = new URLSearchParams(location.search).get('test') === '1'
+document.title = signInTitle(hostname)
 
 // the browser's own context menu never shows, except on text fields (to paste); our right clicks are handled where they
 // happen, and the desktop forwards them to the apps
