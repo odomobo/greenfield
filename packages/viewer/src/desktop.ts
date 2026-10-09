@@ -1685,6 +1685,8 @@ export class Desktop {
       shown.add(view)
       if (view.canvas.parentElement !== this.floatingLayer) {
         this.floatingLayer.append(view.canvas)
+        // (a reused surface id: the canvas may have been a window's, clipped to its geometry)
+        view.canvas.style.clipPath = ''
       }
       view.canvas.style.transform = `translate(${rect.x}px, ${rect.y}px)`
       view.place({ x: 0, y: 0, width: rect.width, height: rect.height }, rect, window.devicePixelRatio || 1)
