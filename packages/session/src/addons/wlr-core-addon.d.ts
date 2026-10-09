@@ -9,7 +9,7 @@ declare namespace wlrCore {
    * Events, called synchronously from inside the calls below (wlroots runs on this thread):
    * - client-new(clientId, pid), client-destroy(clientId): Wayland connections (pid from the socket's credentials, 0 if
    *   unknown)
-   * - surface-new(sid, key): key is "clientId/surface object id"
+   * - surface-new(sid, key): key is "clientId/sid", never reused in the session (unlike the surface's protocol id)
    * - surface-commit(sid, hasBuffer, newBuffer, bufferWidth, bufferHeight, bufferDamage, width, height, input,
    *   hasFrameCallbacks): damage is in buffer coordinates, input in surface coordinates (both flat x, y, w, h)
    * - surface-map(sid), surface-unmap(sid), surface-destroy(sid)

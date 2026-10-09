@@ -671,6 +671,34 @@ test('Wayland clients are reported with their process', () => {
   assert.deepEqual(events, ['+1:1234', '-1'])
 })
 
+test('the scene that no longer shows a destroyed surface tells the viewer to forget it; a new viewer has nothing to forget', async () => {
+  core.newWindow(1)
+  core.newWindow(2)
+  await flush()
+  core.onEvent('surface-unmap', 2)
+  core.onEvent('toplevel-destroy', 2)
+  core.onEvent('surface-destroy', 2)
+  await flush()
+  assert.deepEqual(windowsOf(lastScene()).map((window) => window.id), ['1/1'])
+  assert.deepEqual(lastScene().destroyed, ['1/2'])
+  // a surface that never was in a scene (e.g. a drag icon) is forgotten too, with an otherwise unchanged scene
+  core.onEvent('surface-new', 3, '1/3')
+  core.onEvent('surface-destroy', 3)
+  await flush()
+  assert.deepEqual(lastScene().destroyed, ['1/3'])
+  const count = scenes().length
+  core.commit(1, 400, 300)
+  await flush()
+  assert.equal(scenes().length, count, 'nothing to forget: no scene')
+
+  compositor.detach()
+  core.onEvent('surface-destroy', 1)
+  const again: ControlMessage[] = []
+  compositor.attach((message) => again.push(message))
+  await flush()
+  assert.ok(again.every((message) => message.destroyed === undefined))
+})
+
 test('a reattached viewer gets the whole scene again', async () => {
   core.newWindow(1)
   await flush()
@@ -930,6 +958,7 @@ function holdingSink() {
     sendPatch: (_surface, _patch, _class, done) => held.push(done),
     requireKeyFrame: () => undefined,
     dropPatches: () => undefined,
+    forgetSurface: () => undefined,
   }
   return { sink, held }
 }

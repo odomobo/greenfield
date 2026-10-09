@@ -162,6 +162,30 @@ test('dropPatches keeps video, requireKeyFrame drops everything', () => {
   assert.deepEqual(delivered(), ['d10'], 'deltas wait for a key frame')
 })
 
+test('forgetSurface drops everything queued of the surface', () => {
+  const { transport, delivered } = setup()
+  const done: boolean[] = []
+  transport.send({ priority: 'frame', surfaceClass: 'streaming', surface: 'other', frame: h264Frame(9, true) })
+  transport.send({
+    priority: 'frame',
+    surfaceClass: 'streaming',
+    surface: 's',
+    frame: h264Frame(1, true),
+    done: (sent) => done.push(sent),
+  })
+  transport.send({
+    priority: 'patch',
+    tier: 'normal',
+    surface: 's',
+    patch: patch(2),
+    done: (sent) => done.push(sent),
+  })
+  transport.forgetSurface('s')
+  assert.deepEqual(done, [false, false])
+  assert.equal(transport.queuedBytes('s'), 0)
+  assert.deepEqual(delivered(), ['k9'])
+})
+
 test('closing reports unsent patches as dropped', () => {
   const { ws, transport } = setup()
   const done: boolean[] = []

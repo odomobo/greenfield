@@ -98,6 +98,11 @@ A stray press of the browser's back button (e.g. a mouse side button) must not t
 - **X11 apps that move themselves** (XMoveWindow, e.g. a borderless window dragging itself, or an app placing itself)
   are moved as they ask, as under other X11 window managers. While the user drags or resizes such a window the pointer
   decides, and the release is the last word (`scripts/e2e/x11-move.sh`).
+- **Surface ids** are "client/number", the number counting up for the whole session: never reused, unlike an app's
+  protocol ids, which apps hand out again (Knights' dialogs got the id of the drag icon of the last piece moved, and
+  with it that icon's canvas, still placed at the pointer). The viewer keeps a surface's content (decoder, canvas)
+  until a scene lists the surface as `destroyed` (scene protocol 22), whether or not a window shows it; a data item of
+  it still on its way is dropped. The server drops what it still has queued for it (`ViewerTransport.forgetSurface`).
 - **Input regions**: clicks outside a surface's input region (`wl_surface.set_input_region`, e.g. most of a client-side
   shadow) go to whatever is underneath; the pointer and cursor follow the same hit test.
 - **Child windows** (dialogs, `xdg_toplevel.set_parent`) are separate windows in the scene with a parent. They are

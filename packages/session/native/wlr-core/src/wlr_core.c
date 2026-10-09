@@ -341,8 +341,9 @@ handle_new_surface(struct wl_listener *listener, void *data) {
     gsurf->core = core;
     gsurf->sid = ++core->next_sid;
     gsurf->surface = surface;
+    // (the surface's number, not its protocol id: clients reuse those, and the viewer keeps state per key)
     snprintf(gsurf->key, sizeof(gsurf->key), "%u/%u", client_id_of(core, wl_resource_get_client(surface->resource)),
-             wl_resource_get_id(surface->resource));
+             gsurf->sid);
     gsurf->commit.notify = handle_surface_commit;
     wl_signal_add(&surface->events.commit, &gsurf->commit);
     gsurf->destroy.notify = handle_surface_destroy;

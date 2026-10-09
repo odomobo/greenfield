@@ -82,7 +82,7 @@
  * Runs unchanged in the browser bundle and in Node: only Uint8Array, DataView and TextEncoder/TextDecoder are used.
  * Node consumers that need Buffers (e.g. for ws's typings) can adapt with Buffer.from, which is a Uint8Array view.
  */
-export const PROTOCOL_VERSION = 21
+export const PROTOCOL_VERSION = 22
 
 /**
  * The title bar's height of a decorated window, in CSS pixels (a fixed constant of the frame, shared by both sides). The
@@ -196,6 +196,11 @@ export type SignInServerMessage =
 export type SceneRect = { x: number; y: number; width: number; height: number }
 
 export type SceneSurface = {
+  /**
+   * The surface's id, used for it everywhere (patches, frames, cursors, windows): "client/number", never reused in the
+   * session. (Not the app's protocol id for it: apps reuse those, and the viewer keeps state per id.) The viewer
+   * forgets a surface's content when a scene lists it as destroyed.
+   */
   id: string
   x: number
   y: number
@@ -216,6 +221,7 @@ export type SceneSurface = {
 }
 
 export type SceneWindow = {
+  /** its main surface's id (see SceneSurface) */
   id: string
   /**
    * The window this one belongs to (xdg_toplevel.set_parent, e.g. a dialog). A child window moves with its parent, is
@@ -263,8 +269,13 @@ export type SceneWindow = {
 
 export type ServerMessage =
   | { type: 'welcome'; protocolVersion: number }
-  /** Full snapshot, sent on attach and whenever anything changes. Windows are ordered bottom to top. */
-  | { type: 'scene'; windows: SceneWindow[]; focus: string | null }
+  /**
+   * Full snapshot, sent on attach and whenever anything changes. Windows are ordered bottom to top. `destroyed`: the
+   * surfaces destroyed since the last scene (windows' surfaces, popups, cursors, drag icons): the viewer frees their
+   * content after applying this scene (a closing window fades out from it first). A data item of one that was already
+   * being sent may still follow: the viewer drops it.
+   */
+  | { type: 'scene'; windows: SceneWindow[]; focus: string | null; destroyed?: string[] }
   | { type: 'cursor'; kind: 'default' | 'hidden' }
   | { type: 'cursor'; kind: 'named'; name: string }
   /**

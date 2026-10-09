@@ -166,6 +166,7 @@ const inactiveSink: EncodingSink = {
   sendPatch: (_surface, _patch, _tier, done) => done(false),
   requireKeyFrame: () => undefined,
   dropPatches: () => undefined,
+  forgetSurface: () => undefined,
 }
 
 export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
@@ -192,6 +193,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private drag?: { icon?: { sid: number; x: number; y: number } }
   private output = { width: 1280, height: 720 }
   private lastSceneJSON = ''
+  /** surfaces destroyed since the last scene, for the viewer to forget (sent with the next one) */
+  private destroyedSurfaces: string[] = []
   private sceneScheduled = false
   viewerScale = 1
   clientListener?: ClientListener
@@ -221,6 +224,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       sendPatch: (surface, patch, tier, done) => this.sink.sendPatch(surface, patch, tier, done),
       requireKeyFrame: (surface) => this.sink.requireKeyFrame(surface),
       dropPatches: (surface) => this.sink.dropPatches(surface),
+      forgetSurface: (surface) => this.sink.forgetSurface(surface),
     }
     // without a hardware encoder the pool has size 0 and no video encoder is ever created; one that fails to create is
     // reported once and the pool then behaves the same
@@ -336,6 +340,10 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
           surface.encoder?.destroy()
           this.surfaces.delete(surface.sid)
           this.sids.delete(surface.key)
+          if (this.send) {
+            this.destroyedSurfaces.push(surface.key)
+            this.scheduleScene()
+          }
         }
         break
       }
@@ -801,6 +809,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       this.sendDrag()
     }
     this.lastSceneJSON = ''
+    // (a new viewer starts from nothing: it has nothing to forget)
+    this.destroyedSurfaces = []
     this.sendSceneIfChanged()
     send({ type: 'cursor', kind: 'default' })
     for (const window of this.windows.values()) {
@@ -850,9 +860,12 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       focus: this.pageFocused && this.active ? this.keyOf(this.active) : null,
     }
     const json = JSON.stringify(scene)
-    if (json !== this.lastSceneJSON) {
+    const destroyed = this.destroyedSurfaces
+    if (json !== this.lastSceneJSON || destroyed.length > 0) {
       this.lastSceneJSON = json
-      this.send(scene)
+      this.destroyedSurfaces = []
+      // (with the scene that no longer shows them: the viewer fades a closed window out from its content first)
+      this.send(destroyed.length > 0 ? { ...scene, destroyed } : scene)
     }
   }
 

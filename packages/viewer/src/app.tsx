@@ -274,6 +274,7 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
         resizesSent: () => desktop.debugResizesSent(),
         movesSent: () => desktop.debugMovesSent(),
         animations: () => desktop.debugAnimations(),
+        surfaces: () => desktop.debugSurfaces(),
         videoFrames: () => desktop.debugVideoFrames(),
         patches: () => desktop.debugPatches(),
         patchKinds: () => desktop.debugPatchKinds(),

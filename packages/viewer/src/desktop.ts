@@ -155,6 +155,11 @@ export class Desktop {
   /** one WebGL context for all video with alpha */
   private readonly alphaCompositor = new AlphaCompositor()
   private readonly keyFrameRequested = new Set<string>()
+  /**
+   * Surfaces the server destroyed (ids are never reused in a session): a data item of one that was already being sent
+   * can still arrive, and is dropped instead of bringing its content back.
+   */
+  private readonly destroyedSurfaces = new Set<string>()
   private cursor: Cursor = { kind: 'default' }
   /** a drag and drop between remote apps is going on (the server says so), with its icon surface */
   private drag?: { icon?: { surface: string; x: number; y: number } }
@@ -322,6 +327,7 @@ export class Desktop {
     this.decoders.clear()
     this.frameSizes.clear()
     this.keyFrameRequested.clear()
+    this.destroyedSurfaces.clear()
     for (const view of this.windowViews.values()) {
       view.dispose()
     }
@@ -432,6 +438,11 @@ export class Desktop {
   /** How many video frames decoded and how many failed to, in all. For tests. */
   debugVideoFrames(): { decoded: number; failed: number } {
     return { decoded: this.videoFramesDecoded, failed: this.videoFramesFailed }
+  }
+
+  /** The surfaces whose content the viewer holds (a decoder or a canvas). For tests. */
+  debugSurfaces(): string[] {
+    return [...new Set([...this.decoders.keys(), ...this.surfaceViews.keys()])]
   }
 
   /** Running state animations by window. For tests. */
@@ -1168,9 +1179,9 @@ export class Desktop {
     switch (message.type) {
       case 'scene':
         if (this.debugSceneDelay > 0) {
-          setTimeout(() => this.updateScene(message.windows), this.debugSceneDelay)
+          setTimeout(() => this.updateScene(message.windows, message.destroyed), this.debugSceneDelay)
         } else {
-          this.updateScene(message.windows)
+          this.updateScene(message.windows, message.destroyed)
         }
         break
       case 'clipboard':
@@ -1236,6 +1247,10 @@ export class Desktop {
    * connection's acks).
    */
   handleFrame(surface: string, data: Uint8Array, applied: () => void = noop): void {
+    if (this.destroyedSurfaces.has(surface)) {
+      applied()
+      return
+    }
     let frame: ReturnType<typeof parseEncodedFrame>
     try {
       frame = parseEncodedFrame(data)
@@ -1248,6 +1263,9 @@ export class Desktop {
       .decode(frame)
       .then(
         (decoded) => {
+          if (this.destroyedSurfaces.has(surface)) {
+            return
+          }
           this.videoFramesDecoded++
           this.keyFrameRequested.delete(surface)
           this.viewFor(surface).drawFrame(decoded, this.alphaCompositor)
@@ -1266,11 +1284,18 @@ export class Desktop {
    * called once it's drawn, or failed (see the connection's acks).
    */
   handlePatch(surface: string, patch: Patch, applied: () => void = noop): void {
+    if (this.destroyedSurfaces.has(surface)) {
+      applied()
+      return
+    }
     this.frameSizes.set(surface, patch.surfaceSize)
     this.decoderFor(surface)
       .decodePatch(patch)
       .then(
         (decoded) => {
+          if (this.destroyedSurfaces.has(surface)) {
+            return
+          }
           this.keyFrameRequested.delete(surface)
           this.patchesApplied++
           const kind = `${patch.format}/${patch.channels}`
@@ -1303,6 +1328,9 @@ export class Desktop {
 
   /** Ask the server for the whole surface again (once until something decodes). */
   private decodeFailed(surface: string, error: unknown) {
+    if (this.destroyedSurfaces.has(surface)) {
+      return
+    }
     if (!(error instanceof KeyFrameNeeded)) {
       console.warn(`Failed to decode content of surface ${surface}:`, error)
     }
@@ -1312,7 +1340,7 @@ export class Desktop {
     }
   }
 
-  private updateScene(sceneWindows: SceneWindow[]) {
+  private updateScene(sceneWindows: SceneWindow[], destroyed: string[] = []) {
     // closed windows fade out (from their elements as they are, before their content goes)
     for (const window of this.windows) {
       if (!sceneWindows.some((w) => w.id === window.id)) {
@@ -1359,12 +1387,8 @@ export class Desktop {
         this.restoreRects.delete(id)
       }
     }
-    const surfaces = new Set<string>()
     let placedCount = 0
     for (const window of windows) {
-      for (const surface of window.surfaces) {
-        surfaces.add(surface.id)
-      }
       if (window.placed) {
         placedCount++
       }
@@ -1414,15 +1438,9 @@ export class Desktop {
     }
     // also covers positions chosen by the server or client (e.g. dialogs) and windows coming back after a reattach
     this.keepWindowsVisible()
-    // Content of surfaces that are gone. The cursor and drag icon surfaces aren't part of any window.
-    for (const surface of new Set([...this.decoders.keys(), ...this.surfaceViews.keys()])) {
-      if (!surfaces.has(surface) && !this.isFloating(surface) && !this.isLiveSurface(surface)) {
-        this.decoders.get(surface)?.close()
-        this.decoders.delete(surface)
-        this.frameSizes.delete(surface)
-        this.surfaceViews.get(surface)?.dispose()
-        this.surfaceViews.delete(surface)
-      }
+    // the content of destroyed surfaces (closed windows took their picture to fade out above)
+    for (const surface of destroyed) {
+      this.forgetSurface(surface)
     }
     this.syncWindowViews()
     this.scheduleLayout()
@@ -1430,12 +1448,18 @@ export class Desktop {
   }
 
   /**
-   * Surfaces can have content before they show up in the scene (e.g. a window that isn't mapped yet), only forget
-   * surfaces of clients that are gone.
+   * A surface the server destroyed: its content goes. (Until then it's kept, whether or not a window shows it: a window
+   * that isn't mapped yet, a hidden one, the cursor or a drag icon.)
    */
-  private isLiveSurface(surface: string): boolean {
-    const clientId = surface.substring(0, surface.lastIndexOf('/'))
-    return this.windows.some((window) => window.id.startsWith(`${clientId}/`))
+  private forgetSurface(surface: string) {
+    this.destroyedSurfaces.add(surface)
+    this.decoders.get(surface)?.close()
+    this.decoders.delete(surface)
+    this.frameSizes.delete(surface)
+    this.keyFrameRequested.delete(surface)
+    this.surfaceViews.get(surface)?.dispose()
+    this.surfaceViews.delete(surface)
+    this.windowIcons.delete(surface)
   }
 
   /**
@@ -1685,8 +1709,6 @@ export class Desktop {
       shown.add(view)
       if (view.canvas.parentElement !== this.floatingLayer) {
         this.floatingLayer.append(view.canvas)
-        // (a reused surface id: the canvas may have been a window's, clipped to its geometry)
-        view.canvas.style.clipPath = ''
       }
       view.canvas.style.transform = `translate(${rect.x}px, ${rect.y}px)`
       view.place({ x: 0, y: 0, width: rect.width, height: rect.height }, rect, window.devicePixelRatio || 1)

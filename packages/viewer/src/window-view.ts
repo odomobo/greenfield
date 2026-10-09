@@ -164,9 +164,6 @@ function placeChildren(parent: HTMLElement, expected: ChildNode | null, views: S
     } else {
       // (moves it if it's elsewhere, e.g. in another window, or between the window's two elements)
       parent.insertBefore(view.canvas, expected)
-      // Surface ids are the client's protocol ids, which it reuses: the canvas may have been a cursor's or drag icon's,
-      // whose transform (the pointer position, see Desktop.placeFloating) would show the content that far off.
-      view.canvas.style.transform = ''
     }
   }
   while (expected !== null) {

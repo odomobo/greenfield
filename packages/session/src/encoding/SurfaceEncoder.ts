@@ -91,6 +91,8 @@ export interface EncodingSink {
   /** drop everything unsent of the surface, its video restarts with a key frame */
   requireKeyFrame(surface: string): void
   dropPatches(surface: string): void
+  /** the surface is gone: drop everything unsent of it */
+  forgetSurface(surface: string): void
 }
 
 /** The surface's buffer, as the encoder sees it. */
@@ -440,6 +442,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this.videoWanted = undefined
     this.releaseLease()
     this.context.surfaces.delete(this)
+    this.context.sink.forgetSurface(this.key)
   }
 
   /**

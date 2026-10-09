@@ -5,6 +5,10 @@
  * Pressing the left button over the source window starts a drag with the text "dragged text" (and the icon); the
  * target window accepts the text and, on the drop, reads it and writes it to the file given as the first argument.
  * It logs what happens on stdout: "drag started", "target entered", "dropped <text>", "drag finished".
+ *
+ * Like Qt, it destroys the drag icon when the drag ends. After the first cancelled drag it then opens a small window,
+ * "dnd-after" (green), whose surface gets the icon's freed protocol id: it logs "icon surface <id>" and "dnd-after
+ * surface <id>", and "pointer entered dnd-after".
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -43,6 +47,9 @@ static struct wl_data_device *data_device;
 static struct wl_pointer *pointer;
 static struct window source_window = {.title = "dnd-source", .color = 0xffcc2222, .size = SIZE};
 static struct window target_window = {.title = "dnd-target", .color = 0xff2222cc, .size = SIZE};
+static struct window after_window = {.title = "dnd-after", .color = 0xff22cc22, .size = 60};
+static struct wl_surface *drag_icon;
+static uint32_t icon_id;
 static struct wl_surface *pointer_surface;
 static struct wl_data_offer *offer;
 static const char *output_file;
@@ -113,6 +120,34 @@ create_window(struct window *window) {
 // --- the drag source
 
 static void
+after_sync_done(void *data, struct wl_callback *callback, uint32_t time) {
+    wl_callback_destroy(callback);
+    // libwayland reuses the most recently freed id first: that's this callback's, the icon's comes next. A region takes
+    // the callback's, so the window's surface gets the icon's.
+    wl_compositor_create_region(compositor);
+    create_window(&after_window);
+    printf("icon surface %u\ndnd-after surface %u\n", icon_id, wl_proxy_get_id((struct wl_proxy *) after_window.surface));
+    fflush(stdout);
+}
+static const struct wl_callback_listener after_sync_listener = {after_sync_done};
+
+/* The drag is over: its source and icon go. `open_after`: then open dnd-after, once the server confirmed the icon's
+ * deletion (only then is its id free for a new object). */
+static void
+end_drag(struct wl_data_source *s, bool open_after) {
+    wl_data_source_destroy(s);
+    if (drag_icon == NULL) {
+        return;
+    }
+    icon_id = wl_proxy_get_id((struct wl_proxy *) drag_icon);
+    wl_surface_destroy(drag_icon);
+    drag_icon = NULL;
+    if (open_after && after_window.surface == NULL) {
+        wl_callback_add_listener(wl_display_sync(display), &after_sync_listener, NULL);
+    }
+}
+
+static void
 source_target(void *data, struct wl_data_source *s, const char *mime) {}
 static void
 source_send(void *data, struct wl_data_source *s, const char *mime, int32_t fd) {
@@ -123,7 +158,7 @@ static void
 source_cancelled(void *data, struct wl_data_source *s) {
     printf("drag cancelled\n");
     fflush(stdout);
-    wl_data_source_destroy(s);
+    end_drag(s, true);
 }
 static void
 source_drop_performed(void *data, struct wl_data_source *s) {}
@@ -131,7 +166,7 @@ static void
 source_finished(void *data, struct wl_data_source *s) {
     printf("drag finished\n");
     fflush(stdout);
-    wl_data_source_destroy(s);
+    end_drag(s, false);
 }
 static void
 source_action(void *data, struct wl_data_source *s, uint32_t action) {}
@@ -144,10 +179,10 @@ start_drag(uint32_t serial) {
     wl_data_source_add_listener(source, &source_listener, NULL);
     wl_data_source_offer(source, MIME);
     wl_data_source_set_actions(source, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
-    struct wl_surface *icon = wl_compositor_create_surface(compositor);
-    wl_surface_attach(icon, make_buffer(32, 0xff22cc22), 0, 0);
-    wl_surface_commit(icon);
-    wl_data_device_start_drag(data_device, source, source_window.surface, icon, serial);
+    drag_icon = wl_compositor_create_surface(compositor);
+    wl_surface_attach(drag_icon, make_buffer(32, 0xff22cc22), 0, 0);
+    wl_surface_commit(drag_icon);
+    wl_data_device_start_drag(data_device, source, source_window.surface, drag_icon, serial);
     printf("drag started\n");
     fflush(stdout);
 }
@@ -158,6 +193,10 @@ static void
 pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *surface, wl_fixed_t x,
               wl_fixed_t y) {
     pointer_surface = surface;
+    if (surface != NULL && surface == after_window.surface) {
+        printf("pointer entered dnd-after\n");
+        fflush(stdout);
+    }
 }
 static void
 pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *surface) {

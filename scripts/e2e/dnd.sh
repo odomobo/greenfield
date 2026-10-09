@@ -7,6 +7,9 @@
 #      icon at the pointer (surface content, following the pointer); moving over the target window and releasing drops
 #      the text there (the target app reads it through the data offer and writes it to a file);
 #   2. the drag is over afterwards: the viewer shows no icon, and a click on the source starts another drag;
+#      once it's cancelled the app destroys its icon and opens a window whose surface gets the icon's freed protocol id
+#      (as Qt does: Knights' dialogs after dragging a piece): the window has an id of its own in the scene, its content
+#      is shown where it is (not where the icon was) and gets the pointer, and the icon's content is gone;
 #   3. files from the user's computer (the page gets the drag events the browser would send, with File objects):
 #      moving them over the target window makes the app see a drag with a text/uri-list offer, moving them away
 #      cancels it, dropping them uploads them into the session's drop directory ($XDG_CACHE_HOME/greenfield/drops) and
@@ -92,11 +95,31 @@ rm -f "$WORK/dropped"
 pointer_at "$SOURCE_X" "$SOURCE_Y"
 pw mousedown >/dev/null
 wait_for "() => window.__viewerTest.drag() !== null" "the second drag" 10
+ICON="$(pw_eval "() => window.__viewerTest.drag().icon.surface" | tr -d '"')"
 pointer_at 600 500
 pw mouseup >/dev/null
 wait_until "the drag to be cancelled" 5 grep -q 'drag cancelled' "$WORK/dnd.log"
 wait_for "() => window.__viewerTest.drag() === null" "the viewer to be told the drag is over" 5
 [ ! -e "$WORK/dropped" ] || fail "text was dropped outside the target"
+echo "    ok"
+
+step "a window that reuses the icon's protocol id is a new surface: shown in its place, gets the pointer"
+wait_until "the app to open dnd-after" 5 grep -q 'dnd-after surface' "$WORK/dnd.log"
+ICON_PROTOCOL_ID="$(sed -n 's/^icon surface //p' "$WORK/dnd.log" | tail -1)"
+AFTER_PROTOCOL_ID="$(sed -n 's/^dnd-after surface //p' "$WORK/dnd.log")"
+[ "$ICON_PROTOCOL_ID" = "$AFTER_PROTOCOL_ID" ] ||
+  fail "the window didn't get the icon's protocol id ($AFTER_PROTOCOL_ID, the icon had $ICON_PROTOCOL_ID): nothing tested"
+wait_for "() => { const w = window.__viewerTest.windows().find((w) => w.title === 'dnd-after'); return !!w && w.placed && w.hasContent }" "dnd-after" 10
+wait_windows_still
+AFTER="$(pw_eval "() => window.__viewerTest.windows().find((w) => w.title === 'dnd-after').id" | tr -d '"')"
+[ "$AFTER" != "$ICON" ] || fail "the window has the icon's id ($ICON)"
+wait_for "() => !window.__viewerTest.surfaces().includes('$ICON')" "the icon's content to be freed" 5
+# its content is where the window is: the canvas' box is the window's (the icon's was at the pointer)
+read -r AX AY < <(window_at dnd-after; echo)
+CANVAS="$(pw_eval "() => { const o = document.getElementById('output').getBoundingClientRect(), c = document.querySelector('canvas[data-surface=\"$AFTER\"]').getBoundingClientRect(); return [c.x - o.x, c.y - o.y, c.width, c.height].map(Math.round).join(' ') }" | tr -d '"')"
+[ "$CANVAS" = "$AX $AY 60 60" ] || fail "dnd-after's content is shown at $CANVAS, the window is at $AX $AY (60x60)"
+pointer_at $((AX + 30)) $((AY + 30))
+wait_until "the pointer to reach dnd-after" 5 grep -q 'pointer entered dnd-after' "$WORK/dnd.log"
 echo "    ok"
 
 step "files dragged in from the user's computer: the app under the pointer gets their file:// URIs"

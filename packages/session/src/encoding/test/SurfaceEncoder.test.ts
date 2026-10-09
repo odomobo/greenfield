@@ -103,6 +103,18 @@ class FakeSink implements EncodingSink {
       item.done(false)
     }
   }
+
+  surfacesForgotten: string[] = []
+
+  /** like the transport: everything unsent of the surface is dropped */
+  forgetSurface(surface: string) {
+    this.surfacesForgotten.push(surface)
+    const dropped = this.held.filter((item) => item.surface === surface)
+    this.held = this.held.filter((item) => item.surface !== surface)
+    for (const item of dropped) {
+      item.done(false)
+    }
+  }
 }
 
 class FakeSurface implements SurfaceHost<FakeEncoder> {
@@ -536,6 +548,7 @@ test('video that finishes encoding after the surface was destroyed is dropped an
   host.encodes[0].resolve(new Uint8Array([1]))
   await settle()
   assert.equal(env.sink.frames.length, framesBefore, 'the stale frame is not sent')
+  assert.deepEqual(env.sink.surfacesForgotten, ['a'], 'the transport drops what it still has of the surface')
   assert.ok(encoder.hasFreeSlot)
   assert.equal(env.pool.available, 2)
 })

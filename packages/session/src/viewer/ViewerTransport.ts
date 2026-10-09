@@ -88,6 +88,12 @@ export interface ViewerTransport {
   dropPatches(surface: string): void
 
   /**
+   * The surface is gone: drop what is queued for it and what the transport remembers about it (its started item, if
+   * any, still goes out: the viewer drops it).
+   */
+  forgetSurface(surface: string): void
+
+  /**
    * The link is short of bandwidth for the streaming class (see bandwidth.ts): its surfaces go lossy (JPEG patches,
    * lower-quality video) while it is.
    */
@@ -409,6 +415,12 @@ export class WebSocketViewerTransport implements ViewerTransport {
     } else {
       this.pendingFrames.delete(surface)
     }
+  }
+
+  forgetSurface(surface: string): void {
+    this.dropQueued(surface)
+    this.needsKeyFrame.delete(surface)
+    this.keyFrameSent.delete(surface)
   }
 
   private dropQueued(surface: string) {

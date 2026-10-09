@@ -113,6 +113,7 @@ export class ViewerHost {
       },
       requireKeyFrame: (surfaceKey) => this.transport?.requireKeyFrame(surfaceKey),
       dropPatches: (surfaceKey) => this.transport?.dropPatches(surfaceKey),
+      forgetSurface: (surfaceKey) => this.transport?.forgetSurface(surfaceKey),
     })
   }
 
