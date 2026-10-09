@@ -34,7 +34,7 @@ const logger = createLogger('wlroots')
 const TRACE = process.env.GFLD_WLR_TRACE === '1'
 
 /** The hardware video encoders; without one (`undefined`) everything is sent as lossless patches. */
-type H264Encoder = 'nvh264' | 'vaapih264'
+type H264Encoder = 'nvh264' | 'vaapih264' | 'x264'
 
 /** The native core (native/wlr-core), injectable so the policy can be tested without wlroots. */
 export type WlrNative = Omit<typeof WlrCoreAddon, 'create'> & {

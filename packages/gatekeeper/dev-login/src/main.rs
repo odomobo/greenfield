@@ -59,6 +59,8 @@ from $GREENFIELD_DEV_PASSWORD (at least 8 characters). Loopback only; refuses to
   --dev-link-kbps <n>        desktops send to their viewer through a simulated link of n kbit/s (tests)
   --dev-patch-order <order>  oldest (default) or random: the order a window's queued patches are sent in
   --dev-patch-shape <shape>  bands (default) or tiles: how a window's large damage is split into patches
+  --dev-software-encoder     video with the software encoder x264 (shared memory buffers only, no GPU needed), whatever
+                             the encoder setting says (tests of the video path on machines without a GPU)
   --dev-expired-password     every sign-in finds the password expired and asks for a new one, with pam_unix's
                              prompts (the current password, then the new one twice; three tries); the new password
                              isn't kept (tests the page's side of a password change)
@@ -98,6 +100,7 @@ struct Config {
     patch_order: String,
     patch_shape: String,
     expired_password: bool,
+    software_encoder: bool,
     web_args: Vec<String>,
     password: String,
     user: sys::User,
@@ -123,6 +126,7 @@ fn parse_config() -> Config {
     let mut patch_shape = "bands".to_string();
     let mut state_dir = None;
     let mut expired_password = false;
+    let mut software_encoder = false;
     let mut web_args = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -137,6 +141,10 @@ fn parse_config() -> Config {
         }
         if name == "--hide-hostname" {
             web_args.push(name);
+            continue;
+        }
+        if name == "--dev-software-encoder" {
+            software_encoder = true;
             continue;
         }
         if name == "--dev-expired-password" {
@@ -242,6 +250,7 @@ fn parse_config() -> Config {
         patch_order,
         patch_shape,
         expired_password,
+        software_encoder,
         web_args,
         password,
         user,
@@ -301,11 +310,12 @@ fn start_web(config: &Config, listener: TcpListener) -> io::Result<std::process:
 /// The desktop's SessionConfig record, with the dev flags.
 fn session_config(config: &Config, site_settings: &Option<PathBuf>) -> String {
     let dev_flags = format!(
-        "{{\"timeScale\":{},\"linkKbps\":{},\"patchOrder\":{},\"patchShape\":{}}}",
+        "{{\"timeScale\":{},\"linkKbps\":{},\"patchOrder\":{},\"patchShape\":{},\"softwareEncoder\":{}}}",
         config.time_scale,
         config.link_kbps,
         json_string(&config.patch_order),
-        json_string(&config.patch_shape)
+        json_string(&config.patch_shape),
+        config.software_encoder
     );
     session_config::session_config(site_settings.as_deref(), Some(&dev_flags))
 }
