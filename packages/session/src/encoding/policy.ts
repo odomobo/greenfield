@@ -5,14 +5,8 @@
  * data has gone out). Whether a surface is sent as video or as patches is decided separately, by the surface
  * encoder (video only for streaming surfaces, with a hardware encoder, when the surface isn't small).
  */
-import { boundingBox, clip, disjoint, PatchShape, Rect, splitRect, subtract } from './region.js'
-
-export type SurfaceClass = 'normal' | 'streaming'
-/**
- * The transport's send tiers (deficit round-robin, see ViewerTransport.ts): the two classes, and below them settling,
- * the lossless resend of a surface's lossy areas.
- */
-export type SendTier = SurfaceClass | 'settle'
+import type { PatchShape, Rect, SurfaceClass } from '@nebula/session-contracts'
+import { boundingBox, clip, disjoint, splitRect, subtract } from './region.js'
 
 /** Surfaces are judged on fixed, back-to-back periods of this length. */
 export const CLASS_PERIOD_MS = 750

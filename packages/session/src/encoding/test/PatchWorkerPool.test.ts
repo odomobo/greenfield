@@ -2,7 +2,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { encodePatch } from '../patch-encoder.js'
-import { NORMAL_ENCODE_NICE, PatchWorkerPool, STREAMING_ENCODE_NICE, STREAMING_ENCODE_WORKERS } from '../PatchWorkerPool.js'
+import {
+  NORMAL_ENCODE_NICE,
+  PatchWorkerPool,
+  STREAMING_ENCODE_NICE,
+  STREAMING_ENCODE_WORKERS,
+} from '../PatchWorkerPool.js'
 
 const logger = { error: (message: string) => process.stderr.write(`${message}\n`) }
 

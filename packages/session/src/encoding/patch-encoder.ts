@@ -3,14 +3,7 @@
  * patches, native, in the small nebula-patch-addon (native/patch). It is synchronous and meant for worker threads
  * (patch-worker.ts); every thread loads its own instance of the addon.
  */
-import type { PatchFormat } from '@gfld/scene-protocol'
-
-export type EncodedPatch = {
-  format: PatchFormat
-  /** 3 if the patch was encoded as opaque (RGB, or a JPEG without alpha), else 4 */
-  channels: 3 | 4
-  data: Uint8Array
-}
+import type { EncodedPatch } from '@nebula/session-contracts'
 
 type PatchAddon = {
   encodePatch(rgba: Uint8Array, width: number, height: number, opaque: boolean, jpegQuality: number): EncodedPatch
@@ -37,6 +30,7 @@ export function encodePatch(
   opaque: boolean,
   lossy = false,
 ): EncodedPatch {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- the addon is loaded lazily, once per thread
   addon ??= require('../addons/nebula-patch-addon') as PatchAddon
   return addon.encodePatch(rgba, width, height, opaque, lossy ? JPEG_QUALITY : 0)
 }

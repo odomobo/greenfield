@@ -2,8 +2,7 @@
  * Rectangle region helpers for damage tracking. A region is a list of rectangles; the functions that return regions
  * return disjoint rectangles. Pure, no Node or native dependencies.
  */
-
-export type Rect = { x: number; y: number; width: number; height: number }
+import type { PatchShape, Rect } from '@nebula/session-contracts'
 
 export function isEmpty(rect: Rect): boolean {
   return rect.width <= 0 || rect.height <= 0
@@ -103,7 +102,6 @@ export function clip(region: Rect[], bounds: Rect): Rect[] {
  * How large rectangles are split into patches: full-width bands, or (an experiment, the session's --dev-patch-shape)
  * squarish tiles.
  */
-export type PatchShape = 'bands' | 'tiles'
 
 /** Split a rectangle into pieces of at most `maxPixels` each, as bands (splitBands) or tiles (splitTiles). */
 export function splitRect(rect: Rect, maxPixels: number, shape: PatchShape = 'bands'): Rect[] {

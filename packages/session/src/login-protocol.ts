@@ -90,7 +90,7 @@ function addressText(family: number, bytes: Buffer): string {
   }
   let bestStart = -1
   let bestLength = 1
-  for (let i = 0; i < 8; ) {
+  for (let i = 0; i < 8;) {
     let j = i
     while (j < 8 && groups[j] === 0) j++
     if (j - i > bestLength) {

@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { type Patch, PatchFormat } from '@gfld/scene-protocol'
-import type { EncodedPatch } from '../patch-encoder.js'
+import type { EncodedPatch, Rect, SendTier, SurfaceClass } from '@nebula/session-contracts'
 import { EncoderPool } from '../EncoderPool.js'
-import { CLASS_PERIOD_MS, SendTier, SurfaceClass } from '../policy.js'
-import { area, Rect } from '../region.js'
+import { CLASS_PERIOD_MS } from '../policy.js'
+import { area } from '../region.js'
 import {
   BufferInfo,
   EncodingContext,
@@ -218,7 +218,11 @@ function setup(poolSize = 2) {
         opaqueSeen.push(opaque)
         if (holdNormal) {
           return new Promise<EncodedPatch>((resolve) =>
-            normalCalls.push({ width, height, resolve: () => resolve(fakeEncoded(new Uint8Array([rgba.length & 0xff]))) }),
+            normalCalls.push({
+              width,
+              height,
+              resolve: () => resolve(fakeEncoded(new Uint8Array([rgba.length & 0xff]))),
+            }),
           )
         }
         return Promise.resolve(fakeEncoded(new Uint8Array([rgba.length & 0xff])))
@@ -264,7 +268,12 @@ const settle = () => new Promise((resolve) => setImmediate(resolve))
 const full = (host: FakeSurface) => [r(0, 0, host.buffer!.width, host.buffer!.height)]
 
 /** A relentless surface: full repaints every 50 ms while the network takes nothing, so its patches queue up. */
-async function relentless(env: Env, encoder: SurfaceEncoder<FakeEncoder>, host: FakeSurface, ms = 2 * CLASS_PERIOD_MS + 100) {
+async function relentless(
+  env: Env,
+  encoder: SurfaceEncoder<FakeEncoder>,
+  host: FakeSurface,
+  ms = 2 * CLASS_PERIOD_MS + 100,
+) {
   env.sink.autoDone = false
   for (let t = 0; t < ms; t += 50) {
     env.advance(50)
@@ -704,12 +713,9 @@ test("a surface's patches are sent in capture order, even when their encodings f
   const sink = new FakeSink()
   const encodings: ((encoded: EncodedPatch) => void)[] = []
   const streaming = new FakeStreamingPool()
-  const pump = new PatchPump(
-    sink,
-    () => new Promise<EncodedPatch>((resolve) => encodings.push(resolve)),
-    streaming,
-    { error: () => undefined },
-  )
+  const pump = new PatchPump(sink, () => new Promise<EncodedPatch>((resolve) => encodings.push(resolve)), streaming, {
+    error: () => undefined,
+  })
   const rects = [r(0, 0, 100, 100), r(10, 10, 5, 5)]
   let serial = 0
   let slots = 0
@@ -761,7 +767,8 @@ test("a surface's patches are sent in capture order, even when their encodings f
 
 const formatsOf = (patches: { patch: Patch }[]) => new Set(patches.map(({ patch }) => patch.format))
 const areaOf = (patches: { patch: Patch }[]) => area(patches.map(({ patch }) => patch.rect))
-const inTier = <T extends { tier: SendTier }>(patches: T[], tier: SendTier) => patches.filter((patch) => patch.tier === tier)
+const inTier = <T extends { tier: SendTier }>(patches: T[], tier: SendTier) =>
+  patches.filter((patch) => patch.tier === tier)
 
 /**
  * A streaming surface without video while bandwidth is short, its whole area damaged. The network takes nothing:
@@ -876,7 +883,9 @@ test('damage that goes lossy again during settling is settled once the queue is 
   const damage = env.sink.patches.findIndex(({ patch }) => patch.rect.x === 990 && patch.rect.width === 10)
   assert.equal(env.sink.patches[damage].patch.format, PatchFormat.JPEG_ALPHA)
   const after = inTier(env.sink.patches.slice(damage + 1), 'settle')
-  assert.ok(after.some(({ patch }) => patch.rect.x <= 990 && patch.rect.x + patch.rect.width >= 1000 && patch.rect.y <= 990))
+  assert.ok(
+    after.some(({ patch }) => patch.rect.x <= 990 && patch.rect.x + patch.rect.width >= 1000 && patch.rect.y <= 990),
+  )
   assert.deepEqual(encoder.lossyRegion, [])
 })
 
@@ -940,7 +949,10 @@ test("random patch order: each commit's patches are a batch, batches go oldest f
   assert.equal(area(rects), 1000 * 1000)
   const firstBottom = rects.findIndex((rect) => !top(rect))
   assert.ok(firstBottom > 0)
-  assert.ok(rects.slice(firstBottom).every((rect) => !top(rect)), 'all of the first batch before any of the second')
+  assert.ok(
+    rects.slice(firstBottom).every((rect) => !top(rect)),
+    'all of the first batch before any of the second',
+  )
 })
 
 test("a surface's lossless bytes per pixel: measured on all its lossless patches", async () => {

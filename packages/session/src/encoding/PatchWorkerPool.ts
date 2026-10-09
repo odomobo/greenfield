@@ -6,7 +6,7 @@
  */
 import { Worker } from 'node:worker_threads'
 import path from 'node:path'
-import type { EncodedPatch } from './patch-encoder.js'
+import type { EncodedPatch } from '@nebula/session-contracts'
 
 /** How many streaming patches are encoded at once (one worker thread each). */
 export const STREAMING_ENCODE_WORKERS = 2

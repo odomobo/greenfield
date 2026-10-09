@@ -91,7 +91,7 @@ export class IconResolver {
       name.startsWith('/') || name.startsWith('file://')
         ? this.absolute(name)
         : // newer themes (Adwaita) only have symbolic versions of many icons
-          this.lookup(name) ?? this.lookup(`${name}-symbolic`)
+          (this.lookup(name) ?? this.lookup(`${name}-symbolic`))
     return file ? dataURL(file) : null
   }
 

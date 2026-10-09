@@ -77,7 +77,7 @@ test("kdeglobals: a dark scheme with nebula's accent where the scheme had its ow
 })
 
 test('a KConfig file is groups of key=value lines, subgroups written as they are', () => {
-  assert.equal(toKConfig({ 'A': { k: 'v', l: '1,2' }, 'B][C': { m: 'x' } }), '[A]\nk=v\nl=1,2\n\n[B][C]\nm=x\n')
+  assert.equal(toKConfig({ A: { k: 'v', l: '1,2' }, 'B][C': { m: 'x' } }), '[A]\nk=v\nl=1,2\n\n[B][C]\nm=x\n')
 })
 
 test('the build generated kdeglobals in the config directory sessions give their apps', () => {

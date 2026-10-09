@@ -17,7 +17,7 @@ class DefaultLogger implements Logger {
     console.info(`{time:"${new Date().toISOString()}",name:"${this.name}",msg:"${msg}"}`)
   }
 
-  debug(msg: string): void {
+  debug(_msg: string): void {
     // console.debug(`{time:"${new Date().toISOString()}",name:"${this.name}",msg:"${msg}"}`)
   }
 

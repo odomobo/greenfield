@@ -48,7 +48,14 @@ test('audio packets are sent at once, whatever the congestion controller says ab
     priority: 'patch',
     tier: 'normal',
     surface: 's',
-    patch: { contentSerial: 1, surfaceSize: { width: 1, height: 1 }, rect: { x: 0, y: 0, width: 1, height: 1 }, format: PatchFormat.QOI, channels: 4, data: new Uint8Array(1) },
+    patch: {
+      contentSerial: 1,
+      surfaceSize: { width: 1, height: 1 },
+      rect: { x: 0, y: 0, width: 1, height: 1 },
+      format: PatchFormat.QOI,
+      channels: 4,
+      data: new Uint8Array(1),
+    },
   })
   assert.equal(ws.sent.length, 0, 'the patch waits')
   transport.send({ priority: 'audio', packet: packet(7) })

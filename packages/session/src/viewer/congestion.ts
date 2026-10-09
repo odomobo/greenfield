@@ -91,13 +91,7 @@ const IDLE_REFRESH_MARGIN_MS = 1
 const IDLE_REFRESH_MARGIN_FRACTION = 0.05
 
 export type CongestionState =
-  | 'Startup'
-  | 'Drain'
-  | 'ProbeBW_DOWN'
-  | 'ProbeBW_CRUISE'
-  | 'ProbeBW_REFILL'
-  | 'ProbeBW_UP'
-  | 'ProbeRTT'
+  'Startup' | 'Drain' | 'ProbeBW_DOWN' | 'ProbeBW_CRUISE' | 'ProbeBW_REFILL' | 'ProbeBW_UP' | 'ProbeRTT'
 
 type AckPhase = 'ACKS_INIT' | 'ACKS_PROBE_STARTING' | 'ACKS_PROBE_STOPPING' | 'ACKS_PROBE_FEEDBACK' | 'ACKS_REFILLING'
 

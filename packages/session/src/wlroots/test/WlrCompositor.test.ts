@@ -154,7 +154,10 @@ class FakeCore {
   }
 
   /** A mapped toplevel with a buffer: what an app's first window goes through. */
-  newWindow(sid: number, options: { width?: number; height?: number; title?: string; parent?: number; decorated?: boolean } = {}) {
+  newWindow(
+    sid: number,
+    options: { width?: number; height?: number; title?: string; parent?: number; decorated?: boolean } = {},
+  ) {
     const width = options.width ?? 400
     const height = options.height ?? 300
     this.onEvent('surface-new', sid, `1/${sid}`)
@@ -679,7 +682,10 @@ test('the scene that no longer shows a destroyed surface tells the viewer to for
   core.onEvent('toplevel-destroy', 2)
   core.onEvent('surface-destroy', 2)
   await flush()
-  assert.deepEqual(windowsOf(lastScene()).map((window) => window.id), ['1/1'])
+  assert.deepEqual(
+    windowsOf(lastScene()).map((window) => window.id),
+    ['1/1'],
+  )
   assert.deepEqual(lastScene().destroyed, ['1/2'])
   // a surface that never was in a scene (e.g. a drag icon) is forgotten too, with an otherwise unchanged scene
   core.onEvent('surface-new', 3, '1/3')
@@ -964,8 +970,10 @@ function holdingSink() {
 }
 
 function readablePixels() {
-  ;(core.native as any).readPixels = (_sid: number, _x: number, _y: number, width: number, height: number) =>
-    ({ pixels: new Uint8Array(width * height * 4), opaque: false })
+  ;(core.native as any).readPixels = (_sid: number, _x: number, _y: number, width: number, height: number) => ({
+    pixels: new Uint8Array(width * height * 4),
+    opaque: false,
+  })
 }
 
 test('without a hardware encoder no video encoder is ever created, whatever the surfaces do', async () => {
@@ -1064,7 +1072,12 @@ test('a decorated window is maximized to the output minus its title bar, below i
   assert.deepEqual([plain.x, plain.y], [0, 0])
   // the output changes: the title bar is subtracted again
   compositor.handleMessage({ type: 'output', width: 800, height: 600 })
-  assert.deepEqual(lastConfigure(1), { sid: 1, width: 800, height: 600 - FRAME_TITLE_HEIGHT, state: { maximized: true } })
+  assert.deepEqual(lastConfigure(1), {
+    sid: 1,
+    width: 800,
+    height: 600 - FRAME_TITLE_HEIGHT,
+    state: { maximized: true },
+  })
 })
 
 test('a window that becomes decorated while maximized is reconfigured below its title bar', async () => {
