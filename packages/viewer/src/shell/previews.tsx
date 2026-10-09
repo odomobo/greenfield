@@ -122,9 +122,10 @@ function PreviewCard({ window, group, canvases }: PreviewCardProps) {
   useEffect(() => () => clearTimeout(peekTimer.current), [])
 
   const activate = () => {
+    // (activated while peeked at: it stays where the peek shows it, see Desktop.activateWindow)
+    desktop.activateWindow(window.id)
     endPeek()
     closePopup()
-    desktop.activateWindow(window.id)
   }
 
   return (

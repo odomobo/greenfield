@@ -4,6 +4,10 @@ import type { Rect } from './windows'
 import { FrameInsets } from './protocol'
 import { frameBox } from './frame-geometry'
 import { FrameState, WindowFrame } from './window-frame'
+import { reducedMotion } from './animation'
+
+/** How long a minimized window a peek shows takes to fade in (the others fade out as fast: .peek-faded in style.css). */
+const PEEK_FADE_MS = 150
 
 /** How a window is shown right now. */
 export type WindowLayout = {
@@ -20,6 +24,8 @@ export type WindowLayout = {
   inert: boolean
   /** another window is being peeked at (hovering its taskbar preview): this one fades out */
   peekFaded: boolean
+  /** minimized, shown only because it's being peeked at: it fades in */
+  peekRevealed: boolean
   pixelRatio: number
   /** the surfaces' rects in the window's coordinates, in the order of `setSurfaces` */
   surfaces: Rect[]
@@ -53,6 +59,7 @@ export class WindowView {
   private popupFlags: boolean[] = []
   private layoutKey = ''
   readonly frame: WindowFrame
+  private peekFadeIn: Animation[] = []
 
   constructor(readonly id: string) {
     this.element.className = 'window'
@@ -79,8 +86,27 @@ export class WindowView {
     placeChildren(this.popups, this.popups.firstChild, views.filter((_, i) => popup[i]))
   }
 
+  /**
+   * A minimized window a peek shows fades in (as the others fade out). Activated meanwhile, it stays shown and the fade
+   * in runs to its end; hidden again (the peek ended), it's put away.
+   */
+  private revealForPeek(revealed: boolean, hidden: boolean) {
+    if (revealed && this.peekFadeIn.length === 0 && !reducedMotion()) {
+      this.peekFadeIn = [this.element, this.popups].map((element) =>
+        element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: PEEK_FADE_MS, easing: 'ease-out' }),
+      )
+      for (const animation of this.peekFadeIn) {
+        animation.onfinish = () => (this.peekFadeIn = [])
+      }
+    } else if (!revealed && hidden && this.peekFadeIn.length > 0) {
+      this.peekFadeIn.forEach((animation) => animation.cancel())
+      this.peekFadeIn = []
+    }
+  }
+
   layout(layout: WindowLayout): void {
-    const { x, y, scaleX, scaleY, opacity, hidden, inert, peekFaded, pixelRatio } = layout
+    const { x, y, scaleX, scaleY, opacity, hidden, inert, peekFaded, peekRevealed, pixelRatio } = layout
+    this.revealForPeek(peekRevealed, hidden)
     for (const element of [this.element, this.popups]) {
       element.classList.toggle('peek-faded', peekFaded)
       const style = element.style

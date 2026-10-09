@@ -726,7 +726,10 @@ export class Desktop {
     }
     if (this.isMinimized(window)) {
       const root = this.rootOf(window)
-      this.startRestoreAnimation(root)
+      // a window shown by a peek is already where it goes: it stays (finishing its fade in), no restore animation
+      if (this.peeked !== root.id) {
+        this.startRestoreAnimation(root)
+      }
       this.sync.setMinimized(root.id, false)
     }
     this.sendWindowChange({ type: 'window.activate', window: id })
@@ -1620,6 +1623,7 @@ export class Desktop {
         hidden: this.isHidden(window) && !peekShown,
         inert: kind === 'minimize' || kind === 'restore' || !this.opened.has(window.id) || this.isHidden(window),
         peekFaded: peeked !== undefined && !peekShown,
+        peekRevealed: peekShown && this.isHidden(window),
         pixelRatio,
         surfaces: window.surfaces.map(({ x, y, width, height }) => ({ x, y, width, height })),
         geometry: window.geometry,

@@ -73,7 +73,9 @@ desktops of the same user never see any of it. All of it comes from `packages/se
     same buttons, in rows of up to six, with their click, right click and previews (shown under the flyout).
   - **Window previews** of an app list its windows in the order they were opened (not their stacking order). Resting
     the pointer on a preview card for 400 ms **peeks** at its window: it's the only one shown (minimized or not),
-    the others fade out (150 ms) until the pointer leaves the card, and then come back at once.
+    the others fade out (150 ms) until the pointer leaves the card, and then come back at once. A minimized window
+    fades in for the peek (150 ms); clicking its card then keeps it where it is (finishing the fade in), with no
+    restore animation from the taskbar.
 - **Tray**: the apps' tray icons, the mute toggle, then the notification bell with the clock.
   - The **clock** shows the session host's time in the host's time zone (sent by the session), not the browser's;
     notification times too.

@@ -9,7 +9,8 @@
 #   3. Unpin in the Apps menu's context menu keeps the Apps menu open;
 #   4. a group's preview cards are in the order the windows were created, whatever their stacking; resting on a card
 #      shows only its window (the others fade out) until the pointer leaves; the context menu of a card keeps the
-#      preview open while the pointer is on the menu;
+#      preview open while the pointer is on the menu; a minimized window shown by a peek and then clicked stays put
+#      (no restore animation);
 #   5. a narrow window's title bar keeps the close button: minimize and maximize slide under the icon's edge;
 #   6. the browser's own context menu never opens, except on text fields.
 #
@@ -187,6 +188,21 @@ pw mousemove "$MX" "$MY" >/dev/null
 pw mousedown >/dev/null
 pw mouseup >/dev/null
 wait_for "() => window.__viewerTest.windows().find((w) => w.id === '$SECOND')?.minimized" "the window to be minimized from the menu" 5
+echo "    ok"
+
+step "a minimized window shown by a peek, then clicked, stays where it is (no restore animation)"
+wait_windows_still
+pw mousemove "$BX" "$BY" >/dev/null
+wait_for "() => !!document.querySelector('#window-preview .preview-card[data-window=\"$SECOND\"]')" "the hover preview" 5
+read -r CX CY <<<"$(element_center "#window-preview .preview-card[data-window=\"$SECOND\"]")"
+pw mousemove "$CX" "$CY" >/dev/null
+wait_for "() => document.querySelector('#output .window[data-window=\"$SECOND\"]').style.display !== 'none' && ($peeking)()" "the minimized window to show in the peek" 5
+pw_eval "() => { window.__restores = 0; const watch = () => { if (window.__viewerTest.animations()['$SECOND'] === 'restore') window.__restores++; if (!window.__stopWatch) requestAnimationFrame(watch) }; window.__stopWatch = false; watch(); return true }" >/dev/null
+pw mousedown >/dev/null
+pw mouseup >/dev/null
+wait_for "() => !window.__viewerTest.windows().find((w) => w.id === '$SECOND').minimized && !document.querySelector('#output .peek-faded') && document.querySelector('#output .window[data-window=\"$SECOND\"]').style.display !== 'none'" "the window restored and shown" 5
+wait_windows_still
+[ "$(pw_eval "() => { window.__stopWatch = true; return window.__restores }")" = 0 ] || fail "the peeked window played the restore animation"
 echo "    ok"
 
 step "a narrow title bar keeps close: minimize and maximize slide under the icon's edge"
