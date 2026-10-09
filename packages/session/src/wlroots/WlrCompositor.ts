@@ -607,7 +607,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
             width: surface.buffer.width,
             height: surface.buffer.height,
           },
-        readPixels: (rect) => this.wlr.readPixels(surface.sid, rect.x, rect.y, rect.width, rect.height),
+        takeFrame: () => surface.buffer && this.wlr.takeFrame(surface.sid, surface.buffer.contentSerial),
         encodeVideo: (encoder, buffer) => encoder.encode(surface.sid, buffer.contentSerial),
       }
       surface.encoder = new SurfaceEncoder(surface.key, host, this.encoding)

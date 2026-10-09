@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@gfld/scene-protocol": "*",
+    "@nebula/frames": "*",
     "@nebula/session-contracts": "*",
     "ws": "^8.17.1"
   },

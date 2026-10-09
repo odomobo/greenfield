@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { type Patch, PatchFormat } from '@gfld/scene-protocol'
-import type { EncodedPatch, Rect, SendTier, SurfaceClass } from '@nebula/session-contracts'
+import type { EncodedPatch, Frame, Rect, SendTier, SurfaceClass } from '@nebula/session-contracts'
 import { EncoderPool } from '../EncoderPool.js'
 import { CLASS_PERIOD_MS } from '../policy.js'
 import { area } from '../region.js'
@@ -114,12 +114,36 @@ class FakeSurface implements SurfaceHost<FakeEncoder> {
     return this.buffer
   }
 
-  readPixels(rect: Rect) {
-    if (!this.readable) {
+  /** frames taken and not released yet */
+  heldFrames = 0
+  framesTaken = 0
+
+  takeFrame(): Frame | undefined {
+    const buffer = this.buffer
+    if (buffer === undefined) {
       return undefined
     }
-    this.reads.push(rect)
-    return { pixels: new Uint8Array(rect.width * rect.height * 4), opaque: this.opaque }
+    this.heldFrames++
+    this.framesTaken++
+    let released = false
+    return {
+      width: buffer.width,
+      height: buffer.height,
+      contentSerial: buffer.contentSerial,
+      readPixels: (rect: Rect) => {
+        if (!this.readable || released) {
+          return undefined
+        }
+        this.reads.push(rect)
+        return { pixels: new Uint8Array(rect.width * rect.height * 4), opaque: this.opaque }
+      },
+      release: () => {
+        if (!released) {
+          released = true
+          this.heldFrames--
+        }
+      },
+    }
   }
 
   encodeVideo(encoder: FakeEncoder, buffer: BufferInfo) {
@@ -261,6 +285,18 @@ async function relentless(
   }
   await settle()
 }
+
+test("a patch reads its pixels from a frame, released right after the read (not held while it's encoded)", async () => {
+  const env = setup()
+  const { encoder, host } = env.surface('a')
+  env.sink.autoDone = false
+  await encoder.commit(full(host))
+  assert.ok(host.framesTaken > 0)
+  assert.equal(host.framesTaken, host.reads.length)
+  assert.equal(host.heldFrames, 0)
+  await settle()
+  assert.equal(host.heldFrames, 0)
+})
 
 test("the opaque flag the host reports for a patch's pixels goes to the encoder", async () => {
   const env = setup()

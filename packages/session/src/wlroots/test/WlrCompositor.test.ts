@@ -125,7 +125,7 @@ class FakeCore {
     sendFrameDone: (sid) => {
       this.frameDone.push(sid)
     },
-    readPixels: () => undefined,
+    takeFrame: () => undefined,
     setClipboardText: (text) => {
       this.clipboard.push(text)
     },
@@ -967,9 +967,15 @@ function holdingSink() {
 }
 
 function readablePixels() {
-  ;(core.native as any).readPixels = (_sid: number, _x: number, _y: number, width: number, height: number) => ({
-    pixels: new Uint8Array(width * height * 4),
-    opaque: false,
+  ;(core.native as any).takeFrame = (_sid: number, contentSerial: number) => ({
+    width: 0,
+    height: 0,
+    contentSerial,
+    readPixels: (rect: { width: number; height: number }) => ({
+      pixels: new Uint8Array(rect.width * rect.height * 4),
+      opaque: false,
+    }),
+    release: () => undefined,
   })
 }
 
@@ -984,7 +990,7 @@ test('without a hardware encoder no video encoder is ever created, whatever the 
   await waitFor(() => held.length > 0)
   assert.equal(core.encodersCreated, 0)
   // a buffer that can't be read can't be shown without an encoder, but still no encoder is created
-  ;(core.native as any).readPixels = () => undefined
+  ;(core.native as any).takeFrame = () => undefined
   core.newWindow(2, { width: 800, height: 600 })
   await flush()
   assert.equal(core.encodersCreated, 0)

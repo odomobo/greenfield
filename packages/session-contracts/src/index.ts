@@ -39,6 +39,27 @@ export type EncodedPatch = {
 /** Video has a fixed quality target (and a variable bitrate): higher, or lower while bandwidth is short. */
 export type VideoQuality = 'high' | 'low'
 
+/**
+ * A frame: a surface's content at a point in time, holding its buffer until released (see "Frames" in
+ * docs/MODULARIZATION.md). Created by capture, consumed by the renderers; everything in between passes it through.
+ * Native consumers recognize it by its type tag (packages/frames/native/include/nebula_frame.h).
+ */
+export interface Frame {
+  /** in buffer pixels */
+  readonly width: number
+  readonly height: number
+  /** the surface's content serial: increases with every new buffer content */
+  readonly contentSerial: number
+  /**
+   * RGBA pixels of a rectangle of the frame, a copy. `opaque`: all its alpha is 255 (the format has no alpha, or the
+   * rectangle is in the surface's opaque region when the frame was taken, or its alpha was scanned). undefined if it
+   * can't be read this way (e.g. GPU memory), the rectangle isn't inside the frame, or the frame was released.
+   */
+  readPixels(rect: Rect): { pixels: Uint8Array; opaque: boolean } | undefined
+  /** Drops this handle's hold on the buffer, as soon as it's no longer read. Later calls do nothing. */
+  release(): void
+}
+
 export interface VideoEncoder {
   requestKeyUnit(): void
   /** the quality of the frames encoded from now on (cheap when it doesn't change) */
