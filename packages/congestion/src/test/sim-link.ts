@@ -9,7 +9,7 @@
  * and sends a fresh ack when its backlog shrinks while its last report was over the hold threshold. Acks take the
  * return propagation delay. Control messages bypass the controller and go first.
  */
-import { CongestionController, CongestionState } from '@nebula/congestion'
+import { CongestionController, CongestionState } from '../index.js'
 
 export type Source = {
   /** size of the next data item, or undefined if there is none now */

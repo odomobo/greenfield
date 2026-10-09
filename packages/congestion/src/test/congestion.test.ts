@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CongestionController, MIN_ITEMS_IN_FLIGHT } from '../congestion.js'
+import { CongestionController, MIN_ITEMS_IN_FLIGHT } from '../index.js'
 import {
   constantRate,
   HOLD_BYTES,

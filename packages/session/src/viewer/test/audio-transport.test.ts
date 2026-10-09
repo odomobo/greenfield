@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
 import { decodeEnvelope, PatchFormat } from '@gfld/scene-protocol'
-import { Congestion, WebSocketViewerTransport } from '../ViewerTransport.js'
+import type { Congestion } from '@nebula/session-contracts'
+import { WebSocketViewerTransport } from '../ViewerTransport.js'
 
 /** Just enough of a ws WebSocket: every send is kept, and completes when the test says so. */
 class FakeWebSocket extends EventEmitter {

@@ -2,17 +2,10 @@ import { WebSocket } from 'ws'
 import { Socket } from 'node:net'
 import { performance } from 'node:perf_hooks'
 import { createLogger } from '../Logger.js'
-import type { SendTier, SurfaceClass } from '@nebula/session-contracts'
+import type { Congestion, SendTier, SurfaceClass } from '@nebula/session-contracts'
 import { setSocketSendBuffer, setTcpNotSentLowat } from '../socket-options.js'
-import { CongestionController } from './congestion.js'
 import { BandwidthMonitor } from './bandwidth.js'
 
-/** What the transport needs of a congestion controller (tests pass one that never holds anything back). */
-export type Congestion = Pick<
-  CongestionController,
-  'canSend' | 'nextSendTime' | 'onSend' | 'onAck' | 'setDataWaiting'
-> &
-  Partial<Pick<CongestionController, 'bandwidthEstimate'>>
 import {
   AudioPacket,
   CHUNK_HEADER_BYTES,
@@ -233,16 +226,17 @@ export class WebSocketViewerTransport implements ViewerTransport {
     private readonly ws: WebSocket,
     options: {
       now?: () => number
-      congestion?: Congestion
+      /** the congestion controller (created by the caller, see ViewerHost) */
+      congestion: Congestion
       link?: SimulatedLink
       /** the predicted backlog of the surfaces' damage not handed to the transport yet (see bandwidth.ts) */
       unencodedBytes?: () => number
       /** the chunk size's bounds (see CHUNK_MS), for tests */
       chunkBytes?: { min: number; max: number }
-    } = {},
+    },
   ) {
     this.now = options.now ?? (() => performance.now())
-    this.congestion = options.congestion ?? new CongestionController({ now: this.now() })
+    this.congestion = options.congestion
     this.link = options.link
     this.chunkBytes = options.chunkBytes ?? { min: CHUNK_MIN_BYTES, max: CHUNK_MAX_BYTES }
     const unencodedBytes = options.unencodedBytes ?? (() => 0)

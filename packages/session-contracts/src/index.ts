@@ -2,7 +2,7 @@
  * The shared types between the session's packages (see "Packages and enforced boundaries" in docs/MODULARIZATION.md).
  * Types and tiny pure helpers only, no implementation logic.
  */
-import type { PatchFormat } from '@gfld/scene-protocol'
+import type { PatchFormat, ViewerAck } from '@gfld/scene-protocol'
 
 /** A rectangle in pixels. */
 export type Rect = { x: number; y: number; width: number; height: number }
@@ -65,4 +65,30 @@ export interface VideoEncoder {
   /** the quality of the frames encoded from now on (cheap when it doesn't change) */
   setQuality(quality: VideoQuality): void
   destroy(): void
+}
+
+/**
+ * What the transport needs of a congestion controller: pacing and an in-flight limit for the data items (patches and
+ * frames) sent to one viewer, driven by the viewer's acks (see "Congestion estimation" in docs/MODULARIZATION.md). Pure:
+ * the caller passes the time (ms) to every call. Control messages never go through it.
+ */
+export interface Congestion {
+  /** May a data item of this size be handed to the socket now? */
+  canSend(bytes: number, now: number): boolean
+  /**
+   * The earliest time a data item of this size may be sent without waiting for an ack: the pacing time if the window
+   * allows it, Infinity if only an ack can allow it.
+   */
+  nextSendTime(bytes: number, now: number): number
+  /** A data item of this size was handed to the socket. */
+  onSend(bytes: number, now: number): void
+  /** The viewer's ACK report arrived. */
+  onAck(ack: ViewerAck, now: number): void
+  /** Whether the transport has data items ready to send (they may still be waiting for the controller). */
+  setDataWaiting(waiting: boolean): void
+  /**
+   * The bottleneck bandwidth estimate in bytes per ms; 0 while unknown. Absent in a controller that never holds
+   * anything back.
+   */
+  readonly bandwidthEstimate?: number
 }

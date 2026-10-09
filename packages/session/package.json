@@ -22,6 +22,7 @@
   "dependencies": {
     "@gfld/scene-protocol": "*",
     "@nebula/frames": "*",
+    "@nebula/congestion": "*",
     "@nebula/session-contracts": "*",
     "ws": "^8.17.1"
   },
