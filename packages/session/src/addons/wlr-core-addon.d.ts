@@ -1,3 +1,5 @@
+import type { Frame } from '@nebula/session-contracts'
+
 /**
  * The wlroots core (native/wlr-core). Surfaces are identified by a session-unique sid; a toplevel by the sid of its
  * surface.
@@ -145,17 +147,10 @@ declare namespace wlrCore {
   export function sendFrameDone(sid: number, timeMs: number): void
 
   /**
-   * RGBA copy of a rectangle of the surface's current buffer, undefined if it can't be read. `opaque` is true if all
-   * its alpha is 255: the buffer's format has no alpha, or the rectangle lies in the surface's opaque region, or the
-   * copy found no alpha below 255.
+   * A frame of the surface's current buffer (it holds the buffer until released), labelled with the content serial
+   * given to that buffer. undefined if the surface has no buffer, or one that is neither readable memory nor a dmabuf.
    */
-  export function readPixels(
-    sid: number,
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-  ): { pixels: Uint8Array; opaque: boolean } | undefined
+  export function takeFrame(sid: number, contentSerial: number): Frame | undefined
 
   /**
    * Makes this text the seat's clipboard selection (a server-side data source, text mime types only), replacing the

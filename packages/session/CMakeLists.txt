@@ -103,6 +103,9 @@ pkg_check_modules(WLR_DEPS REQUIRED IMPORTED_TARGET
         wayland-server>=1.22 pixman-1>=0.42 xkbcommon libdrm>=2.4.114 gbm egl glesv2
         xcb xcb-composite xcb-ewmh xcb-icccm xcb-render xcb-res xcb-xfixes)
 
+# The frame library of @nebula/frames (a static library): capture creates frames with it.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../frames/native ${CMAKE_BINARY_DIR}/frames)
+
 add_library(wlr-core-addon SHARED
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_clipboard.c
@@ -132,6 +135,7 @@ target_include_directories(wlr-core-addon PRIVATE
 )
 target_link_libraries(wlr-core-addon PRIVATE
         ${WLR_BUILD}/libwlroots.a
+        nebula-frames
         PkgConfig::WLR_DEPS
         PkgConfig::GLIB2
         PkgConfig::GSTREAMER

@@ -18,6 +18,7 @@ import { isLossyPatchFormat, type Patch } from '@gfld/scene-protocol'
 import { EncoderPool } from './EncoderPool.js'
 import type {
   EncodedPatch,
+  Frame,
   PatchOrder,
   PatchShape,
   Rect,
@@ -81,12 +82,8 @@ export interface EncodingSink {
 /** The surface's buffer, as the encoder sees it. */
 export interface SurfaceHost<V extends VideoEncoder> {
   currentBuffer(): BufferInfo | undefined
-  /**
-   * RGBA pixels of a rectangle of the current buffer, a synchronous copy. `opaque`: all its alpha is 255 (the format
-   * has no alpha, or the rectangle is in the surface's opaque region, or its alpha was scanned). undefined if it can't
-   * be read.
-   */
-  readPixels(rect: Rect): { pixels: Uint8Array; opaque: boolean } | undefined
+  /** A frame of the current buffer, which the caller releases; undefined if it can't be taken. */
+  takeFrame(): Frame | undefined
   encodeVideo(encoder: V, buffer: BufferInfo): Promise<Uint8Array>
 }
 
@@ -484,7 +481,10 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     if (rect === undefined) {
       return null
     }
-    const read = this.host.readPixels(rect)
+    // the frame is held only while its pixels are copied
+    const frame = this.host.takeFrame()
+    const read = frame?.readPixels(rect)
+    frame?.release()
     if (read === undefined) {
       // can't read this buffer's pixels: stream it as video if there is an encoder, else it can't be shown
       this.patchUnsupported = true

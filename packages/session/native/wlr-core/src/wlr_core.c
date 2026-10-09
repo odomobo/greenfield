@@ -6,7 +6,7 @@
  * (src/wlroots/WlrCompositor.ts), which keeps the policy: window positions, stacking, focus, frame pacing and encoding.
  * Nothing is rendered or composited here: the compositor has no renderer (so wlroots doesn't copy shared memory
  * buffers into textures), and each surface's committed client buffer stays locked until the next commit replaces it.
- * It is read directly (patches) or handed to the video encoder.
+ * Frames of it (packages/frames) are read by the patch path; the video encoder is handed it directly.
  *
  * Runs on Node's main thread. wlroots' event loop is driven from JavaScript (dispatch() when its fd is readable), so
  * every wlroots callback, and every event reported to JavaScript, happens inside a call from JavaScript.
@@ -50,6 +50,7 @@
 #include "node_api.h"
 #include "wlr_core.h"
 #include "wlr_core_internal.h"
+#include "nebula_frame.h"
 
 #define DECLARE_NAPI_METHOD(name, func) { name, 0, func, 0, 0, 0, napi_default, 0 }
 #define NAPI_CALL(env, the_call)                                                    \
@@ -1561,110 +1562,131 @@ wlr_core_surface_buffer(uint32_t sid) {
     return gsurf ? gsurf->buffer : NULL;
 }
 
-/*
- * Whether the rectangle (buffer pixels) lies entirely in the surface's opaque region (wl_surface.set_opaque_region: the
- * client promises its alpha is 1 there). Only decided for the plain case: the region is in surface coordinates, so the
- * buffer must map to them by an integer scale alone (no transform, no viewport) and be the surface's current buffer.
- * The surface cells that contain the rectangle's pixels must be inside the region.
- */
-static bool
-rect_in_opaque_region(struct wlr_surface *surface, const struct wlr_buffer *buffer, int32_t x, int32_t y,
-                      int32_t width, int32_t height) {
-    const struct wlr_surface_state *current = &surface->current;
-    if (current->transform != WL_OUTPUT_TRANSFORM_NORMAL || current->scale < 1 || current->viewport.has_src ||
-        current->viewport.has_dst || current->buffer_width != buffer->width || current->buffer_height != buffer->height) {
-        return false;
+// ---------------------------------------------------------------------------------------------------------------------
+// frames (packages/frames): capture hands out frames of a surface's current buffer. Its own hold of the buffer
+// (gsurf->buffer, until the next commit replaces it) stays as it is; each frame adds a lock of its own.
+
+/* How long a frame may be held before the frame library warns about it. */
+#define FRAME_HELD_LIMIT_MS 1000
+
+static struct nebula_frame_source *frame_source = NULL;
+
+struct wlr_frame {
+    struct nebula_frame base;
+    struct wlr_buffer *buffer;
+};
+
+/* On the main thread (the frame library destroys frames on their creating thread). */
+static void
+wlr_frame_destroy(struct nebula_frame *frame) {
+    struct wlr_frame *wlr_frame = (struct wlr_frame *) frame;
+    wlr_buffer_unlock(wlr_frame->buffer);
+    free(frame->opaque_rects);
+    free(wlr_frame);
+}
+
+/* Reads on the main thread go through wlroots' access, which protects them against a client shrinking its pool. */
+static const void *
+wlr_frame_begin_access(struct nebula_frame *frame) {
+    void *data;
+    uint32_t format;
+    size_t stride;
+    if (!wlr_buffer_begin_data_ptr_access(((struct wlr_frame *) frame)->buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &data,
+                                          &format, &stride)) {
+        return NULL;
     }
-    int32_t scale = current->scale;
-    pixman_box32_t box = {x / scale, y / scale, (x + width + scale - 1) / scale, (y + height + scale - 1) / scale};
-    return pixman_region32_contains_rectangle(&surface->opaque_region, &box) == PIXMAN_REGION_IN;
+    return data;
+}
+
+static void
+wlr_frame_end_access(struct nebula_frame *frame) {
+    wlr_buffer_end_data_ptr_access(((struct wlr_frame *) frame)->buffer);
 }
 
 /*
- * readPixels(sid, x, y, width, height) -> { pixels: Uint8Array RGBA, opaque: boolean } | undefined
- * A copy (the buffer may be released right after) in a plain ArrayBuffer, so it can be transferred to an encoder
- * worker. `opaque`: all its alpha is 255, because the buffer's format has no alpha (XRGB, XBGR), or the rectangle lies
- * in the surface's opaque region, or the copy found every alpha byte to be 255 (scanned while copying).
+ * The surface's opaque region (wl_surface.set_opaque_region: the client promises its alpha is 1 there) in buffer
+ * pixels, into the frame. Only for the plain case: the region is in surface coordinates, so the buffer must map to them
+ * by an integer scale alone (no transform, no viewport) and be the surface's current buffer. Each surface cell maps to
+ * scale x scale buffer pixels, so a rectangle of buffer pixels lies in the scaled region exactly when the surface cells
+ * containing its pixels lie in the region.
+ */
+static void
+frame_set_opaque_region(struct nebula_frame *frame, struct wlr_surface *surface, const struct wlr_buffer *buffer) {
+    const struct wlr_surface_state *current = &surface->current;
+    if (current->transform != WL_OUTPUT_TRANSFORM_NORMAL || current->scale < 1 || current->viewport.has_src ||
+        current->viewport.has_dst || current->buffer_width != buffer->width || current->buffer_height != buffer->height) {
+        return;
+    }
+    int32_t scale = current->scale;
+    int n = 0;
+    const pixman_box32_t *boxes = pixman_region32_rectangles(&surface->opaque_region, &n);
+    if (n == 0) {
+        return;
+    }
+    frame->opaque_rects = malloc((size_t) n * 4 * sizeof(int32_t));
+    frame->n_opaque_rects = (uint32_t) n;
+    for (int i = 0; i < n; i++) {
+        frame->opaque_rects[i * 4] = boxes[i].x1 * scale;
+        frame->opaque_rects[i * 4 + 1] = boxes[i].y1 * scale;
+        frame->opaque_rects[i * 4 + 2] = (boxes[i].x2 - boxes[i].x1) * scale;
+        frame->opaque_rects[i * 4 + 3] = (boxes[i].y2 - boxes[i].y1) * scale;
+    }
+}
+
+/*
+ * takeFrame(sid, contentSerial) -> Frame | undefined
+ * A frame of the surface's current buffer (see the Frame interface of @nebula/session-contracts), labelled with the
+ * content serial capture gave that buffer. undefined if the surface has no buffer, or one that is neither readable
+ * memory nor a dmabuf.
  */
 static napi_value
-readPixels(napi_env env, napi_callback_info info) {
-    napi_value argv[5], result, array_buffer, pixels_array, opaque_value;
-    if (!get_args(env, info, 5, argv)) {
+takeFrame(napi_env env, napi_callback_info info) {
+    napi_value argv[2];
+    if (!get_args(env, info, 2, argv)) {
         return undefined(env);
     }
     struct gsurf *gsurf = the_core == NULL ? NULL : gsurf_from_sid(the_core, arg_u32(env, argv[0]));
     struct wlr_buffer *buffer = gsurf ? gsurf->buffer : NULL;
-    int32_t x = arg_i32(env, argv[1]), y = arg_i32(env, argv[2]);
-    int32_t width = arg_i32(env, argv[3]), height = arg_i32(env, argv[4]);
-    if (buffer == NULL || x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > buffer->width ||
-        y + height > buffer->height) {
+    if (buffer == NULL) {
         return undefined(env);
     }
+    struct wlr_frame *wlr_frame = calloc(1, sizeof(*wlr_frame));
+    struct nebula_frame *frame = &wlr_frame->base;
     void *data;
     uint32_t format;
     size_t stride;
-    if (!wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride)) {
-        // e.g. a dmabuf: would need a GPU readback, not part of the prototype
-        return undefined(env);
-    }
-    // byte offsets of R, G, B, A in a little endian pixel, -1: no alpha
-    int r, g, b, a;
-    switch (format) {
-        case DRM_FORMAT_ARGB8888:
-            r = 2, g = 1, b = 0, a = 3;
-            break;
-        case DRM_FORMAT_XRGB8888:
-            r = 2, g = 1, b = 0, a = -1;
-            break;
-        case DRM_FORMAT_ABGR8888:
-            r = 0, g = 1, b = 2, a = 3;
-            break;
-        case DRM_FORMAT_XBGR8888:
-            r = 0, g = 1, b = 2, a = -1;
-            break;
-        default:
-            wlr_buffer_end_data_ptr_access(buffer);
-            return undefined(env);
-    }
-    bool opaque = a < 0 || (gsurf->surface != NULL && rect_in_opaque_region(gsurf->surface, buffer, x, y, width, height));
-    size_t length = (size_t) width * height * 4;
-    uint8_t *pixels;
-    if (napi_create_arraybuffer(env, length, (void **) &pixels, &array_buffer) != napi_ok) {
+    struct wlr_dmabuf_attributes dmabuf;
+    if (wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride)) {
+        // the mapping stays valid while the buffer is locked (wlr_shm keeps it until the last buffer of the pool is gone)
         wlr_buffer_end_data_ptr_access(buffer);
+        frame->memory = NEBULA_FRAME_SHM;
+        frame->format = format;
+        frame->description.shm.data = data;
+        frame->description.shm.stride = stride;
+        frame->description.shm.begin_access = wlr_frame_begin_access;
+        frame->description.shm.end_access = wlr_frame_end_access;
+    } else if (wlr_buffer_get_dmabuf(buffer, &dmabuf)) {
+        // the file descriptors belong to the buffer, valid while it is locked
+        frame->memory = NEBULA_FRAME_DMABUF;
+        frame->format = dmabuf.format;
+        frame->description.dmabuf.modifier = dmabuf.modifier;
+        frame->description.dmabuf.n_planes = (uint32_t) dmabuf.n_planes;
+        for (int i = 0; i < dmabuf.n_planes && i < NEBULA_FRAME_MAX_PLANES; i++) {
+            frame->description.dmabuf.planes[i].fd = dmabuf.fd[i];
+            frame->description.dmabuf.planes[i].offset = dmabuf.offset[i];
+            frame->description.dmabuf.planes[i].stride = dmabuf.stride[i];
+        }
+    } else {
+        free(wlr_frame);
         return undefined(env);
     }
-    uint8_t *out = pixels;
-    uint8_t alpha_and = 0xff;
-    for (int32_t row = y; row < y + height; row++) {
-        const uint8_t *in = (const uint8_t *) data + (size_t) row * stride + (size_t) x * 4;
-        if (opaque) {
-            // no alpha to scan: the format has none, or the client promised it is 1 here (the alpha is still set to 255)
-            for (int32_t column = 0; column < width; column++, in += 4, out += 4) {
-                out[0] = in[r];
-                out[1] = in[g];
-                out[2] = in[b];
-                out[3] = 0xff;
-            }
-        } else {
-            for (int32_t column = 0; column < width; column++, in += 4, out += 4) {
-                out[0] = in[r];
-                out[1] = in[g];
-                out[2] = in[b];
-                out[3] = in[a];
-                alpha_and &= in[a];
-            }
-        }
-    }
-    wlr_buffer_end_data_ptr_access(buffer);
-    if (!opaque) {
-        opaque = alpha_and == 0xff;
-    }
-    NAPI_CALL(env, napi_create_typedarray(env, napi_uint8_array, length, array_buffer, 0, &pixels_array))
-    NAPI_CALL(env, napi_get_boolean(env, opaque, &opaque_value))
-    NAPI_CALL(env, napi_create_object(env, &result))
-    NAPI_CALL(env, napi_set_named_property(env, result, "pixels", pixels_array))
-    NAPI_CALL(env, napi_set_named_property(env, result, "opaque", opaque_value))
-    return result;
+    frame->width = (uint32_t) buffer->width;
+    frame->height = (uint32_t) buffer->height;
+    frame->content_serial = arg_u32(env, argv[1]);
+    frame_set_opaque_region(frame, gsurf->surface, buffer);
+    wlr_frame->buffer = wlr_buffer_lock(buffer);
+    nebula_frame_init(frame, frame_source, wlr_frame_destroy);
+    return nebula_frame_to_js(env, frame);
 }
 
 napi_value wlr_core_encoder_init(napi_env env, napi_value exports);
@@ -1692,12 +1714,13 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("setPosition", setPosition),
             DECLARE_NAPI_METHOD("setBounds", setBounds),
             DECLARE_NAPI_METHOD("sendFrameDone", sendFrameDone),
-            DECLARE_NAPI_METHOD("readPixels", readPixels),
+            DECLARE_NAPI_METHOD("takeFrame", takeFrame),
     };
     NAPI_CALL(env, napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc))
     wlr_core_clipboard_init(env, exports);
     wlr_core_dnd_init(env, exports);
     wlr_core_input_init(env, exports);
+    frame_source = nebula_frame_source_create(env, FRAME_HELD_LIMIT_MS, NULL);
     return wlr_core_encoder_init(env, exports);
 }
 
