@@ -29,7 +29,7 @@ export class ShellController {
   }
 
   /** The desktop was opened: show its user, start empty until the session sends its state. */
-  start(username: string): void {
+  start(username: string, hostname: string): void {
     this.icons.clear()
     this.clearToastTimers()
     resetGroupOrder()
@@ -37,6 +37,7 @@ export class ShellController {
     this.tray.reset()
     shellStore.update({
       username,
+      hostname,
       apps: [],
       pinned: [],
       windows: [],

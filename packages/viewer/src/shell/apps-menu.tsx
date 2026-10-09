@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useCore } from '../core'
-import { shellStore } from '../state'
+import { shellStore, userAtHost } from '../state'
 import { closePopup, closePopupOf, isOpen, openPopup, usePopupStack } from '../popups'
 import { useStore } from '../store'
 import { glyphs } from './glyphs'
@@ -111,9 +111,9 @@ export function AppsMenu({ actions }: { actions: AppsMenuActions }) {
     >
       {/* who, session menu */}
       <div className="apps-header">
-        <div className="apps-user" title={state.username}>
+        <div className="apps-user" title={userAtHost(state.username, state.hostname)}>
           <span className="apps-avatar" dangerouslySetInnerHTML={{ __html: glyphs.user(18) }} />
-          <span className="apps-username">{state.username}</span>
+          <span className="apps-username">{userAtHost(state.username, state.hostname)}</span>
         </div>
         <button
           ref={sessionMenuButtonRef}

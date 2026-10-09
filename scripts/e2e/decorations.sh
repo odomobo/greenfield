@@ -12,7 +12,8 @@
 #      otherwise); once it says it has no decorations (xprop sets the hint) the frame goes;
 #   4. stretches foot by its resize margin: the content stretches while dragging, the frame keeps its real size, and the
 #      app is told once on release;
-#   5. launches a GTK4 app (gtk4-demo, if installed): it keeps its own decorations, no frame;
+#   5. launches a GTK4 app (gtk4-demo, if installed): it keeps its own decorations, no frame; a page narrower than it
+#      doesn't make it shrink;
 #   (GSettings: an app of the session reads button-layout ':minimize,maximize,close' from nebula's dconf defaults)
 #   (popups: shown above the frame and above other windows, checked with stand-in canvases)
 #   6. launches a second foot that asks for client side decorations (like Chrome): it keeps its own, no frame;
@@ -355,6 +356,17 @@ if [ "$HAVE_GTK" = 1 ]; then
   wait_for "() => !!document.querySelector('.context-menu')" "our window menu for the GTK app's header bar" 5
   pw press Escape >/dev/null
   wait_for "() => !document.querySelector('.context-menu')" "the menu to close" 5
+  echo "    ok"
+  step "a page narrower than the GTK window doesn't make it shrink (it isn't told new bounds)"
+  gtk_size() { pw_eval "() => { const w = window.__viewerTest.windows().find((w) => w.appId.startsWith('org.gtk') && !w.parent); return w.geometry.width + 'x' + w.geometry.height }" | tr -d '"'; }
+  GTK_SIZE="$(gtk_size)"
+  pw resize $((HW - 100)) 800 >/dev/null
+  wait_for "() => window.__viewerTest.output().width === $((HW - 100))" "the narrower output" 5
+  # (GTK shrank within a few frames of being told: give it well over that)
+  pw_eval "() => new Promise((resolve) => setTimeout(resolve, 800))" >/dev/null
+  [ "$(gtk_size)" = "$GTK_SIZE" ] || fail "the GTK window went from $GTK_SIZE to $(gtk_size) when the page got narrower"
+  pw resize 1280 800 >/dev/null
+  wait_for "() => window.__viewerTest.output().width === 1280" "the output back" 5
   echo "    ok"
 else
   echo "(gtk4-demo isn't installed: the GTK app check is skipped)"

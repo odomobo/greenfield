@@ -146,7 +146,8 @@ step "the Apps menu: you, the installed apps"
 click_element '#apps-button'
 wait_for "() => $(visible apps-menu) && !!document.querySelector('.app-row[data-app=\"$TEST_APP\"]')" "the test app in the Apps menu"
 [ "$(pw_eval "() => document.activeElement.id")" = '"apps-search"' ] || fail "the search field doesn't have the keyboard"
-[ "$(pw_eval "() => document.querySelector('.apps-username').textContent")" = "\"$ME\"" ] || fail "the user isn't shown"
+[ "$(pw_eval "() => document.querySelector('.apps-username').textContent")" = "\"$ME@$(hostname)\"" ] || fail "user@hostname isn't shown"
+[ "$(pw_eval "() => document.title")" = "\"$ME@$(hostname)\"" ] || fail "the tab's title isn't user@hostname"
 # searching narrows the list
 pw_eval "() => { const i = document.getElementById('apps-search'); i.value = 'test term'; i.dispatchEvent(new Event('input')); return true }" >/dev/null
 [ "$(pw_eval "() => [...document.querySelectorAll('.apps-list [data-app]')].map((e) => e.dataset.app).join(' ')")" = "\"$TEST_APP\"" ] ||

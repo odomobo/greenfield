@@ -3,7 +3,8 @@
 # in a headless browser (scripts/e2e/browser-driver.js), starts a session and, from the Apps menu:
 #   1. launches xev: its window is a desktop window with its X11 title, and the X11 app knows where the viewer put it
 #      (xwininfo's absolute position is the window's position in the viewer);
-#   2. clicks and types into it: xev gets the button and the key;
+#   2. clicks and types into it: xev gets the button and the key; X11's cursor (drawn by the viewer) goes when the
+#      pointer leaves the desktop (to the taskbar) and comes back with it;
 #   3. launches xfontsel: its WM_CLASS is its app id (its taskbar button is its desktop entry's, by StartupWMClass);
 #      opens one of its menus (an override-redirect window): it's shown with xfontsel's window, where xfontsel put it,
 #      and not as a window of its own; choosing from it closes it;
@@ -98,6 +99,17 @@ wait_until "xev to get the button" 5 xev_got 'ButtonRelease event'
 pw type "q" >/dev/null
 wait_until "xev to get the key" 5 xev_got 'keysym 0x71, q'
 grep -aq 'ButtonPress event' "$WORK/xev.log" || fail "xev got no ButtonPress"
+echo "    ok"
+
+step "X11's cursor (drawn by the viewer) shows only while the pointer is over the desktop"
+APP_CURSOR="() => document.querySelectorAll('#output .floating-layer canvas').length"
+pointer_at $((XEV_X + 210)) $((XEV_Y + 160))
+wait_for "() => ($APP_CURSOR)() === 1" "X11's cursor over xev" 5
+# off the top edge of the desktop, onto the taskbar: it doesn't stay behind
+pw mousemove $((XEV_X + 210)) 10 >/dev/null
+wait_for "() => ($APP_CURSOR)() === 0" "X11's cursor to go when the pointer leaves the desktop" 5
+pointer_at $((XEV_X + 200)) $((XEV_Y + 150))
+wait_for "() => ($APP_CURSOR)() === 1" "X11's cursor back over xev" 5
 echo "    ok"
 
 step "a menu of xfontsel: shown with its window, where xfontsel put it"

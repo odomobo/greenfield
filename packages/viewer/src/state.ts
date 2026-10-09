@@ -44,6 +44,8 @@ export const appStore = createStore<AppState>({
  */
 export type ShellState = {
   username: string
+  /** the machine the desktop runs on (shown as user@hostname) */
+  hostname: string
   apps: ShellApp[]
   /** desktop file IDs of the pinned apps, in order */
   pinned: string[]
@@ -67,6 +69,7 @@ export type HostClock = { offset: number; timeZone: string }
 
 export const shellStore = createStore<ShellState>({
   username: '',
+  hostname: '',
   apps: [],
   pinned: [],
   windows: [],
@@ -91,3 +94,10 @@ export type AudioState = {
 }
 
 export const audioStore = createStore<AudioState>({ muted: false, available: false, supported: true, running: false })
+
+/** Who is signed in where: "user@hostname" (the tab's title and the Apps menu's header on the desktop). */
+export function userAtHost(username: string, hostname: string): string {
+  // (a gateway that hides its host name puts a non-breaking space there, which trim() removes)
+  const host = hostname.trim()
+  return host ? `${username}@${host}` : username
+}

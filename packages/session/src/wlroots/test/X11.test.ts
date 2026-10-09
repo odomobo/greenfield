@@ -121,9 +121,13 @@ test('an X11 window is told where the scene shows it, once per change (a Wayland
 })
 
 test('X11 windows are never told configure bounds (an xdg_toplevel thing), Wayland windows are', async () => {
+  compositor.handleMessage({ type: 'output', width: 900, height: 600 })
   core.newWindow(1, true)
   core.newWindow(2, false)
-  compositor.handleMessage({ type: 'output', width: 900, height: 600 })
+  // (bounds go out with a toplevel's commit)
+  for (const sid of [1, 2]) {
+    core.onEvent('surface-commit', sid, true, false, 400, 300, new Int32Array(), 400, 300, new Int32Array(), false)
+  }
   await flush()
   assert.ok(core.bounded.length > 0)
   assert.ok(core.bounded.every((sid) => sid === 2))

@@ -10,7 +10,7 @@ import { AppsMenuActions } from './shell/apps-menu'
 import { appForWindow, groupKey } from './shell/groups'
 import { windowMenuItems } from './shell/menus'
 import { openPopup } from './popups'
-import { appStore, shellStore } from './state'
+import { appStore, shellStore, userAtHost } from './state'
 import { DesktopView } from './views/desktop'
 import { LoginView } from './views/login'
 
@@ -217,8 +217,8 @@ export function App({ hostname, testMode }: { hostname: string; testMode: boolea
       flushSync(() =>
         appStore.update({ view: 'desktop', loginPrompt: undefined, loginInfo: undefined, loginBusy: false }),
       )
-      document.title = 'Nebula'
-      shell.start(username)
+      document.title = userAtHost(username, hostname)
+      shell.start(username, hostname)
       desktop.reset()
       audio.onOpen()
     }

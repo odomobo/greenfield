@@ -11,7 +11,8 @@
 #      shows only its window (the others fade out) until the pointer leaves; the context menu of a card keeps the
 #      preview open while the pointer is on the menu; a minimized window shown by a peek and then clicked stays put
 #      (no restore animation);
-#   5. a narrow window's title bar keeps the close button: minimize and maximize slide under the icon's edge;
+#   5. during the window menu's Move only the move cursor shows; a narrow window's title bar keeps the close button:
+#      minimize and maximize slide under the icon's edge;
 #   6. the browser's own context menu never opens, except on text fields.
 #
 # Requires: foot, dbus-daemon, playwright-cli (for its Playwright library and browser), curl, node, the built packages
@@ -203,6 +204,21 @@ pw mouseup >/dev/null
 wait_for "() => !window.__viewerTest.windows().find((w) => w.id === '$SECOND').minimized && !document.querySelector('#output .peek-faded') && document.querySelector('#output .window[data-window=\"$SECOND\"]').style.display !== 'none'" "the window restored and shown" 5
 wait_windows_still
 [ "$(pw_eval "() => { window.__stopWatch = true; return window.__restores }")" = 0 ] || fail "the peeked window played the restore animation"
+echo "    ok"
+
+step "during the window menu's Move, only the move cursor shows (not the frame's resize cursors)"
+pw mousemove "$BX" "$BY" >/dev/null
+wait_for "() => !!document.querySelector('#window-preview .preview-card[data-window=\"$FIRST\"]')" "the hover preview" 5
+read -r CX CY <<<"$(element_center "#window-preview .preview-card[data-window=\"$FIRST\"]")"
+pw mousemove "$CX" "$CY" >/dev/null
+pw mousedown right >/dev/null
+pw mouseup right >/dev/null
+click_element "[data-popup-owner=\"preview:$FIRST\"] [data-action=move]"
+wait_for "() => window.__viewerTest.interaction() === 'move' && window.__viewerTest.menuArmed()" "Move to wait for its click" 5
+cursors="() => [document.getElementById('output'), ...document.querySelectorAll('#output .frame-grab, #output .frame-title, #output .frame-button, #output canvas')].map((e) => getComputedStyle(e).cursor)"
+wait_for "() => ($cursors)().every((c) => c === 'move')" "only the move cursor" 5
+pw press Escape >/dev/null
+wait_for "() => !window.__viewerTest.interaction() && getComputedStyle(document.querySelector('#output .frame-grab.e')).cursor === 'e-resize'" "Move to end and the frame's cursors to come back" 5
 echo "    ok"
 
 step "a narrow title bar keeps close: minimize and maximize slide under the icon's edge"

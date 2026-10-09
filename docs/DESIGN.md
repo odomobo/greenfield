@@ -90,6 +90,11 @@ desktops of the same user never see any of it. All of it comes from `packages/se
 - **Context menus** may have a column of check marks / radio dots and one of icons (only when an entry has one), and
   submenus: a chevron, opened by pointing at the entry for 150 ms or clicking it, beside the menu (on its left if
   there's no room on the right).
+- **Who and where**: the tab's title on the desktop is `user@hostname`, and so is the name in the Apps menu header
+  (just the user when the gateway hides its host name).
+- **Cursors**: an app's own cursor image (drawn by the viewer) shows only while the pointer is over the desktop. While a
+  window is being moved or resized (a drag, or the window menu's Move or Size from the moment it's chosen), only that
+  cursor shows: not the apps', not the frame's edge cursors.
 - **Apps menu header**: a three-column grid. The user (avatar and name) on the left, the session name centered on the
   menu, the power button on the right, all on one center line.
   - The session name's field is exactly as wide as its text (a hidden copy of the text sizes it), so it stays

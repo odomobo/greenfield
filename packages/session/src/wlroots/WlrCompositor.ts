@@ -755,7 +755,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
   /**
    * Tell a Wayland window the largest sensible size for it (xdg_toplevel.configure_bounds), when that changed: the
-   * output (which excludes the taskbar) minus our frame. Apps use it to pick their initial size, so they fit.
+   * output (which excludes the taskbar) minus our frame. Apps use it to pick their initial size, so they fit. Sent
+   * when the window opens and when its decorations change, not when the output does (see updateOutput).
    */
   private updateBounds(window: Window) {
     if (this.x11.has(window.sid)) {
@@ -1108,8 +1109,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     }
     this.output = { width, height }
     this.wlr.setOutputSize(width, height)
+    // (open windows aren't told new bounds: GTK shrinks to fit them, and a window the viewer moves back into a
+    // narrower page must keep its size; windows that open later get the new ones)
     for (const window of this.windows.values()) {
-      this.updateBounds(window)
       const state = this.wlr.toplevelState(window.sid)
       if (state?.maximized) {
         this.setMaximized(window.sid, true)

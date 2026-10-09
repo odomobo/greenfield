@@ -932,6 +932,11 @@
   }
 }
 
+/* a move or resize going on: only its cursor (set on #output by desktop.ts) shows, not the frame parts' or the apps' */
+#output.interacting * {
+  cursor: inherit !important;
+}
+
 /* a window's element is its surfaces' coordinate system, moved and stretched by a transform (desktop.ts); its popups'
    element (in the popup layer) gets the same one */
 #output .window,

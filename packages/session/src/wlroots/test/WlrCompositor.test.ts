@@ -225,7 +225,7 @@ afterEach(() => {
   compositor.detach()
 })
 
-test('a window is told its bounds from its first commit: the output minus our frame, again when either changes', async () => {
+test('a window is told its bounds from its first commit: the output minus our frame, again when its frame changes (not the output)', async () => {
   compositor.handleMessage({ type: 'output', width: 1000, height: 700 })
   // decorated before its first commit (foot asks for server side decorations first): applied at the commit
   core.newWindow(1, { decorated: true })
@@ -237,13 +237,11 @@ test('a window is told its bounds from its first commit: the output minus our fr
   // once per change, not per commit
   core.commit(1, 400, 300)
   assert.equal(core.bounds.length, 2)
+  // a narrower output isn't told to open windows (GTK would shrink to fit), a new frame is
   compositor.handleMessage({ type: 'output', width: 800, height: 600 })
+  assert.equal(core.bounds.length, 2)
   core.onEvent('toplevel-decorated', 2, true)
-  assert.deepEqual(core.bounds.slice(2), [
-    [1, 800 - 2 * FRAME_BORDER, 600 - FRAME_TITLE_HEIGHT - FRAME_BORDER],
-    [2, 800, 600],
-    [2, 800 - 2 * FRAME_BORDER, 600 - FRAME_TITLE_HEIGHT - FRAME_BORDER],
-  ])
+  assert.deepEqual(core.bounds.slice(2), [[2, 800 - 2 * FRAME_BORDER, 600 - FRAME_TITLE_HEIGHT - FRAME_BORDER]])
 })
 
 test("an app's title bar right-clicked (show_window_menu) asks the viewer for its window menu there", async () => {

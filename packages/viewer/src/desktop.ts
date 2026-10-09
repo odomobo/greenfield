@@ -204,7 +204,9 @@ export class Desktop {
   private buttons = 0
   /** implicit grab: while a button is held, pointer events go to the surface the press started on */
   private grab?: Pick
-  private interaction?: Interaction
+  private currentInteraction?: Interaction
+  /** the pointer is over the desktop (not over the taskbar, a popup, or outside the page) */
+  private pointerInside = false
   /** a press on a window's frame is going on (from its button press to the release) */
   private framePress?: FramePress
   /** the last press on a title bar, to tell a double click (maximize) from two clicks */
@@ -1687,7 +1689,8 @@ export class Desktop {
       view.canvas.style.transform = `translate(${rect.x}px, ${rect.y}px)`
       view.place({ x: 0, y: 0, width: rect.width, height: rect.height }, rect, window.devicePixelRatio || 1)
     }
-    if (this.cursor.kind === 'surface') {
+    // the app's cursor: only while the pointer is over the desktop, and not during a move or resize
+    if (this.cursor.kind === 'surface' && this.pointerInside && !this.interaction) {
       const { surface, hotspot } = this.cursor
       place(surface, cursorRect(this.pointer, hotspot, this.cursor.size, this.cursorSize(surface)))
     }
@@ -1719,7 +1722,34 @@ export class Desktop {
     return this.frameSizes.get(surface)
   }
 
+  /**
+   * A move or resize going on (a drag, or the window menu's Move or Size from the moment it's chosen): only its cursor
+   * shows, on the container (.interacting makes every element in it use that one, see style.css), never the app's or
+   * the frame's; when it ends, the app's comes back.
+   */
+  private get interaction(): Interaction | undefined {
+    return this.currentInteraction
+  }
+
+  private set interaction(interaction: Interaction | undefined) {
+    const ended = this.currentInteraction !== undefined && interaction === undefined
+    const started = this.currentInteraction === undefined && interaction !== undefined
+    this.currentInteraction = interaction
+    this.container.classList.toggle('interacting', interaction !== undefined)
+    if (ended) {
+      this.applyCursor()
+    } else if (started) {
+      // (the app's cursor, drawn by us, goes)
+      this.scheduleLayout()
+    }
+  }
+
   private applyCursor() {
+    if (this.interaction) {
+      // (the interaction's cursor stays; the app's is applied when it ends)
+      this.scheduleLayout()
+      return
+    }
     switch (this.cursor.kind) {
       case 'default':
         this.container.style.cursor = 'default'
@@ -1825,10 +1855,23 @@ export class Desktop {
       { capture: true },
     )
 
+    // the app's cursor (drawn by us) shows only while the pointer is over the desktop: it would stay behind where the
+    // pointer left it (to the taskbar, a popup, out of the page)
+    container.addEventListener('pointerleave', (event) => {
+      if (event.pointerType === 'mouse' || event.pointerType === 'pen') {
+        this.pointerInside = false
+        this.placeFloating()
+      }
+    })
+
     container.addEventListener('pointermove', (event) => {
       if (event.pointerType === 'touch') {
         this.touchEvent(event, 'move')
         return
+      }
+      if (!this.pointerInside) {
+        this.pointerInside = true
+        this.placeFloating()
       }
       // the pointer is locked: relative motion only
       if (this.pointerLock.movement(event.movementX, event.movementY, event.timeStamp)) {
