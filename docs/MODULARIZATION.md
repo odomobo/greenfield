@@ -11,10 +11,16 @@ The browser viewer gets the same treatment later, not as part of this work.
 Separation of concerns. Each component has one job behind a clean interface, so its implementation can change without
 the components that use it noticing:
 
-- **QoS** analyzes the data stream and estimates the link (its speed, whether it's short). Others use what it
-  concludes; how it reaches its conclusions is its own business.
+- **QoS** is two separate concepts (see "QoS: two concepts"):
+  - **congestion estimation** analyzes the data stream and estimates the link. It's the most intricate logic in the
+    stack, so it is kept on its own and as simple as possible, to keep it bug-free;
+  - **traffic policy** shares the link and the CPU between surfaces: fair-queueing weights, surface priority, and
+    whether a surface is CPU- or link-bound.
+
+  Others use what they conclude; how they reach their conclusions is their own business.
 - **Rendering** turns a surface's content into items to send (patches or video frames). How something is encoded is
   orthogonal to how it's consumed.
+- **Capture** knows nothing about encoding: it hands out **frames** of a surface's content, and renderers consume them.
 - **Everything between rendering and the viewer passes items through** without caring what they are. Only the
   receiving end in the viewer needs to understand them.
 - **The protocol** is a cross-cutting concern, kept as small as reasonable and isolated in one place, so it is easy to
@@ -25,15 +31,23 @@ the components that use it noticing:
 | Component | Responsible for | Must not know about |
 |---|---|---|
 | **Protocol** (`@gfld/scene-protocol`, exists) | Message schema, envelope and chunk formats; the one place both ends agree on | Tiers, classes, sockets, scheduling |
-| **Capture** (the compositor) | Surfaces, their buffers and damage | How content is encoded or sent |
-| **Rendering** (per surface; today the per-surface part of `SurfaceEncoder`) | What to send next and in what order; its own internal queue of work (see below); the video stream's state | The link, other surfaces |
+| **Capture** (the compositor) | Surfaces, their buffers and damage; tells renderers "content changed" and hands out frames on request | How content is encoded or sent |
+| **Frames** | The frame object: a reference to a surface's buffer at a point in time, its description, its lifetime and release (see "Frames") | Who produces or consumes frames, encoding |
+| **Surface** (per surface; today the class switching in `SurfaceEncoder`) | Whether the surface is sent as patches or video, from its traffic-policy decision; the switch between the two (see "The surface package") | How either renderer works, how the decision was reached |
+| **Patch rendering** (per surface; today most of `SurfaceEncoder`) | What to send next and in what order; its own internal queue of work (see below); lossy and settle areas | The link, other surfaces, video |
+| **Video rendering** (per surface; today the video parts of `SurfaceEncoder`) | The video stream's state: on-demand frames, key frames and recovery, quality | The link, other surfaces, patches |
 | **Patch codec** (today `patch-encoder`, `png`, the worker pools) | Pixels in, bytes out | Which surface, patch order, priority |
+| **Video codec** (today the GStreamer encoder in `native/encoding`) | Frames in, H.264 out | Capture, which surface, priority |
 | **Scheduler** (today `PatchPump` and `FramePacing`) | Which surface's work runs next; when an app gets its frame callback | Why a surface has its priority |
-| **QoS** | Analyzing the stream, estimating the link | Pixels, encoders |
-| **Transport** | Fair queueing across streams, chunking, the socket | What an item contains (patch, key frame, delta) |
+| **Congestion estimation** (today `congestion.ts`) | Estimating the link (bandwidth, round-trip time) from sends and acks; how much may be in flight and how fast to send | Surfaces, priorities, content |
+| **Traffic policy** | Fair-queueing tiers and weights, surface priority (relentless or not), bottleneck (CPU- or link-bound) and its consequences | Pixels, encoders, how the link is estimated |
+| **Transport** | The fair-queueing mechanism across streams (with weights given to it), stream readiness, chunking, the socket | What an item contains (patch, key frame, delta), why a stream has its weight |
 
 Patch codec and patch order are separate concerns: the codec only encodes the pixels it's given; which region is
 captured when, and in what order, is rendering's.
+
+Fair queueing is split the same way: the transport runs the mechanism (weighted round-robin over tiers, round-robin
+over the streams of a tier, because it decides which bytes go out next); traffic policy decides the tiers and weights.
 
 ## What's wrong today
 
@@ -122,14 +136,122 @@ sent. Over WebTransport, with a stream per surface, it would disappear.
 - The fair scheduler decides who gets the next bytes; the framing wraps them in `CHUNK` envelopes.
 - The protocol defines the chunk format; the viewer reassembles.
 
+## Frames
+
+A frame is the surface's content at a point in time: a reference to its buffer, holding it until released. Capture
+produces frames, renderers consume them, and everything in between passes them through without looking inside. So
+capture knows nothing about encoding, and the encoders know nothing about capture.
+
+The need for this isn't a TypeScript problem as such: the constraint (read a compositor-owned buffer in place, release
+it when done) exists in any language. Rust crates would express the handoff as a shared borrowed type checked at
+compile time; here the components between capture and the encoders are TypeScript, so a frame crossing them is an
+opaque handle, and the frame library is the shared type.
+
+### Shape
+
+A small native frame library, plus a TypeScript handle:
+
+- The native library owns the frame object: the buffer description (shared memory or dmabuf planes, size, format,
+  content serial), the reference count, and the release. A release can come from another thread (GStreamer finishes
+  on its own) while wlroots buffers may only be unlocked on the main thread; the library queues the release back to
+  capture's thread. Today `wlr_core_encoder.c` does that by hand. This lifetime logic, the classic source of
+  use-after-free bugs, exists once and is tested by itself.
+- Capture links the library to create frames; the video codec links it to read them. Its header is the one native
+  contract between them.
+- **Each frame carries its own retain and release functions** (its creator's). The library is linked statically into
+  each addon that uses it, and every consumer calls through the frame's own function pointers, so the operations always
+  run in the creator's code (including the hop back to capture's thread), whichever copy of the library the consumer
+  has. No shared library has to be found or loaded at runtime; it's the usual C pattern for objects crossing library
+  boundaries (GStreamer's memory objects work this way). The header has a size or version field next to the type tag,
+  so a mismatched build is caught, not misread.
+- The TypeScript handle exposes what the TypeScript components need without native code: `width`, `height`,
+  `contentSerial`, `release()`, and `readPixels(rect)` for the patch renderer. Handles are type-tagged, so a native
+  consumer rejects anything that isn't a frame.
+- Both renderers consume frames: the patch renderer reads its pixels from a frame instead of calling into the
+  compositor.
+
+### Frames are pulled, on demand
+
+Capture doesn't hand out a frame on every commit. It tells renderers that content changed (with the damage); a
+renderer takes a frame when it decides to render: its stream is ready and something changed. Commits in between never
+become frames. Apps that ignore frame callbacks and commit faster than we pull are fine: we take the latest content
+when ready, and they get their buffers back as newer ones replace them.
+
+### Holding buffers
+
+- **Capture holds the surface's latest buffer** until the app commits a newer one (today `gsurf->buffer` in
+  `wlr_core.c`). That's what lets a patch read the latest pixels whenever it's captured. This hold can last long; that's
+  accepted: nearly all apps use more than one buffer, and it fits how the system works. (An app with a single
+  shared-memory buffer would stall waiting for its release. A GPU compositor copies such buffers on commit instead; we
+  don't.)
+- **A renderer holds a frame only while it reads from it.** When new content arrives, the renderer's next work takes a
+  frame of the new buffer, and the old one is released as soon as the patch or video frame reading it is done. With one
+  encode at a time per surface, at most one frame per surface is held beyond capture's own.
+- New damage always arrives with a new buffer (an app may not write into a buffer it hasn't had back), and a Wayland
+  buffer is a complete image. So rendering's queued regions, which read their pixels when captured, are correct
+  whichever buffer they end up reading.
+- **A frame held too long is logged as a warning.** Nothing today notices a frame that is never released (a hung
+  encoder, a GPU reset): the app eventually runs out of buffers. The frame library records when each frame was taken
+  and warns when one is held longer than a limit (say a second). It can't tell a hang from a slow consumer, and it
+  doesn't need to: either is a bug. It never forces a buffer free (an encoder might still read it).
+
+### The GPU context comes from the frame
+
+Today the video encoder is created with the compositor's EGL handle (`frame_encoder_create(..., westfield_egl)`), so it
+shares the compositor's GPU context. Instead, a frame says which GPU its buffer lives on, and the video codec opens its
+own context there (a dmabuf can be imported by any context on the same device). That removes the last link between the
+video codec and capture. The GPU path can't be tested on the development machine.
+
+## QoS: two concepts
+
+### Congestion estimation
+
+The BBR-style controller (today `congestion.ts`): estimates bandwidth and round-trip time from sends and acks, and says
+how much may be in flight and how fast to send. Its own package with nothing else in it, because it's the most
+intricate logic in the stack. The transport consults it on every send (that's how pacing works); the rest of the system
+reads its estimates.
+
+### Traffic policy
+
+How the link and the CPU are shared between surfaces. Two independent axes, today merged into one verdict by
+`RelentlessMeter`:
+
+- **Priority: is the surface relentless?** A surface that keeps producing work uses whatever resources it's given,
+  which is itself the reason it gets low priority: its encodes always run on the low-priority pool, and it sends in a
+  lower tier. Burst promotion and settling at the lowest priority belong here too.
+- **Bottleneck: is the surface CPU-bound or link-bound?** We consider ourselves CPU-bound until the link becomes the
+  limit. Link-bound means going lossy (spend CPU to save bandwidth). The "link is short" judgment (today
+  `BandwidthMonitor`) is derived from congestion estimation's output, so it is traffic policy, not estimation.
+
+Today `RelentlessMeter` measures "busy" (work produced faster than it's encoded: the CPU side) and "backlogged" (output
+waiting to be sent: the link side) and combines them. Separated, each can be measured and named for what it is, and its
+consequences are visible.
+
+## The surface package
+
+Choosing between patches and video for a surface, and switching, is a concern of its own: when video starts, the patch
+queue is cleared and the whole surface counts as lossy; when it stops, a full lossless image of the surface goes out.
+The two renderer packages never import each other, so a small surface package owns the renderers of a surface,
+creating each when it's needed, and the switch between them.
+
+It receives its surface's traffic-policy decision (priority and bottleneck) through the contracts; from that, plus
+whether a hardware encoder is free and whether the surface is small, it picks patches or video. It doesn't know how the
+decision was reached.
+
 ## Packages and enforced boundaries
 
 The components become workspace packages so the compiler enforces the boundaries, not convention:
 
 - **Scope**: new packages are `@nebula/*`; existing `@gfld/*` names stay.
-- **Shared contracts**: the interfaces and shared types between components live in one contracts package. Implementation
-  packages depend only on it (plus `@gfld/scene-protocol`, npm packages and Node), never on each other. Only `session`
-  imports them all and connects them.
+- **Shared contracts**: the interfaces and shared types between components live in one package,
+  `@nebula/session-contracts` (named for the session side: the viewer gets its own later, and the wire format both
+  share stays in `scene-protocol`). - **Dependencies are fine; inversion where it's genuinely cleaner.** A package may depend on another directly
+  when that is the natural relationship, e.g. a component that owns and creates another (the surface package creates
+  its renderers when it needs them). Dependency inversion (an interface in the contracts, the implementation passed
+  in by `session`) is used where it is the cleaner approach: a shared, session-wide resource (the encoder pools,
+  traffic policy's decisions), or a component that should be swappable and testable on its own (the transport uses
+  the congestion estimator through an interface; its tests pass one that never holds anything back). The goal is few
+  dependencies, not none.
 - **Public API only**: each package's `exports` map exposes only its entry point.
 - **No cycles**: `tsc -b` project references; a circular reference fails the build.
 - **Declared dependencies only**: npm links every workspace package into the shared `node_modules`, so an undeclared
@@ -140,8 +262,26 @@ The components become workspace packages so the compiler enforces the boundaries
 - **Native code** lives with the component that owns the concern. The architecture isn't bent to make tests faster or
   builds simpler.
 - **Boundaries follow dependencies, not categories.** The video encoder is a codec by category, but it reads
-  compositor-owned buffers in place (GPU memory, locked until it's done). No buffer is ever passed between packages to
-  make a categorical split work; see the open question below.
+  compositor-owned buffers in place (GPU memory, locked until it's done). That's why frames are their own component
+  (see "Frames"), not a buffer handed around by workarounds.
+
+## Package list
+
+| Package | Contains | Depends on |
+|---|---|---|
+| `@gfld/scene-protocol` (exists) | Wire format: messages, envelopes, chunks | — |
+| `@nebula/session-contracts` | The interfaces between the packages: the `Frame` handle's TypeScript interface, item and stream interfaces, the congestion estimator's interface, traffic-policy decisions, `Rect`, ... | `scene-protocol` (wire types such as `ViewerAck`) |
+| `@nebula/frames` | The native frame library (frame object, reference count, cross-thread release, held-too-long warning) and the TypeScript handle | contracts |
+| `@nebula/congestion` | The BBR-style estimator, nothing else | contracts |
+| `@nebula/traffic-policy` | Priority (relentless meter, burst promotion, settling), bottleneck (CPU- or link-bound, today's `BandwidthMonitor`), tiers and weights | contracts |
+| `@nebula/scheduler` | Which surface gets the next free patch worker, by tier; frame pacing (frame callbacks gated on stream readiness, rate limits) | contracts |
+| `@nebula/surface` | Patches or video for a surface, and the switch; creates its renderers as needed | contracts, patch-renderer, video-renderer |
+| `@nebula/patch-renderer` | Per surface: damage queue, patch planning and order, lossy and settle areas | contracts |
+| `@nebula/video-renderer` | Per surface: on-demand frames, key frames and recovery, quality | contracts |
+| `@nebula/patch-codec` | PNG, QOI and JPEG with the native patch addon, the worker pools | contracts |
+| `@nebula/video-codec` | The GStreamer encoder (native), the pool of hardware encoder instances, encoder detection | contracts, frames |
+| `@nebula/transport` | Fair-queueing mechanism, stream readiness, chunking, the WebSocket and simulated link, receive decoding | contracts, `scene-protocol` |
+| `@gfld/session` | Capture (wlroots, creates frames), `ViewerHost`, audio, shell, everything else; connects the packages | all of them |
 
 ## How the work is done
 
@@ -156,22 +296,8 @@ The components become workspace packages so the compiler enforces the boundaries
 
 ## Open questions
 
-1. **Video encoding and capture.** The video encoder needs the surface's buffer in place. Options discussed:
-   - It stays with capture in `session` (the wlroots addon it lives in today); rendering asks capture for an encoded
-     frame through an interface (today `SurfaceHost.encodeVideo`) and gets bytes back.
-   - A first-class **frame** concept: capture produces frames (the surface's content at a point in time, holding its
-     buffer until released); encoders consume them; everything between passes the frame through opaquely. The native
-     side already has a neutral buffer description (`struct frame_buffer` in `encoder.h`).
+Settled since the first version of this document: video encoding and capture (a frame component, see "Frames"), what
+QoS owns (two concepts, see "QoS: two concepts"), frames held too long (a warning), the native frame detail (each
+frame carries its own functions), and the package list.
 
-   Not a TypeScript problem as such: the constraint (read a compositor-owned buffer in place, release it when done)
-   exists in any language. Rust crates would express the handoff as a borrowed type checked at compile time; here the
-   components between capture and encoder are TypeScript, and a native buffer crossing them is an opaque value.
-2. **Which component owns what in QoS.** QoS is defined as analyzing the stream and estimating the link. Undecided:
-   - whether the congestion controller's bandwidth estimation (today inside the transport, tied to send pacing) is
-     QoS or transport;
-   - whether surface classification (`RelentlessMeter`: is a surface constantly busy?) and burst promotion are QoS or
-     rendering policy;
-   - where a stream's priority tier comes from.
-3. **The package list.** Provisionally: contracts, QoS, scheduler, rendering, transport, patch codec, plus the existing
-   protocol package and `session`. To be redrawn once 1 and 2 are settled.
-4. **The step plan**, drawn from this document once the above are settled.
+1. **The step plan**, drawn from this document.
