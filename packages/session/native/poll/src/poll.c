@@ -3,8 +3,6 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
-#include <sys/resource.h>
-#include <sys/syscall.h>
 #include <unistd.h>
 #include "node_api.h"
 // avoid depending on libuv
@@ -165,34 +163,6 @@ set_socket_send_buffer(napi_env env, napi_callback_info info) {
     return return_value;
 }
 
-// Sets the nice level of the calling thread only (on Linux setpriority(PRIO_PROCESS, tid) applies to one thread), so
-// background work on a worker thread gives way to everything else. Lowering one's own priority needs no privileges, but
-// it can't be raised again. Returns the thread's id (positive, as in /proc/self/task/<tid>) on success, -errno on
-// failure.
-static napi_value
-set_thread_nice(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value argv[1], return_value;
-    int32_t nice;
-
-    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
-    NAPI_CALL(env, napi_get_value_int32(env, argv[0], &nice))
-
-    int32_t result;
-#ifdef SYS_gettid
-    pid_t tid = (pid_t) syscall(SYS_gettid);
-    if (setpriority(PRIO_PROCESS, (id_t) tid, nice) < 0) {
-        result = -errno;
-    } else {
-        result = (int32_t) tid;
-    }
-#else
-    result = -ENOTSUP;
-#endif
-    NAPI_CALL(env, napi_create_int32(env, result, &return_value))
-    return return_value;
-}
-
 // fd_passing.c
 napi_value fd_unix_connect(napi_env env, napi_callback_info info);
 napi_value fd_accept_connection(napi_env env, napi_callback_info info);
@@ -208,7 +178,6 @@ init(napi_env env, napi_value exports) {
             DECLARE_NAPI_METHOD("stopPoll", stop_poll),
             DECLARE_NAPI_METHOD("setTcpNotSentLowat", set_tcp_not_sent_lowat),
             DECLARE_NAPI_METHOD("setSocketSendBuffer", set_socket_send_buffer),
-            DECLARE_NAPI_METHOD("setThreadNice", set_thread_nice),
             DECLARE_NAPI_METHOD("unixConnect", fd_unix_connect),
             DECLARE_NAPI_METHOD("acceptConnection", fd_accept_connection),
             DECLARE_NAPI_METHOD("sendWithFd", fd_send_with_fd),

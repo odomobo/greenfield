@@ -16,8 +16,7 @@ import {
   SurfaceHost,
   VideoQuality,
 } from '../encoding/SurfaceEncoder.js'
-import { encodePng } from '../encoding/png.js'
-import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool } from '../encoding/PatchWorkerPool.js'
+import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool, encodePng } from '@nebula/patch-codec'
 import type { Rect } from '@nebula/session-contracts'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
 import { ControlMessage, SimulatedLink } from '../viewer/ViewerTransport.js'

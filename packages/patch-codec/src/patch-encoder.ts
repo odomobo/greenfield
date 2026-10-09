@@ -1,12 +1,13 @@
 /**
  * The patch encoder: the QOI cascade (raw / QOI / QOI + LZ4, see "Encoding policy" in ARCHITECTURE.md), and JPEG for lossy
- * patches, native, in the small nebula-patch-addon (native/patch). It is synchronous and meant for worker threads
+ * patches, native, in the small nebula-patch-addon (native/). It is synchronous and meant for worker threads
  * (patch-worker.ts); every thread loads its own instance of the addon.
  */
 import type { EncodedPatch } from '@nebula/session-contracts'
 
 type PatchAddon = {
   encodePatch(rgba: Uint8Array, width: number, height: number, opaque: boolean, jpegQuality: number): EncodedPatch
+  setThreadNice(nice: number): number
 }
 
 /**
@@ -16,6 +17,20 @@ type PatchAddon = {
 export const JPEG_QUALITY = 70
 
 let addon: PatchAddon | undefined
+
+function loadAddon(): PatchAddon {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- the addon is loaded lazily, once per thread
+  addon ??= require('./addons/nebula-patch-addon') as PatchAddon
+  return addon
+}
+
+/**
+ * Set the nice level of the calling thread only (the pool's workers call it first thing). Returns the thread's id (as in
+ * /proc/self/task/<tid>) or, on failure, minus errno. A thread can lower its priority but never raise it again.
+ */
+export function setThreadNice(nice: number): number {
+  return loadAddon().setThreadNice(nice)
+}
 
 /**
  * Encode tightly packed RGBA pixels (8 bit, rows top to bottom). If `opaque` the alpha channel is dropped (the caller
@@ -30,7 +45,5 @@ export function encodePatch(
   opaque: boolean,
   lossy = false,
 ): EncodedPatch {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires -- the addon is loaded lazily, once per thread
-  addon ??= require('../addons/nebula-patch-addon') as PatchAddon
-  return addon.encodePatch(rgba, width, height, opaque, lossy ? JPEG_QUALITY : 0)
+  return loadAddon().encodePatch(rgba, width, height, opaque, lossy ? JPEG_QUALITY : 0)
 }

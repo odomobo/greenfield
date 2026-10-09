@@ -2,6 +2,7 @@
  * nebula-patch-addon: the patch encoder (ROADMAP.md, "Encoding policy": the QOI cascade, and JPEG while bandwidth is
  * short). Called synchronously, from worker threads (the addon is context aware, every worker loads its own instance).
  *
+ *   setThreadNice(nice: number) -> thread id, or -errno (the calling thread only; the workers lower their priority)
  *   encodePatch(rgba: Uint8Array, width, height, opaque: boolean, jpegQuality = 0) -> { format, channels, data }
  *
  * `rgba` is tightly packed RGBA, 8 bits per channel. The cascade:
@@ -16,12 +17,16 @@
  * alpha: u32le length of the color JPEG, the color JPEG, the alpha JPEG). Whichever of the lossless result and the JPEG
  * is smaller is sent: UI content often compresses better losslessly, and then nothing needs refreshing later.
  */
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h> /* jpeglib.h needs FILE */
 #include <setjmp.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <jpeglib.h>
 #include "node_api.h"
 
@@ -302,9 +307,42 @@ encode_patch_js(napi_env env, napi_callback_info info) {
     return result;
 }
 
+// Sets the nice level of the calling thread only (on Linux setpriority(PRIO_PROCESS, tid) applies to one thread), so
+// background work on a worker thread gives way to everything else. Lowering one's own priority needs no privileges, but
+// it can't be raised again. Returns the thread's id (positive, as in /proc/self/task/<tid>) on success, -errno on
+// failure.
+static napi_value
+set_thread_nice(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1], return_value;
+    int32_t nice;
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 1 ||
+        napi_get_value_int32(env, argv[0], &nice) != napi_ok) {
+        napi_throw_error(env, NULL, "setThreadNice(nice: number)");
+        return NULL;
+    }
+
+    int32_t result;
+#ifdef SYS_gettid
+    pid_t tid = (pid_t) syscall(SYS_gettid);
+    if (setpriority(PRIO_PROCESS, (id_t) tid, nice) < 0) {
+        result = -errno;
+    } else {
+        result = (int32_t) tid;
+    }
+#else
+    result = -ENOTSUP;
+#endif
+    if (napi_create_int32(env, result, &return_value) != napi_ok) {
+        return NULL;
+    }
+    return return_value;
+}
+
 static napi_value
 init(napi_env env, napi_value exports) {
-    napi_property_descriptor desc[] = {DECLARE_NAPI_METHOD("encodePatch", encode_patch_js)};
+    napi_property_descriptor desc[] = {DECLARE_NAPI_METHOD("encodePatch", encode_patch_js),
+                                       DECLARE_NAPI_METHOD("setThreadNice", set_thread_nice)};
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;
 }
