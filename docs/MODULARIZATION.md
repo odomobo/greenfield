@@ -455,4 +455,5 @@ updated where it names files or modules that moved; this document's status updat
 
 ## Status
 
-Design and step plan agreed (2026-10-09). No step started.
+Design and step plan agreed (2026-10-09). Steps 0–6 done and merged into the `modularization` branch. Steps 7, 8 and 9
+were started and stopped unfinished (usage limit); they restart from scratch.
