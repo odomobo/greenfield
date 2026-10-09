@@ -13,7 +13,12 @@
  * scrolling a long static document (the encoding end-to-end test of bursts, scripts/e2e/lossy.sh). The app id is then
  * test-page.
  *
- * Usage: busy-client <frames file> [width height [pause file [page]]]
+ * With "flat" (fifth argument) the moving noise has four flat 96x96 squares in it, centered at a quarter and three
+ * quarters of the width and height (top left red, top right green, bottom left blue, bottom right yellow): known colors
+ * that a lossy video stream should show, in a surface that is costly enough to send as patches to be relentless
+ * (scripts/e2e/stream-video.sh).
+ *
+ * Usage: busy-client <frames file> [width height [pause file [page|flat]]]
  */
 #define _GNU_SOURCE
 #include <stdbool.h>
@@ -39,6 +44,7 @@ static const char *pause_file;
 static bool dumped;
 static bool configured;
 static bool page;
+static bool flat;
 /* pixels the page scrolls per frame */
 #define PAGE_SCROLL 12
 static unsigned long frames;
@@ -169,6 +175,17 @@ paint(void) {
             b->pixels[y * width + x] = 0xff000000 | ((v & 0xff) << 16) | (((v * 3) & 0xff) << 8) | ((v * 5) & 0xff);
         }
     }
+    if (flat) {
+        static const uint32_t colors[4] = {0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffff00};
+        for (int i = 0; i < 4; i++) {
+            int cx = (i % 2 ? 3 : 1) * width / 4, cy = (i / 2 ? 3 : 1) * height / 4;
+            for (int y = cy - 48; y < cy + 48; y++) {
+                for (int x = cx - 48; x < cx + 48; x++) {
+                    b->pixels[y * width + x] = colors[i];
+                }
+            }
+        }
+    }
     b->busy = true;
     struct wl_callback *callback = wl_surface_frame(surface);
     wl_callback_add_listener(callback, &frame_listener, NULL);
@@ -249,6 +266,7 @@ main(int argc, char **argv) {
     }
     if (argc >= 6) {
         page = strcmp(argv[5], "page") == 0;
+        flat = strcmp(argv[5], "flat") == 0;
     }
     display = wl_display_connect(NULL);
     if (!display) {

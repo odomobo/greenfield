@@ -106,7 +106,9 @@ own user with that password. The dev login helper has no PAM and no privilege se
 refuses to start on non-loopback addresses, as root, or without a password of at least 8 characters. Its options
 (`--help`): the `--dev-*` experiments and test settings (`--dev-time-scale`, `--dev-link-kbps`, `--dev-patch-order`,
 `--dev-patch-shape`, `--dev-expired-password`: every sign-in has to change its expired password, with pam_unix's
-prompts; the new one isn't kept), `--encoder` / `--render-device` / `--site-config`, `--runtime-dir` (default
+prompts; the new one isn't kept), `--dev-software-encoder` (video from GStreamer's `x264enc` on the CPU, in the layout
+of the hardware encoders, for shared memory buffers only: tests the video path on a machine without a GPU,
+`scripts/e2e/stream-video.sh`; never a site setting, `encoder = x264` is rejected), `--encoder` / `--render-device` / `--site-config`, `--runtime-dir` (default
 `$XDG_RUNTIME_DIR/nebula-dev-<port>`), and the web process's `--cert`, `--key`, `--state-dir` (default
 `~/.local/state/greenfield-dev`), `--hide-hostname`, `--allowed-origin`, which it passes on. The production helper
 (`nebula-login`) and the web process take no dev options.

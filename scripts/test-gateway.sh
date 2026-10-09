@@ -23,6 +23,8 @@
 #                            pointer puts it and ends where it was dragged to.
 #   scripts/e2e/busy.sh      a relentless client (a small test client built with gcc, committing a full frame on every
 #                            frame callback) is shown as patches and paced, and foot stays responsive meanwhile.
+#   scripts/e2e/stream-video.sh  the server's video path end to end: the gateway with the software encoder (x264, --dev-software-encoder,
+#                            test only), a busy client with known colors streams as video, and the viewer decodes frames and shows its colors.
 #   scripts/e2e/audio.sh     the session's audio: packets, decoding, the mute toggle, isolation of its PipeWire.
 #   scripts/e2e/lossy.sh     the busy client on a simulated 8 Mbit/s link: it goes lossy (JPEG patches), and once it stops
 #                            drawing its lossy areas are sent again losslessly (the viewer shows its last frame exactly);
@@ -44,7 +46,7 @@
 #
 #   scripts/test-gateway.sh
 # The first of the ports used can be changed with GATEWAY_PORT (default 8098; auth uses it, desktop
-# and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen, decorations eighteen, x11-move twenty, audio twenty-two, lossy twenty-four, password twenty-six, tray twenty-eight, taskbar thirty).
+# and x11 the ones two and four after it, clipboard six, dnd eight, hidpi ten, input twelve, busy fourteen, video sixteen, decorations eighteen, x11-move twenty, audio twenty-two, lossy twenty-four, password twenty-six, tray twenty-eight, taskbar thirty, stream-video thirty-two).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
@@ -63,7 +65,7 @@ TIMES="$(mktemp)"
 pids=()
 names=()
 i=0
-for part in auth desktop x11 clipboard dnd hidpi input busy video decorations x11-move audio lossy password tray taskbar; do
+for part in auth desktop x11 clipboard dnd hidpi input busy video decorations x11-move audio lossy password tray taskbar stream-video; do
   port=$((BASE_PORT + i * 2))
   i=$((i + 1))
   # prefix every line with the script's name; the exit status is the script's, not sed's
@@ -102,6 +104,6 @@ if [ "$seconds" -gt $((LIMIT_SECONDS * 100)) ]; then
   echo "SLOW: the suite took over $LIMIT_SECONDS s: it needs an optimization pass (start with the slowest scripts above)" >&2
 fi
 if [ "$status" = 0 ]; then
-  echo "PASS: sign-in, isolation checks, session survival, desktop shell, window management, reattaching, takeover, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, lossy encoding on a slow link, the video path, audio, changing an expired password, the system tray and the taskbar"
+  echo "PASS: sign-in, isolation checks, session survival, desktop shell, window management, reattaching, takeover, logging out, X11 apps, the clipboard, drag and drop, HiDPI, scrolling, X11 apps ending at logout, a busy client, lossy encoding on a slow link, the video path, the server's video path end to end, audio, changing an expired password, the system tray and the taskbar"
 fi
 exit "$status"

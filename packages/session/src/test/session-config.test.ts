@@ -6,12 +6,30 @@ import { formatSiteSettings, parseSiteSettings } from '../site-settings'
 test('session config: defaults without devFlags', () => {
   const { config, devFlags } = parseSessionConfig('{"version":1,"listenFd":4,"extra":true}')
   assert.equal(config.listenFd, 4)
-  assert.deepEqual(devFlags, { timeScale: 1, linkKbps: 0, patchOrder: 'oldest', patchShape: 'bands' })
+  assert.deepEqual(devFlags, {
+    timeScale: 1,
+    linkKbps: 0,
+    patchOrder: 'oldest',
+    patchShape: 'bands',
+    softwareEncoder: false,
+  })
 })
 
 test('session config: dev flags are filled in individually', () => {
   const { devFlags } = parseSessionConfig('{"version":1,"listenFd":4,"devFlags":{"timeScale":3,"patchShape":"tiles"}}')
-  assert.deepEqual(devFlags, { timeScale: 3, linkKbps: 0, patchOrder: 'oldest', patchShape: 'tiles' })
+  assert.deepEqual(devFlags, {
+    timeScale: 3,
+    linkKbps: 0,
+    patchOrder: 'oldest',
+    patchShape: 'tiles',
+    softwareEncoder: false,
+  })
+})
+
+test('session config: the software encoder is a dev flag, a boolean', () => {
+  const { devFlags } = parseSessionConfig('{"version":1,"listenFd":4,"devFlags":{"softwareEncoder":true}}')
+  assert.equal(devFlags.softwareEncoder, true)
+  assert.throws(() => parseSessionConfig('{"version":1,"listenFd":4,"devFlags":{"softwareEncoder":"yes"}}'))
 })
 
 test('session config: invalid records are rejected', () => {

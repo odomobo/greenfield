@@ -16,7 +16,7 @@ import { Apps, KILL_AFTER_MS } from './wlroots/Apps.js'
 import { createServer, IncomingMessage, Server } from 'node:http'
 import { Socket } from 'node:net'
 import { AudioService } from './audio/service'
-import { resolveEncoder } from './encoder'
+import { resolveEncoder, SessionEncoder } from './encoder'
 import { fdPassing, Kind, RecordChannel } from './login-protocol'
 import { DEFAULT_SITE_SETTINGS_PATH, DevFlags, readSessionConfig, SessionConfig } from './session-config'
 import { readSiteSettings } from './site-settings'
@@ -42,13 +42,18 @@ readSessionConfig()
 async function start(
   config: SessionConfig,
   siteSettingsPath: string,
-  { timeScale, linkKbps, patchOrder, patchShape }: DevFlags,
+  { timeScale, linkKbps, patchOrder, patchShape, softwareEncoder }: DevFlags,
 ) {
   // an inherited fd isn't close-on-exec: before we start anything, or it would keep the socket open after we close it
   fdPassing().setCloseOnExec(config.listenFd)
   const settings = readSiteSettings(siteSettingsPath)
   // GStreamer is only ever run here, as the user (never in the privileged login helper)
-  const encoder = resolveEncoder(settings.encoder, (message) => logger.info(message))
+  const encoder: SessionEncoder | 'x264' = softwareEncoder
+    ? 'x264'
+    : resolveEncoder(settings.encoder, (message) => logger.info(message))
+  if (softwareEncoder) {
+    logger.info('Video encoder: x264, in software (--dev-software-encoder).')
+  }
   const { audioDir } = setupSessionEnvironment()
 
   const { viewerHost, apps } = startWlrootsCompositor({

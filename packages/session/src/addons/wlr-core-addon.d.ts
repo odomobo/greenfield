@@ -176,7 +176,7 @@ declare namespace wlrCore {
   export function provideFiles(list: string): void
 
   export function createFrameEncoder(
-    encoderType: 'nvh264' | 'vaapih264',
+    encoderType: 'nvh264' | 'vaapih264' | 'x264',
     frameEncoded: (sample: Buffer | undefined) => void,
   ): FrameEncoder
 

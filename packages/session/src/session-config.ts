@@ -37,9 +37,17 @@ export type DevFlags = {
   linkKbps: number
   patchOrder: 'oldest' | 'random'
   patchShape: 'bands' | 'tiles'
+  /** video from the software encoder x264 (shared memory buffers only), whatever the site settings say */
+  softwareEncoder: boolean
 }
 
-export const DEFAULT_DEV_FLAGS: DevFlags = { timeScale: 1, linkKbps: 0, patchOrder: 'oldest', patchShape: 'bands' }
+export const DEFAULT_DEV_FLAGS: DevFlags = {
+  timeScale: 1,
+  linkKbps: 0,
+  patchOrder: 'oldest',
+  patchShape: 'bands',
+  softwareEncoder: false,
+}
 
 export type SessionConfig = {
   version: 1
@@ -97,6 +105,12 @@ export function parseSessionConfig(text: string): { config: SessionConfig; devFl
         throw new Error('invalid devFlags.patchShape')
       }
       devFlags.patchShape = dev.patchShape
+    }
+    if (dev.softwareEncoder !== undefined) {
+      if (typeof dev.softwareEncoder !== 'boolean') {
+        throw new Error('invalid devFlags.softwareEncoder')
+      }
+      devFlags.softwareEncoder = dev.softwareEncoder
     }
   }
   return { config: value as SessionConfig, devFlags }

@@ -30,6 +30,10 @@
  * Quality is fixed and the bitrate variable (constant QP, no bitrate cap): higher normally, lower while the link to the
  * viewer is short of bandwidth (frame_encoder_set_quality). Under contention the frame rate drops instead (the
  * surface's slots). The encoder element is named "encoder" in every pipeline, so its QP can be changed while it runs.
+ *
+ * Test-only exception: the "x264" encoder (--dev-software-encoder) is software, for machines without a GPU. It takes
+ * shared memory buffers only and has no GL: the padding and the alpha extraction that the shader does are done on the
+ * CPU (software_sample), the rest of the stream layout (BT.601 limited range, High profile, byte stream) is the same.
  */
 
 /* The QP (0-51, lower is better quality and more bitrate) of each quality, for the color and the alpha stream. */
@@ -110,6 +114,8 @@ struct frame_encoder_description {
     const char *opaque_pipeline_definition;
     const char *alpha_pipeline_definition;
     bool split_alpha;
+    // software encoder (test only): no GL, the frames are padded (and the alpha extracted) on the CPU
+    bool software;
     // the encoder element's property that holds its constant QP
     const char *qp_property;
 };
@@ -436,6 +442,56 @@ shm_frame_buffer_to_new_gst_frame_sample(const struct frame_buffer *frame_buffer
     return sample;
 }
 
+/*
+ * Software encoder: the frame in the coded size, as the GL shader makes it. The image sits in the bottom right corner,
+ * the padding is black. The alpha stream's frame has the image's alpha in its color channels (a buffer without alpha
+ * is opaque).
+ */
+static inline GstSample *
+software_sample(const struct frame_buffer *frame_buffer, const struct shmbuf_support_format *shmbuf_support_format,
+                const uint32_t coded_width, const uint32_t coded_height, const bool is_alpha) {
+    const gsize size = (gsize) coded_width * coded_height * 4;
+    GstBuffer *buffer = gst_buffer_new_allocate(NULL, size, NULL);
+    GstMapInfo map;
+    gst_buffer_map(buffer, &map, GST_MAP_WRITE);
+    memset(map.data, 0, size);
+    const uint32_t offset_x = coded_width - frame_buffer->width;
+    const uint32_t offset_y = coded_height - frame_buffer->height;
+    const bool has_alpha_byte = shmbuf_support_format->gst_video_format == GST_VIDEO_FORMAT_BGRA;
+    for (uint32_t y = 0; y < coded_height; y++) {
+        uint8_t *out = map.data + (gsize) y * coded_width * 4;
+        for (uint32_t x = 0; x < coded_width; x++) {
+            out[x * 4 + 3] = 255;
+        }
+        if (y < offset_y) {
+            continue;
+        }
+        const uint8_t *in = (const uint8_t *) frame_buffer->impl.shm.buffer_data +
+                            (gsize) (y - offset_y) * frame_buffer->impl.shm.buffer_stride;
+        for (uint32_t x = 0; x < frame_buffer->width; x++) {
+            uint8_t *pixel = out + (offset_x + x) * 4;
+            if (is_alpha) {
+                const uint8_t alpha = has_alpha_byte ? in[x * 4 + 3] : 255;
+                pixel[0] = pixel[1] = pixel[2] = alpha;
+            } else {
+                memcpy(pixel, in + x * 4, 3);
+            }
+        }
+    }
+    gst_buffer_unmap(buffer, &map);
+    gst_buffer_add_video_meta(buffer, GST_VIDEO_FRAME_FLAG_NONE, GST_VIDEO_FORMAT_BGRx, coded_width, coded_height);
+    GstCaps *caps = gst_caps_new_simple("video/x-raw",
+                                        "framerate", GST_TYPE_FRACTION, FPS, 1,
+                                        "format", G_TYPE_STRING, "BGRx",
+                                        "width", G_TYPE_INT, coded_width,
+                                        "height", G_TYPE_INT, coded_height,
+                                        NULL);
+    GstSample *sample = gst_sample_new(buffer, caps, NULL, NULL);
+    gst_caps_unref(caps);
+    gst_buffer_unref(buffer);
+    return sample;
+}
+
 static inline void
 gst_frame_encoder_pipeline_coded_size(const struct frame_encoder_description *frame_encoder_description,
                                       const u_int32_t width,
@@ -472,6 +528,10 @@ gst_frame_encoder_pipeline_config(struct gst_frame_encoder_pipeline *gst_frame_e
     gfloat scale_x, scale_y;
     GstElement *shader_element, *shader_capsfilter;
     graphene_matrix_t *graphene_matrix;
+
+    if (gst_frame_encoder_pipeline->gst_frame_encoder->description->software) {
+        return;
+    }
 
     scale_x = (gfloat) gst_frame_encoder_pipeline->width / (gfloat) gst_frame_encoder_pipeline->coded_width;
     scale_y = (gfloat) gst_frame_encoder_pipeline->height / (gfloat) gst_frame_encoder_pipeline->coded_height;
@@ -755,17 +815,19 @@ gst_frame_encoder_pipeline_create(struct gst_frame_encoder *gst_encoder, const b
         g_error("BUG? Failed to create encoding pipeline from it's definition: %s", parse_error->message);
     }
 
-    GstElement *glshader = gst_bin_get_by_name(GST_BIN(gst_frame_encoder_pipeline->pipeline), "shader");
-    if (glshader == NULL) {
-        g_error("Can't get element with name 'shader' from encoding pipeline. Missing gstreamer plugin element?");
+    if (!description->software) {
+        GstElement *glshader = gst_bin_get_by_name(GST_BIN(gst_frame_encoder_pipeline->pipeline), "shader");
+        if (glshader == NULL) {
+            g_error("Can't get element with name 'shader' from encoding pipeline. Missing gstreamer plugin element?");
+        }
+        if (is_alpha) {
+            g_object_set(glshader, "fragment", alpha_fragment_shader, NULL);
+        } else {
+            g_object_set(glshader, "fragment", opaque_fragment_shader, NULL);
+        }
+        g_object_set(glshader, "vertex", vertex_shader, NULL);
+        gst_object_unref(glshader);
     }
-    if (is_alpha) {
-        g_object_set(glshader, "fragment", alpha_fragment_shader, NULL);
-    } else {
-        g_object_set(glshader, "fragment", opaque_fragment_shader, NULL);
-    }
-    g_object_set(glshader, "vertex", vertex_shader, NULL);
-    gst_object_unref(glshader);
     gst_frame_encoder_pipeline_set_qp(gst_frame_encoder_pipeline, gst_encoder->frame_encoder->qp);
 
     app_sink = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(gst_frame_encoder_pipeline->pipeline), "sink"));
@@ -954,14 +1016,19 @@ gst_frame_encoder_encode_shm(struct gst_frame_encoder *gst_frame_encoder, const 
     g_mutex_lock(&gst_frame_encoder->frame_encoder->results_mutex);
     g_queue_push_tail(gst_frame_encoder->frame_encoder->frame_encoding_results, frame_encoding_result);
     g_mutex_unlock(&gst_frame_encoder->frame_encoder->results_mutex);
-    opaque_sample = shm_frame_buffer_to_new_gst_frame_sample(frame_buffer, shmbuf_support_format, sample_caps);
+    const bool software = gst_frame_encoder->description->software;
+    opaque_sample = software
+                    ? software_sample(frame_buffer, shmbuf_support_format, coded_width, coded_height, false)
+                    : shm_frame_buffer_to_new_gst_frame_sample(frame_buffer, shmbuf_support_format, sample_caps);
 
     gst_frame_encoder_pipeline_encode(gst_frame_encoder_get_pipeline(gst_frame_encoder, false), opaque_sample,
                                       frame_encoding_result->props.buffer_content_serial);
     gst_sample_unref(opaque_sample);
 
     if (has_alpha) {
-        alpha_sample = shm_frame_buffer_to_new_gst_frame_sample(frame_buffer, shmbuf_support_format, sample_caps);
+        alpha_sample = software
+                       ? software_sample(frame_buffer, shmbuf_support_format, coded_width, coded_height, true)
+                       : shm_frame_buffer_to_new_gst_frame_sample(frame_buffer, shmbuf_support_format, sample_caps);
         gst_frame_encoder_pipeline_encode(gst_frame_encoder_get_pipeline(gst_frame_encoder, true), alpha_sample,
                                           frame_encoding_result->props.buffer_content_serial);
         gst_sample_unref(alpha_sample);
@@ -1129,7 +1196,7 @@ frame_encoder_description_supports_buffer(const struct frame_encoder_description
 
     // small buffers are padded to the encoder's minimum size (see gst_frame_encoder_pipeline_coded_size)
     if (frame_buffer->type == DMA) {
-        return true;
+        return !frame_encoder_description->software;
     }
 
     if (frame_buffer->type == SHM) {
@@ -1141,6 +1208,15 @@ frame_encoder_description_supports_buffer(const struct frame_encoder_description
 
     return false;
 }
+
+// the software encoder: BT.601 limited range, High profile, byte stream with access unit delimiters, one key frame
+#define X264_PIPELINE "appsrc name=src format=3 stream-type=0 ! " \
+                      "videoconvert ! video/x-raw,format=I420,colorimetry=bt601 ! " \
+                      "queue silent=true ! " \
+                      "x264enc name=encoder pass=quant tune=zerolatency speed-preset=superfast bframes=0 " \
+                      "key-int-max=1000000 byte-stream=true aud=true ! " \
+                      "video/x-h264,profile=high,stream-format=byte-stream,alignment=au ! " \
+                      "appsink name=sink"
 
 static const struct frame_encoder_description frame_encoder_descriptions[] = {
         {
@@ -1209,6 +1285,21 @@ static const struct frame_encoder_description frame_encoder_descriptions[] = {
                 .height_multiple = 128,
                 .min_width = 128,
                 .min_height = 128,
+        },
+        {
+                // test only (--dev-software-encoder): x264 on the CPU, in the layout of the hardware encoders
+                .name = "x264",
+                .frame_encoding_type = h264,
+                .opaque_pipeline_definition = X264_PIPELINE,
+                .alpha_pipeline_definition = X264_PIPELINE,
+                .split_alpha = true,
+                .software = true,
+                // constant QP (pass=quant), like the hardware encoders
+                .qp_property = "quantizer",
+                .width_multiple = 16,
+                .height_multiple = 16,
+                .min_width = 16,
+                .min_height = 16,
         }
 };
 
