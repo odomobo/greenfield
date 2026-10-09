@@ -325,8 +325,10 @@ The components become workspace packages so the compiler enforces the boundaries
   `master` when done), and tests after each merge (rebuild, all tests, compare test counts with the agent's report),
   run in parallel where the dependencies allow, at most three at a time (they touch overlapping files: the transport,
   `SurfaceEncoder`, the CMake build).
-- In a worktree: `npm install` at the worktree root first (new workspace packages must be linked there, not resolved
-  from the main checkout's `node_modules`), then `make all`.
+- In a worktree: `git submodule update --init` (wlroots), copy `packages/gatekeeper/target` from the main checkout
+  (the e2e tests need `nebula-dev-login`; the gatekeeper isn't changed), `npm install` at the worktree root (new
+  workspace packages must be linked there, not resolved from the main checkout's `node_modules`), then `make all`.
+  Each agent runs `scripts/test-gateway.sh` with its own `GATEWAY_PORT` (it uses about 32 ports from there).
 - Agents take obvious simple approaches for open details, but stop and report "not completed" on a real design gap;
   steps that depend on a stopped step don't start.
 - `CLAUDE.md` applies: tests under a minute with timeouts of about two minutes, never kill processes by name.
