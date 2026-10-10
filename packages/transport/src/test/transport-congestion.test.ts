@@ -5,7 +5,8 @@ import { WebSocket } from 'ws'
 import { decodeEnvelope, encodeAck, encodePatch, Patch, PatchFormat } from '@gfld/scene-protocol'
 import { CongestionController } from '@nebula/congestion'
 import type { Congestion } from '@nebula/session-contracts'
-import { WebSocketViewerTransport } from '../ViewerTransport.js'
+import { WebSocketViewerTransport } from '../index.js'
+import { TIERS } from './tiers.js'
 
 /** Just enough of a ws WebSocket: sends are handed to the kernel at once (their callbacks run right away). */
 class FakeWebSocket extends EventEmitter {
@@ -57,6 +58,7 @@ function setup(congestion?: Congestion) {
   const clock = { now: () => time, advance: (ms: number) => (time += ms) }
   const controller = new CongestionController({ now: time })
   const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, {
+    tiers: TIERS,
     now: clock.now,
     congestion: congestion ?? controller,
     // these tests are about the window, not chunking (see SendScheduler.test.ts)
@@ -117,7 +119,11 @@ test('a paced item goes out when it is due, by a timer', async () => {
     onAck: () => undefined,
     setDataWaiting: () => undefined,
   }
-  const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, { now: () => Date.now(), congestion })
+  const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, {
+    now: () => Date.now(),
+    congestion,
+    tiers: TIERS,
+  })
   for (let i = 1; i <= 2; i++) {
     transport.send({ priority: 'patch', surface: 's', tier: 'normal', patch: patch(i, 100) })
   }

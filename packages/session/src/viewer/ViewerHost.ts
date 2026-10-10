@@ -4,9 +4,12 @@ import { createLogger } from '../Logger.js'
 import { onViewerFeedback, setViewerAttached } from '../FramePacing.js'
 import type { EncodingSink } from '../encoding/SurfaceEncoder.js'
 import { AudioPacket, CLOSE_LOGGED_OUT, CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
-import { ControlMessage, SimulatedLink, ViewerTransport, WebSocketViewerTransport } from './ViewerTransport.js'
+import { ControlMessage, SimulatedLink, ViewerTransport, WebSocketViewerTransport } from '@nebula/transport'
+import { LinkJudgment } from '../qos/link-judgment.js'
+import { SEND_TIERS } from '../qos/send-tiers.js'
 
 const logger = createLogger('viewer-host')
+const transportLogger = createLogger('viewer-transport')
 
 /**
  * The window scene of the server-side compositor, as seen by the viewer host. Implemented in
@@ -71,6 +74,8 @@ export interface AudioEndpoint {
  */
 export class ViewerHost {
   private transport?: ViewerTransport
+  /** the current transport's link, judged */
+  private linkJudgment?: LinkJudgment
   private shellEndpoint?: ShellEndpoint
   private audioEndpoint?: AudioEndpoint
   /** what the surface contents send into (the current transport, if any) */
@@ -87,8 +92,8 @@ export class ViewerHost {
     private readonly options: { link?: SimulatedLink } = {},
   ) {
     const isAttached = () => this.transport !== undefined
-    const isBandwidthLimited = () => this.transport?.bandwidthLimited ?? false
-    const linkBandwidth = () => this.transport?.linkBandwidth
+    const isBandwidthLimited = () => (this.transport ? (this.linkJudgment?.bandwidthLimited ?? false) : false)
+    const linkBandwidth = () => (this.transport ? this.linkJudgment?.linkBandwidth : undefined)
     this.sink = {
       get active() {
         return isAttached()
@@ -99,11 +104,13 @@ export class ViewerHost {
       get linkBandwidth() {
         return linkBandwidth()
       },
-      queuedBytes: (surfaceKey) => this.transport?.queuedBytes(surfaceKey) ?? 0,
-      streamReady: (surfaceKey, exceptSettling) => this.transport?.streamReady(surfaceKey, exceptSettling) ?? true,
+      // settling patches never count as backlog
+      queuedBytes: (surfaceKey) => this.transport?.unsentBytes(surfaceKey, 'settle') ?? 0,
+      streamReady: (surfaceKey, exceptSettling) =>
+        this.transport?.streamReady(surfaceKey, exceptSettling ? 'settle' : undefined) ?? true,
       sendFrame: (surfaceKey, frame, surfaceClass, done) => {
         if (this.transport) {
-          this.transport.send({ priority: 'frame', surface: surfaceKey, frame, surfaceClass, done })
+          this.transport.send({ priority: 'frame', surface: surfaceKey, frame, tier: surfaceClass, done })
         } else {
           done(false)
         }
@@ -150,11 +157,14 @@ export class ViewerHost {
       this.detachViewer(CLOSE_TAKEN_OVER, clientIP.slice(0, 64))
     }
 
+    const congestion = new CongestionController({ now: performance.now() })
     const transport = new WebSocketViewerTransport(ws, {
-      congestion: new CongestionController({ now: performance.now() }),
+      congestion,
+      tiers: SEND_TIERS,
       link: this.options.link,
-      unencodedBytes: () => this.content.unencodedBytes?.() ?? 0,
+      logger: transportLogger,
     })
+    this.linkJudgment = new LinkJudgment(transport, congestion, () => this.content.unencodedBytes?.() ?? 0)
     this.transport = transport
     transport.onMessage = (message) => this.onMessage(transport, message)
     transport.onFileChunk = (id, data) => this.scene.handleFileChunk?.(id, data)

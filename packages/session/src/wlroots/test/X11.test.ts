@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ControlMessage } from '../../viewer/ViewerTransport.js'
+import { ControlMessage } from '@nebula/transport'
 import { WlrCompositor, WlrNative } from '../WlrCompositor.js'
 
 type Toplevel = {

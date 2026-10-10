@@ -1,7 +1,5 @@
 #include <stdlib.h>
 #include <errno.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include "node_api.h"
@@ -118,51 +116,6 @@ stop_poll(napi_env env, napi_callback_info info) {
     return return_value;
 }
 
-// Limits how much unsent data a TCP socket buffers in the kernel (TCP_NOTSENT_LOWAT), so frames wait in our priority
-// queue instead of piling data up in the socket. Returns 0 on success, errno otherwise.
-static napi_value
-set_tcp_not_sent_lowat(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value argv[2], return_value;
-    int32_t fd, bytes;
-
-    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
-    NAPI_CALL(env, napi_get_value_int32(env, argv[0], &fd))
-    NAPI_CALL(env, napi_get_value_int32(env, argv[1], &bytes))
-
-    int result = 0;
-#ifdef TCP_NOTSENT_LOWAT
-    if (setsockopt(fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &bytes, sizeof(bytes)) < 0) {
-        result = errno;
-    }
-#else
-    result = ENOTSUP;
-#endif
-    NAPI_CALL(env, napi_create_int32(env, result, &return_value))
-    return return_value;
-}
-
-// Limits how much a socket buffers in the kernel (SO_SNDBUF). For the Unix socket between a session and the gateway
-// this keeps unsent frames in the session's own priority queue instead of the kernel. Returns 0 on success, errno
-// otherwise.
-static napi_value
-set_socket_send_buffer(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value argv[2], return_value;
-    int32_t fd, bytes;
-
-    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
-    NAPI_CALL(env, napi_get_value_int32(env, argv[0], &fd))
-    NAPI_CALL(env, napi_get_value_int32(env, argv[1], &bytes))
-
-    int result = 0;
-    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes)) < 0) {
-        result = errno;
-    }
-    NAPI_CALL(env, napi_create_int32(env, result, &return_value))
-    return return_value;
-}
-
 // fd_passing.c
 napi_value fd_unix_connect(napi_env env, napi_callback_info info);
 napi_value fd_accept_connection(napi_env env, napi_callback_info info);
@@ -176,8 +129,6 @@ init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
             DECLARE_NAPI_METHOD("startPoll", start_poll),
             DECLARE_NAPI_METHOD("stopPoll", stop_poll),
-            DECLARE_NAPI_METHOD("setTcpNotSentLowat", set_tcp_not_sent_lowat),
-            DECLARE_NAPI_METHOD("setSocketSendBuffer", set_socket_send_buffer),
             DECLARE_NAPI_METHOD("unixConnect", fd_unix_connect),
             DECLARE_NAPI_METHOD("acceptConnection", fd_accept_connection),
             DECLARE_NAPI_METHOD("sendWithFd", fd_send_with_fd),

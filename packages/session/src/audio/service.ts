@@ -11,7 +11,7 @@
  */
 import { createLogger } from '../Logger.js'
 import type { AudioEndpoint } from '../viewer/ViewerHost.js'
-import type { ControlMessage } from '../viewer/ViewerTransport.js'
+import type { ControlMessage } from '@nebula/transport'
 import type { AudioPacket } from '../viewer/protocol.js'
 import { ChildProcess, spawn } from 'node:child_process'
 import { findProgram } from '../shell/desktop-entries'

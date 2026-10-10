@@ -1,4 +1,4 @@
-.PHONY: all check lint test scene-protocol session-contracts patch-codec frames congestion session viewer gatekeeper clean
+.PHONY: all check lint test scene-protocol session-contracts patch-codec frames congestion transport session viewer gatekeeper clean
 
 all: session viewer gatekeeper
 
@@ -24,7 +24,12 @@ frames: session-contracts
 congestion: session-contracts
 	cd packages/congestion && npm run build
 
-session: session-contracts frames congestion patch-codec
+# The connection to a viewer: fair queueing, stream readiness, chunking, the WebSocket (with its native socket tuning).
+# Its tests use the congestion estimator.
+transport: session-contracts congestion
+	cd packages/transport && npm run build
+
+session: session-contracts frames congestion patch-codec transport
 	cd packages/session && rm -rf dist types && npm run build:native && npx tsc -b && node dist/build-dconf.js && node dist/build-audio.js
 
 viewer: scene-protocol patch-codec
@@ -41,6 +46,7 @@ lint:
 	cd packages/frames && npm run lint
 	cd packages/congestion && npm run lint
 	cd packages/patch-codec && npm run lint
+	cd packages/transport && npm run lint
 	cd packages/session && npm run lint
 
 test:
@@ -48,6 +54,7 @@ test:
 	cd packages/frames && npm test
 	cd packages/congestion && npm test
 	cd packages/patch-codec && npm test
+	cd packages/transport && npm test
 	cd packages/session && npm test
 	cd packages/viewer && npm test
 
@@ -64,6 +71,7 @@ clean:
 	rm -rf packages/congestion/dist packages/congestion/types packages/congestion/tsconfig.tsbuildinfo
 	rm -rf packages/frames/build packages/frames/dist packages/frames/types packages/frames/tsconfig.tsbuildinfo
 	rm -rf packages/patch-codec/build packages/patch-codec/dist packages/patch-codec/types packages/patch-codec/tsconfig.tsbuildinfo
+	rm -rf packages/transport/build packages/transport/dist packages/transport/types packages/transport/tsconfig.tsbuildinfo
 	rm -rf packages/session/build packages/session/dist packages/session/types
 	rm -rf packages/viewer/dist
 	cd packages/gatekeeper && cargo clean

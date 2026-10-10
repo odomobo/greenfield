@@ -6,7 +6,7 @@
  */
 import { createLogger } from '../Logger.js'
 import type { ShellEndpoint } from '../viewer/ViewerHost.js'
-import type { ControlMessage } from '../viewer/ViewerTransport.js'
+import type { ControlMessage } from '@nebula/transport'
 import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { DesktopEntry, findProgram, loadDesktopEntries, parseExec, terminalCommand } from './desktop-entries'

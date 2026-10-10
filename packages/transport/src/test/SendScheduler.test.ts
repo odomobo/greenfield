@@ -4,7 +4,8 @@ import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
 import { ChunkAssembler, decodeChunk, decodeEnvelope, isChunkEnvelope, Patch, PatchFormat } from '@gfld/scene-protocol'
 import type { Congestion, SendTier } from '@nebula/session-contracts'
-import { CHUNK_MAX_BYTES, CHUNK_MIN_BYTES, CHUNK_MS, WebSocketViewerTransport } from '../../viewer/ViewerTransport.js'
+import { CHUNK_MAX_BYTES, CHUNK_MIN_BYTES, CHUNK_MS, WebSocketViewerTransport } from '../index.js'
+import { TIERS } from './tiers.js'
 import { CHUNK_HEADER_BYTES } from '@gfld/scene-protocol'
 
 /** Just enough of a ws WebSocket: sends complete when the test says so. */
@@ -53,6 +54,7 @@ function setup(bandwidthEstimate?: number) {
   // These tests are about the order of sending when the network is the bottleneck, not about congestion control: one
   // data item at a time, the next once the socket took the last (the test's flush()).
   const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, {
+    tiers: TIERS,
     congestion: { ...oneAtATime(ws), bandwidthEstimate },
   })
   const queue = (surface: string, tier: SendTier, serial: number, bytes: number) =>
@@ -155,9 +157,9 @@ test("a surface's settling patch followed by damage waits in the damage's tier (
   const { transport, queue, drain, block } = setup()
   block()
   queue('a', 'settle', SETTLE, 4000)
-  assert.equal(transport.queuedBytes('a'), 0, 'settling never counts as backlog')
+  assert.equal(transport.unsentBytes('a', 'settle'), 0, 'settling never counts as backlog')
   queue('a', 'normal', NORMAL, 100)
-  assert.ok(transport.queuedBytes('a') > 100)
+  assert.ok(transport.unsentBytes('a', 'settle') > 100)
   for (let i = 0; i < 20; i++) {
     queue('x', 'settle', SETTLE + 1 + i, 4000)
   }
@@ -395,7 +397,7 @@ test("nothing queued is dropped; an item's done comes with its last chunk", () =
   send(STREAMING, 50_000)
   send(STREAMING + 1, 50_000)
   ws.sent.shift()!.callback()
-  assert.ok(transport.queuedBytes('a') > 85_000)
+  assert.ok(transport.unsentBytes('a', 'settle') > 85_000)
   // the chunks go one by one (the first is on the socket already); done only once the last is written
   let chunks = 0
   while (ws.sent.length && done.length === 0) {
@@ -409,7 +411,7 @@ test("nothing queued is dropped; an item's done comes with its last chunk", () =
     [STREAMING + 1],
   )
   assert.deepEqual(done[1], { serial: STREAMING + 1, sent: true })
-  assert.equal(transport.queuedBytes('a'), 0)
+  assert.equal(transport.unsentBytes('a', 'settle'), 0)
 })
 
 test('closing reports a started item and the queued ones unsent, and only then', () => {
@@ -436,7 +438,7 @@ test('closing reports a started item and the queued ones unsent, and only then',
     [false, false],
   )
   assert.deepEqual(done.map(({ serial }) => serial).sort(), [NORMAL, NORMAL + 1])
-  assert.equal(transport.queuedBytes('a'), 0)
+  assert.equal(transport.unsentBytes('a', 'settle'), 0)
   // after closing, an item is reported unsent at once
   send(NORMAL + 2, 500)
   assert.deepEqual(done[2], { serial: NORMAL + 2, sent: false })
@@ -460,14 +462,14 @@ test("a large item isn't followed by the next until it's nearly sent; the stream
   const { ws, transport, queue, block } = setup()
   block()
   const ready: { surface: string; left: number }[] = []
-  transport.onStreamReady = (surface) => ready.push({ surface, left: transport.queuedBytes(surface) })
+  transport.onStreamReady = (surface) => ready.push({ surface, left: transport.unsentBytes(surface, 'settle') })
   queue('a', 'streaming', STREAMING, 50_000)
   assert.ok(!transport.streamReady('a'))
   let sends = 0
   while (ready.length === 0 && ws.sent.length) {
     ws.sent.shift()!.callback()
     if (ready.length === 0) {
-      assert.ok(transport.queuedBytes('a') > CHUNK_MIN_BYTES, 'not ready while more than a chunk is left')
+      assert.ok(transport.unsentBytes('a', 'settle') > CHUNK_MIN_BYTES, 'not ready while more than a chunk is left')
     }
     sends++
   }
@@ -500,9 +502,9 @@ test('settling patches count for readiness, unless asked without them (new damag
   block()
   queue('a', 'settle', SETTLE, 20_000)
   assert.ok(!transport.streamReady('a'))
-  assert.ok(transport.streamReady('a', true))
+  assert.ok(transport.streamReady('a', 'settle'))
   queue('a', 'normal', NORMAL, 20_000)
-  assert.ok(!transport.streamReady('a', true))
+  assert.ok(!transport.streamReady('a', 'settle'))
 })
 
 test('a closed transport is ready (nothing waits anymore) and tells no one', () => {

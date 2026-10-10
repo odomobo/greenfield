@@ -5,12 +5,6 @@ declare namespace nodePoll {
 
   export function stopPoll(pollHandle: PollHandle)
 
-  /** TCP_NOTSENT_LOWAT, returns 0 or errno */
-  export function setTcpNotSentLowat(fd: number, bytes: number): number
-
-  /** SO_SNDBUF, returns 0 or errno */
-  export function setSocketSendBuffer(fd: number, bytes: number): number
-
   // fd passing (native/poll/src/fd_passing.c). Sockets made here are non-blocking and close-on-exec; errors are
   // returned as -errno.
 

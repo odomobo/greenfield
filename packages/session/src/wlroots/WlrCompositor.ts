@@ -19,7 +19,7 @@ import {
 import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool, encodePng } from '@nebula/patch-codec'
 import type { Rect } from '@nebula/session-contracts'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
-import { ControlMessage, SimulatedLink } from '../viewer/ViewerTransport.js'
+import { ControlMessage, SimulatedLink } from '@nebula/transport'
 import { frameInsets, type SceneRect, type SceneSurface, type SceneWindow } from '@gfld/scene-protocol'
 import { EvDevKeyCode } from './keys.js'
 import { Apps } from './Apps.js'
