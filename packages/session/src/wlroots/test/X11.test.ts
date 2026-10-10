@@ -1,6 +1,6 @@
-import { after, afterEach, beforeEach, test } from 'node:test'
+import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { FramePacing } from '@nebula/scheduler'
+import { Streaming } from '../../streaming.js'
 import { ControlMessage } from '@nebula/transport'
 import { WlrCompositor, WlrNative } from '../WlrCompositor.js'
 
@@ -83,18 +83,23 @@ const lastScene = () => scenes()[scenes().length - 1]
 const windowsOf = (scene: ControlMessage) => scene.windows as any[]
 const positionsOf = (sid: number) => core.positions.filter(([of]) => of === sid).map(([, x, y]) => [x, y])
 
-const framePacing = new FramePacing()
-after(() => framePacing.stop())
+let streaming: Streaming
 
 beforeEach(() => {
   core = new FakeCore()
-  compositor = new WlrCompositor({ videoStreams: 1, framePacing }, core.native, () => undefined)
+  streaming = new Streaming({ videoStreams: 1 })
+  compositor = new WlrCompositor(
+    { framePacing: streaming.framePacing, createSurface: streaming.createSurface },
+    core.native,
+    () => undefined,
+  )
   sent = []
   compositor.attach((message) => sent.push(message))
 })
 
 afterEach(() => {
   compositor.detach()
+  streaming.stop()
 })
 
 test('the X11 display is the one the core started', () => {
