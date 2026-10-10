@@ -6,7 +6,7 @@
  * (src/wlroots/WlrCompositor.ts), which keeps the policy: window positions, stacking, focus, frame pacing and encoding.
  * Nothing is rendered or composited here: the compositor has no renderer (so wlroots doesn't copy shared memory
  * buffers into textures), and each surface's committed client buffer stays locked until the next commit replaces it.
- * Frames of it (packages/frames) are read by the patch path; the video encoder is handed it directly.
+ * Frames of it (packages/frames) are read by the renderers: the patch path and the video codec (packages/video-codec).
  *
  * Runs on Node's main thread. wlroots' event loop is driven from JavaScript (dispatch() when its fd is readable), so
  * every wlroots callback, and every event reported to JavaScript, happens inside a call from JavaScript.
@@ -48,7 +48,6 @@
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/util/log.h>
 #include "node_api.h"
-#include "wlr_core.h"
 #include "wlr_core_internal.h"
 #include "nebula_frame.h"
 
@@ -1553,15 +1552,6 @@ sendFrameDone(napi_env env, napi_callback_info info) {
     return undefined(env);
 }
 
-struct wlr_buffer *
-wlr_core_surface_buffer(uint32_t sid) {
-    if (the_core == NULL) {
-        return NULL;
-    }
-    struct gsurf *gsurf = gsurf_from_sid(the_core, sid);
-    return gsurf ? gsurf->buffer : NULL;
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // frames (packages/frames): capture hands out frames of a surface's current buffer. Its own hold of the buffer
 // (gsurf->buffer, until the next commit replaces it) stays as it is; each frame adds a lock of its own.
@@ -1666,7 +1656,9 @@ takeFrame(napi_env env, napi_callback_info info) {
         frame->description.shm.begin_access = wlr_frame_begin_access;
         frame->description.shm.end_access = wlr_frame_end_access;
     } else if (wlr_buffer_get_dmabuf(buffer, &dmabuf)) {
-        // the file descriptors belong to the buffer, valid while it is locked
+        // the file descriptors belong to the buffer, valid while it is locked. frame->device stays 0 (not known): the
+        // compositor has no renderer and advertises no linux-dmabuf global, so clients don't send dmabufs yet; once it
+        // does, the device is the render node it advertises (the video codec opens its own GPU context there).
         frame->memory = NEBULA_FRAME_DMABUF;
         frame->format = dmabuf.format;
         frame->description.dmabuf.modifier = dmabuf.modifier;
@@ -1689,7 +1681,6 @@ takeFrame(napi_env env, napi_callback_info info) {
     return nebula_frame_to_js(env, frame);
 }
 
-napi_value wlr_core_encoder_init(napi_env env, napi_value exports);
 napi_value wlr_core_clipboard_init(napi_env env, napi_value exports);
 napi_value wlr_core_dnd_init(napi_env env, napi_value exports);
 
@@ -1721,7 +1712,7 @@ init(napi_env env, napi_value exports) {
     wlr_core_dnd_init(env, exports);
     wlr_core_input_init(env, exports);
     frame_source = nebula_frame_source_create(env, FRAME_HELD_LIMIT_MS, NULL);
-    return wlr_core_encoder_init(env, exports);
+    return exports;
 }
 
 NAPI_MODULE(NODE_GYP_MODULE_NAME, init)

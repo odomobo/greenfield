@@ -5,8 +5,6 @@ import type { Frame } from '@nebula/session-contracts'
  * surface.
  */
 declare namespace wlrCore {
-  export type FrameEncoder = unknown
-
   /**
    * Events, called synchronously from inside the calls below (wlroots runs on this thread):
    * - client-new(clientId, pid), client-destroy(clientId): Wayland connections (pid from the socket's credentials, 0 if
@@ -174,21 +172,6 @@ declare namespace wlrCore {
   export function cancelFileDrag(): void
 
   export function provideFiles(list: string): void
-
-  export function createFrameEncoder(
-    encoderType: 'nvh264' | 'vaapih264' | 'x264',
-    frameEncoded: (sample: Buffer | undefined) => void,
-  ): FrameEncoder
-
-  export function destroyFrameEncoder(encoder: FrameEncoder): void
-
-  export function requestKeyUnit(encoder: FrameEncoder): void
-
-  /** The quality (a constant QP) of the frames from the next one on, which starts with a key frame if it changed. */
-  export function setQuality(encoder: FrameEncoder, high: boolean): void
-
-  /** Encode the surface's current buffer; it stays locked (not released to the client) until encoded. */
-  export function encodeFrame(encoder: FrameEncoder, sid: number, contentSerial: number, creationSerial: number): void
 }
 
 export = wlrCore

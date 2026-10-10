@@ -38,7 +38,7 @@ extern "C" {
 /* The type tag at the start of every frame ("nFRM"). */
 #define NEBULA_FRAME_MAGIC 0x4d52466eu
 /* The layout version of struct nebula_frame: bumped when a field changes meaning; added fields grow `size`. */
-#define NEBULA_FRAME_VERSION 1u
+#define NEBULA_FRAME_VERSION 2u
 
 #define NEBULA_FRAME_MAX_PLANES 4
 
@@ -75,6 +75,12 @@ struct nebula_frame {
     uint32_t format;
     /* increases with every new buffer content of the surface (capture's numbering) */
     uint32_t content_serial;
+    /*
+     * The GPU the buffer lives on: the dev_t of its DRM device (a consumer such as the video encoder opens its own GPU
+     * context there, on the device's render node; a dmabuf can be imported by any context on the same device). 0: not
+     * known, or not GPU memory (shared memory frames don't need it).
+     */
+    uint64_t device;
     union {
         struct {
             /*

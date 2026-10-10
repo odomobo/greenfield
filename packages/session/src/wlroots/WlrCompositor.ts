@@ -6,7 +6,7 @@
 import type * as WlrCoreAddon from '../addons/wlr-core-addon'
 import { createLogger } from '../Logger.js'
 import { scheduleFrameCallback } from '../FramePacing.js'
-import { EncoderPool } from '../encoding/EncoderPool.js'
+import { EncoderPool, H264Encoder, type H264EncoderType } from '@nebula/video-codec'
 import {
   EncodingContext,
   EncodingSink,
@@ -14,11 +14,10 @@ import {
   PatchShape,
   SurfaceEncoder,
   SurfaceHost,
-  VideoQuality,
 } from '../encoding/SurfaceEncoder.js'
 import { encodePng } from '../encoding/png.js'
 import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool } from '../encoding/PatchWorkerPool.js'
-import type { Rect } from '@nebula/session-contracts'
+import type { Frame, Rect, VideoEncoder } from '@nebula/session-contracts'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
 import { ControlMessage, SimulatedLink } from '../viewer/ViewerTransport.js'
 import { frameInsets, type SceneRect, type SceneSurface, type SceneWindow } from '@gfld/scene-protocol'
@@ -32,9 +31,6 @@ import { FileDrops } from './FileDrops.js'
 const logger = createLogger('wlroots')
 /** GFLD_WLR_TRACE=1: log wlroots events and viewer messages */
 const TRACE = process.env.GFLD_WLR_TRACE === '1'
-
-/** The hardware video encoders; without one (`undefined`) everything is sent as lossless patches. */
-type H264Encoder = 'nvh264' | 'vaapih264' | 'x264'
 
 /** The native core (native/wlr-core), injectable so the policy can be tested without wlroots. */
 export type WlrNative = Omit<typeof WlrCoreAddon, 'create'> & {
@@ -74,54 +70,8 @@ const V120_CLICK = 120
 /** a click's DOM delta in lines (Firefox) */
 const LINES_PER_CLICK = 3
 
-/** A pooled GStreamer video encoder that encodes surfaces' current wlroots buffers. */
-class WlrEncoder {
-  private readonly native: WlrCoreAddon.FrameEncoder
-  private quality: VideoQuality = 'high'
-  private readonly queue: { resolve: (frame: Buffer) => void; reject: (error: Error) => void }[] = []
-
-  constructor(
-    private readonly wlr: WlrNative,
-    type: H264Encoder,
-  ) {
-    this.native = wlr.createFrameEncoder(type, (frame) => {
-      const task = this.queue.shift()
-      if (frame) {
-        task?.resolve(frame)
-      } else {
-        task?.reject(new Error('Buffer encoding failed.'))
-      }
-    })
-  }
-
-  encode(sid: number, contentSerial: number): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      const task = { resolve, reject }
-      this.queue.push(task)
-      try {
-        this.wlr.encodeFrame(this.native, sid, contentSerial, 0)
-      } catch (e: any) {
-        this.queue.splice(this.queue.indexOf(task), 1)
-        reject(e)
-      }
-    })
-  }
-
-  requestKeyUnit(): void {
-    this.wlr.requestKeyUnit(this.native)
-  }
-
-  setQuality(quality: VideoQuality): void {
-    if (quality !== this.quality) {
-      this.quality = quality
-      this.wlr.setQuality(this.native, quality === 'high')
-    }
-  }
-
-  destroy(): void {
-    this.wlr.destroyFrameEncoder(this.native)
-  }
-}
+/** A pooled video encoder (H264Encoder of @nebula/video-codec in production): encodes frames, releasing them when done. */
+export type FrameEncoder = VideoEncoder & { encode(frame: Frame): Promise<Uint8Array> }
 
 type Surface = {
   sid: number
@@ -133,7 +83,7 @@ type Surface = {
   /** input region, undefined: the whole surface */
   input?: SceneRect[]
   buffer?: { width: number; height: number; contentSerial: number }
-  encoder?: SurfaceEncoder<WlrEncoder>
+  encoder?: SurfaceEncoder<FrameEncoder>
   frameScheduled: boolean
 }
 
@@ -175,7 +125,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private readonly fileDrops: FileDrops
   private send?: (message: ControlMessage) => void
   private sink: EncodingSink = inactiveSink
-  private readonly encoding: EncodingContext<WlrEncoder>
+  private readonly encoding: EncodingContext<FrameEncoder>
   private readonly surfaces = new Map<number, Surface>()
   private readonly sids = new Map<string, number>()
   private readonly windows = new Map<number, Window>()
@@ -199,7 +149,14 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private constraint?: { sid: number; confined: boolean }
 
   constructor(
-    config: { h264Encoder?: H264Encoder; videoStreams: number; patchOrder?: PatchOrder; patchShape?: PatchShape },
+    config: {
+      h264Encoder?: H264EncoderType
+      videoStreams: number
+      patchOrder?: PatchOrder
+      patchShape?: PatchShape
+      /** creates the pool's video encoders (replaceable in tests) */
+      createVideoEncoder?: (type: H264EncoderType) => FrameEncoder
+    },
     private readonly wlr: WlrNative,
     watchFd: FdWatcher,
     /** where files dropped from the user's computer are saved */
@@ -223,8 +180,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     // without a hardware encoder the pool has size 0 and no video encoder is ever created; one that fails to create is
     // reported once and the pool then behaves the same
     const h264Encoder = config.h264Encoder
-    const pool = new EncoderPool<WlrEncoder>(
-      () => new WlrEncoder(wlr, h264Encoder!),
+    const createVideoEncoder = config.createVideoEncoder ?? ((type: H264EncoderType) => new H264Encoder(type))
+    const pool = new EncoderPool<FrameEncoder>(
+      () => createVideoEncoder(h264Encoder!),
       h264Encoder ? config.videoStreams : 0,
       (error) =>
         logger.error(`Video encoder ${h264Encoder} is unavailable (${error.message}), sending lossless patches only.`),
@@ -596,9 +554,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.scheduleScene()
   }
 
-  private encoderOf(surface: Surface): SurfaceEncoder<WlrEncoder> {
+  private encoderOf(surface: Surface): SurfaceEncoder<FrameEncoder> {
     if (surface.encoder === undefined) {
-      const host: SurfaceHost<WlrEncoder> = {
+      const host: SurfaceHost<FrameEncoder> = {
         currentBuffer: () =>
           surface.buffer && {
             bufferId: surface.sid,
@@ -608,7 +566,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
             height: surface.buffer.height,
           },
         takeFrame: () => surface.buffer && this.wlr.takeFrame(surface.sid, surface.buffer.contentSerial),
-        encodeVideo: (encoder, buffer) => encoder.encode(surface.sid, buffer.contentSerial),
+        encodeVideo: (encoder, frame) => encoder.encode(frame),
       }
       surface.encoder = new SurfaceEncoder(surface.key, host, this.encoding)
     }
@@ -1275,7 +1233,7 @@ function inputRegion(rects: Int32Array, width: number, height: number): SceneRec
 
 /** Start the session's Wayland side on wlroots, with its app processes. */
 export function startWlrootsCompositor(config: {
-  h264Encoder?: H264Encoder
+  h264Encoder?: H264EncoderType
   videoStreams?: number
   /** development only: a simulated slow link to the viewer (see SimulatedLink) */
   link?: SimulatedLink

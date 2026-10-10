@@ -24,6 +24,7 @@
     "@nebula/frames": "*",
     "@nebula/congestion": "*",
     "@nebula/session-contracts": "*",
+    "@nebula/video-codec": "*",
     "ws": "^8.17.1"
   },
   "devDependencies": {

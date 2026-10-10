@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { detectEncoder, EncoderProbes, resolveEncoder } from '../encoder'
+import { detectEncoder, EncoderProbes, resolveEncoder } from '../detect.js'
 
 function probes(have: { render?: boolean; nvidia?: boolean; elements?: string[] }): EncoderProbes {
   return {

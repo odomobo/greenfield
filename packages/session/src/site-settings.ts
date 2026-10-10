@@ -12,7 +12,7 @@
  * Unknown keys and invalid values are errors (a typo must not silently change the encoder).
  */
 import { readFileSync, statSync } from 'node:fs'
-import { ENCODER_OPTIONS, EncoderOption } from './encoder'
+import { ENCODER_OPTIONS, type EncoderOption } from '@nebula/video-codec'
 
 export const MAX_SITE_SETTINGS_BYTES = 16384
 

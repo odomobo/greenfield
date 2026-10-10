@@ -11,20 +11,6 @@ set(CMAKE_BUILD_TYPE "Release")
 
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GLIB2 REQUIRED glib-2.0 IMPORTED_TARGET)
-pkg_check_modules(GSTREAMER REQUIRED
-        IMPORTED_TARGET
-        gstreamer-1.0>=1.18
-        gstreamer-app-1.0>=1.18
-        gstreamer-video-1.0>=1.18
-        gstreamer-gl-1.0>=1.18
-        gstreamer-allocators-1.0>=1.18
-)
-pkg_check_modules(GRAPHENE REQUIRED IMPORTED_TARGET graphene-1.0)
-pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl>=1.5)
-pkg_check_modules(OPENGL REQUIRED IMPORTED_TARGET opengl>=3.3)
-pkg_check_modules(GBM REQUIRED gbm IMPORTED_TARGET)
-pkg_check_modules(LIBDRM REQUIRED libdrm IMPORTED_TARGET)
 # libjpeg-turbo (Ubuntu: libjpeg-dev), for lossy patches
 pkg_check_modules(JPEG REQUIRED libjpeg IMPORTED_TARGET)
 
@@ -103,31 +89,23 @@ pkg_check_modules(WLR_DEPS REQUIRED IMPORTED_TARGET
         wayland-server>=1.22 pixman-1>=0.42 xkbcommon libdrm>=2.4.114 gbm egl glesv2
         xcb xcb-composite xcb-ewmh xcb-icccm xcb-render xcb-res xcb-xfixes)
 
-# The frame library of @nebula/frames (a static library): capture creates frames with it.
+# The frame library of @nebula/frames (a static library): capture creates frames with it. Video encoding is the
+# video codec's (packages/video-codec, its own addon), which reads them.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../frames/native ${CMAKE_BINARY_DIR}/frames)
 
 add_library(wlr-core-addon SHARED
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_clipboard.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_dnd.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_encoder.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_xwayland.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/wlr_core_input.c
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/xwayland_sockets.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/gst_frame_encoder.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src/gst_main_loop.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/westfield-egl.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/westfield-dmabuf.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src/drm_format_set.c
 )
 add_dependencies(wlr-core-addon wlroots-static)
 set_target_properties(wlr-core-addon PROPERTIES PREFIX "" SUFFIX ".node" C_STANDARD 11)
 target_compile_definitions(wlr-core-addon PRIVATE WLR_USE_UNSTABLE)
-# the shim westfield.h comes first: the encoder sources against the system libwayland
 target_include_directories(wlr-core-addon PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/shim
         ${CMAKE_CURRENT_SOURCE_DIR}/native/wlr-core/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/native/encoding/src
         ${CMAKE_CURRENT_SOURCE_DIR}/native/node-api
         ${WLR_SOURCE}/include
         ${WLR_BUILD}/include
@@ -137,10 +115,6 @@ target_link_libraries(wlr-core-addon PRIVATE
         ${WLR_BUILD}/libwlroots.a
         nebula-frames
         PkgConfig::WLR_DEPS
-        PkgConfig::GLIB2
-        PkgConfig::GSTREAMER
-        PkgConfig::GRAPHENE
-        PkgConfig::OPENGL
         Threads::Threads
         rt
         m

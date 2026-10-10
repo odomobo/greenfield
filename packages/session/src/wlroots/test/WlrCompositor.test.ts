@@ -143,14 +143,6 @@ class FakeCore {
     provideFiles: (list) => {
       this.fileDrag.push(`provide ${JSON.stringify(list)}`)
     },
-    createFrameEncoder: () => {
-      this.encodersCreated++
-      return {}
-    },
-    destroyFrameEncoder: () => undefined,
-    requestKeyUnit: () => undefined,
-    setQuality: () => undefined,
-    encodeFrame: () => undefined,
   }
 
   /** A mapped toplevel with a buffer: what an app's first window goes through. */
@@ -219,7 +211,26 @@ const lastConfigure = (sid: number) => [...core.configures].reverse().find((conf
 
 beforeEach(() => {
   core = new FakeCore()
-  compositor = new WlrCompositor({ videoStreams: 1 }, core.native, () => undefined)
+  const fakeCore = core
+  compositor = new WlrCompositor(
+    {
+      videoStreams: 1,
+      createVideoEncoder: () => {
+        fakeCore.encodersCreated++
+        return {
+          encode: (frame) => {
+            frame.release()
+            return Promise.resolve(new Uint8Array())
+          },
+          requestKeyUnit: () => undefined,
+          setQuality: () => undefined,
+          destroy: () => undefined,
+        }
+      },
+    },
+    core.native,
+    () => undefined,
+  )
   sent = []
   compositor.attach((message) => sent.push(message))
 })
