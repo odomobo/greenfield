@@ -29,8 +29,8 @@ import type {
   TrafficSource,
   VideoEncoder,
 } from '@nebula/session-contracts'
-import { MAX_PATCH_PIXELS, PatchRenderer, UNCOMPRESSED_BYTES_PER_PIXEL, area, clip } from '../patch-renderer/index.js'
-import { VideoRenderer } from '../video-renderer/index.js'
+import { MAX_PATCH_PIXELS, PatchRenderer, UNCOMPRESSED_BYTES_PER_PIXEL, area, clip } from '@nebula/patch-renderer'
+import { VideoRenderer } from '@nebula/video-renderer'
 
 const resolved = Promise.resolve()
 

@@ -1,4 +1,4 @@
-.PHONY: all check lint test scene-protocol session-contracts patch-codec frames congestion scheduler video-codec transport traffic-policy session viewer gatekeeper clean
+.PHONY: all check lint test scene-protocol session-contracts patch-codec frames congestion scheduler video-codec transport traffic-policy patch-renderer video-renderer surface session viewer gatekeeper clean
 
 all: session viewer gatekeeper
 
@@ -44,7 +44,20 @@ transport: session-contracts congestion
 traffic-policy: session-contracts congestion
 	cd packages/traffic-policy && npm run build
 
-session: session-contracts frames congestion scheduler patch-codec video-codec transport traffic-policy
+# Per surface: damage queue, patch planning, lossy and settle areas. Its tests use the scheduler.
+patch-renderer: session-contracts scheduler
+	cd packages/patch-renderer && npm run build
+
+# Per surface: on-demand video frames, key frames and recovery.
+video-renderer: session-contracts
+	cd packages/video-renderer && npm run build
+
+# Patches or video for a surface, and the switch; owns the two renderers. Its tests use the scheduler, traffic policy and
+# video codec.
+surface: session-contracts patch-renderer video-renderer scheduler traffic-policy video-codec
+	cd packages/surface && npm run build
+
+session: session-contracts frames congestion scheduler patch-codec video-codec transport traffic-policy surface
 	cd packages/session && rm -rf dist types && npm run build:native && npx tsc -b && node dist/build-dconf.js && node dist/build-audio.js
 
 viewer: scene-protocol patch-codec
@@ -65,6 +78,9 @@ lint:
 	cd packages/video-codec && npm run lint
 	cd packages/transport && npm run lint
 	cd packages/traffic-policy && npm run lint
+	cd packages/patch-renderer && npm run lint
+	cd packages/video-renderer && npm run lint
+	cd packages/surface && npm run lint
 	cd packages/session && npm run lint
 
 test:
@@ -76,6 +92,9 @@ test:
 	cd packages/video-codec && npm test
 	cd packages/transport && npm test
 	cd packages/traffic-policy && npm test
+	cd packages/patch-renderer && npm test
+	cd packages/video-renderer && npm test
+	cd packages/surface && npm test
 	cd packages/session && npm test
 	cd packages/viewer && npm test
 
@@ -96,6 +115,9 @@ clean:
 	rm -rf packages/video-codec/build packages/video-codec/dist packages/video-codec/types packages/video-codec/tsconfig.tsbuildinfo
 	rm -rf packages/transport/build packages/transport/dist packages/transport/types packages/transport/tsconfig.tsbuildinfo
 	rm -rf packages/traffic-policy/dist packages/traffic-policy/types packages/traffic-policy/tsconfig.tsbuildinfo
+	rm -rf packages/patch-renderer/dist packages/patch-renderer/types packages/patch-renderer/tsconfig.tsbuildinfo
+	rm -rf packages/video-renderer/dist packages/video-renderer/types packages/video-renderer/tsconfig.tsbuildinfo
+	rm -rf packages/surface/dist packages/surface/types packages/surface/tsconfig.tsbuildinfo
 	rm -rf packages/session/build packages/session/dist packages/session/types
 	rm -rf packages/viewer/dist
 	# tsc -b's incremental state: left behind, it would take the removed output for up to date

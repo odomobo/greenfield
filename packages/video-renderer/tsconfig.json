@@ -1,0 +1,20 @@
+{
+  "extends": "@tsconfig/node18/tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "declarationDir": "types",
+    "outDir": "dist",
+    "declaration": true,
+    "sourceMap": true,
+    "strict": true
+  },
+  "references": [
+    {
+      "path": "../session-contracts"
+    }
+  ],
+  "include": [
+    "src"
+  ]
+}

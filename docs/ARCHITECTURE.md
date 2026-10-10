@@ -192,10 +192,10 @@ in `docs/MODULARIZATION.md`), along two separate axes: *priority* (relentless or
 settling's tier; `priority.ts`, `TrafficPolicy.ts`) and *bottleneck* (CPU-bound until the link becomes the limit;
 link-bound means going lossy: the link judgment, `bandwidth.ts`, `link-judgment.ts`). It publishes a decision per
 surface (`TrafficDecision` in `@nebula/session-contracts`: its class and send tier, its bottleneck, its video
-quality); the surface (`Surface`, `packages/session/src/surface`) reads it and reports what policy measures it by
+quality); the surface (`Surface`, `packages/surface`) reads it and reports what policy measures it by
 (busy, commits, predicted backlog, settled). The encoding is the surface's own choice, from the class: it owns a patch
-renderer (`PatchRenderer`, `src/patch-renderer`: damage queue, patch planning and order, lossy and settle areas) and,
-while it streams video, a video renderer (`VideoRenderer`, `src/video-renderer`: the encoder's lease, on-demand
+renderer (`PatchRenderer`, `packages/patch-renderer`: damage queue, patch planning and order, lossy and settle areas) and,
+while it streams video, a video renderer (`VideoRenderer`, `packages/video-renderer`: the encoder's lease, on-demand
 frames, key frames, quality), and switches between them (video start drops the queued patches and makes the whole
 surface lossy; video stop sends a crisp lossless image of the whole surface). The renderers don't know each other;
 their interfaces with the surface and the session (`RendererOwner`, `PatchRendererContext`, `SurfaceContext`, ...) are

@@ -8,7 +8,7 @@ import { createLogger } from '../Logger.js'
 import { FramePacing } from '@nebula/scheduler'
 import { EncoderPool, H264Encoder, type H264EncoderType } from '@nebula/video-codec'
 import { EncodingContext } from '../encoding/EncodingContext.js'
-import { Surface as RenderedSurface } from '../surface/index.js'
+import { Surface as RenderedSurface } from '@nebula/surface'
 import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool, encodePng } from '@nebula/patch-codec'
 import type {
   EncodingSink,
