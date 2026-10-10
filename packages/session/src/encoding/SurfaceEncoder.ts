@@ -17,7 +17,7 @@
  */
 import { isLossyPatchFormat, type Patch } from '@gfld/scene-protocol'
 import { PatchPump } from '@nebula/scheduler'
-import { EncoderPool } from './EncoderPool.js'
+import type { EncoderPool } from '@nebula/video-codec'
 import type {
   CapturedPatch,
   EncodedPatch,
@@ -101,7 +101,8 @@ export interface SurfaceHost<V extends VideoEncoder> {
   currentBuffer(): BufferInfo | undefined
   /** A frame of the current buffer, which the caller releases; undefined if it can't be taken. */
   takeFrame(): Frame | undefined
-  encodeVideo(encoder: V, buffer: BufferInfo): Promise<Uint8Array>
+  /** Encodes a frame as video; the encoder takes the frame over and releases it once it has read it. */
+  encodeVideo(encoder: V, frame: Frame): Promise<Uint8Array>
 }
 
 export type Logger = { error(message: string): void; info?(message: string): void }
@@ -736,6 +737,12 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       return resolved
     }
     this.videoWanted = undefined
+    // held only while it's encoded: the encoder releases it
+    const frame = this.host.takeFrame()
+    if (frame === undefined) {
+      this.context.logger.error(`Video encoding of ${this.key} failed: no frame of its buffer can be taken.`)
+      return resolved
+    }
     this.unsentItems++
     this.encodingNow = true
     lease.setQuality(sink.bandwidthLimited ? 'low' : 'high')
@@ -752,7 +759,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       this.encodingNow = false
       this.next()
     }
-    const encoding: Promise<void> = this.host.encodeVideo(lease, buffer).then(
+    const encoding: Promise<void> = this.host.encodeVideo(lease, frame).then(
       (frame) => {
         if (this.isCurrent(epoch) && sink.active) {
           sink.sendFrame(this.key, frame, surfaceClass, release)

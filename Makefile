@@ -1,4 +1,4 @@
-.PHONY: all check lint test scene-protocol session-contracts patch-codec frames congestion scheduler session viewer gatekeeper clean
+.PHONY: all check lint test scene-protocol session-contracts patch-codec frames congestion scheduler video-codec session viewer gatekeeper clean
 
 all: session viewer gatekeeper
 
@@ -16,7 +16,8 @@ session-contracts: scene-protocol
 patch-codec: session-contracts
 	cd packages/patch-codec && npm run build
 
-# The frame library (native, linked statically into session's wlr-core addon) and its test addon.
+# The frame library (native, linked statically into session's wlr-core addon and the video codec's addon) and its test
+# addon.
 frames: session-contracts
 	cd packages/frames && npm run build
 
@@ -28,7 +29,11 @@ congestion: session-contracts
 scheduler: session-contracts
 	cd packages/scheduler && npm run build
 
-session: session-contracts frames congestion scheduler patch-codec
+# The video codec: the GStreamer encoder (its own native addon, reading frames), the encoder pool, encoder detection.
+video-codec: session-contracts frames
+	cd packages/video-codec && npm run build
+
+session: session-contracts frames congestion scheduler patch-codec video-codec
 	cd packages/session && rm -rf dist types && npm run build:native && npx tsc -b && node dist/build-dconf.js && node dist/build-audio.js
 
 viewer: scene-protocol patch-codec
@@ -46,6 +51,7 @@ lint:
 	cd packages/congestion && npm run lint
 	cd packages/scheduler && npm run lint
 	cd packages/patch-codec && npm run lint
+	cd packages/video-codec && npm run lint
 	cd packages/session && npm run lint
 
 test:
@@ -54,6 +60,7 @@ test:
 	cd packages/congestion && npm test
 	cd packages/scheduler && npm test
 	cd packages/patch-codec && npm test
+	cd packages/video-codec && npm test
 	cd packages/session && npm test
 	cd packages/viewer && npm test
 
@@ -71,6 +78,9 @@ clean:
 	rm -rf packages/scheduler/dist packages/scheduler/types packages/scheduler/tsconfig.tsbuildinfo
 	rm -rf packages/frames/build packages/frames/dist packages/frames/types packages/frames/tsconfig.tsbuildinfo
 	rm -rf packages/patch-codec/build packages/patch-codec/dist packages/patch-codec/types packages/patch-codec/tsconfig.tsbuildinfo
+	rm -rf packages/video-codec/build packages/video-codec/dist packages/video-codec/types packages/video-codec/tsconfig.tsbuildinfo
 	rm -rf packages/session/build packages/session/dist packages/session/types
 	rm -rf packages/viewer/dist
+	# tsc -b's incremental state: left behind, it would take the removed output for up to date
+	rm -f packages/*/tsconfig.tsbuildinfo
 	cd packages/gatekeeper && cargo clean

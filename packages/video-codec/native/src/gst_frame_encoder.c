@@ -1,4 +1,3 @@
-#include "westfield.h"
 #include <glib.h>
 #include <gst/gst.h>
 #include <gst/gl/gstglfuncs.h>
@@ -19,8 +18,10 @@
 #include <gst/gl/gstglutils.h>
 #include <gst/gl/gstglsyncmeta.h>
 #include <gst/gl/egl/gstglmemoryegl.h>
+#include <xf86drm.h>
 #include "encoder.h"
 #include "gst_frame_encoder_drm_formats.h"
+#include "westfield-egl.h"
 
 /*
  * Video is only used with GPU acceleration, by a hardware encoder (nvh264, vaapih264), for busy (streaming) surfaces
@@ -34,6 +35,14 @@
  * Test-only exception: the "x264" encoder (--dev-software-encoder) is software, for machines without a GPU. It takes
  * shared memory buffers only and has no GL: the padding and the alpha extraction that the shader does are done on the
  * CPU (software_sample), the rest of the stream layout (BT.601 limited range, High profile, byte stream) is the same.
+ *
+ * Input is frames (packages/frames): each encode holds a reference to its frame until GStreamer is done reading the
+ * buffer, and releases it on whichever thread that is (the frame library takes the release back to capture's thread).
+ * Formats are DRM fourccs.
+ *
+ * GPU context: the codec opens its own, on the GPU a frame's buffer lives on (frame->device), when a dmabuf frame needs
+ * one to be imported (gpu_context_for_device: one per device, kept for the process's lifetime). Shared memory frames
+ * need none: the GL elements of the hardware pipelines then make their own context, and the software encoder has no GL.
  */
 
 /* The QP (0-51, lower is better quality and more bitrate) of each quality, for the color and the alpha stream. */
@@ -129,7 +138,6 @@ struct frame_encoder {
     GQueue *frame_encoding_results;
     GMutex results_mutex; // the queue is used by the caller and the pipelines' threads
     void *user_data;
-    struct westfield_egl *westfield_egl;
 
     bool terminated;
 };
@@ -155,6 +163,13 @@ struct gst_frame_encoder {
     // created when first needed: [is_alpha]
     struct gst_frame_encoder_pipeline *pipelines[2];
 
+    /*
+     * The GPU (dev_t of its DRM device) this encoder's GL context is on, and the codec's own context there (see
+     * gpu_context_for_device); 0 and NULL: none, the GL elements make their own (shared memory frames).
+     */
+    uint64_t device;
+    struct westfield_egl *egl;
+
     GstGLDisplay *wrapped_gst_gl_display;
     GstGLContext *wrapped_gst_gl_context;
     GstGLContext *shared_gst_gl_context;
@@ -162,7 +177,7 @@ struct gst_frame_encoder {
 
 struct shmbuf_support_format {
     const bool has_alpha;
-    enum wl_shm_format wl_shm_format;
+    uint32_t drm_format;
     const char *gst_format_string;
     const GstVideoFormat gst_video_format;
 };
@@ -170,65 +185,89 @@ struct shmbuf_support_format {
 static const struct shmbuf_support_format shmbuf_supported_formats[] = {
         {
                 .has_alpha = true,
-                .wl_shm_format = WL_SHM_FORMAT_ARGB8888,
+                .drm_format = DRM_FORMAT_ARGB8888,
                 .gst_format_string = "BGRA",
                 .gst_video_format = GST_VIDEO_FORMAT_BGRA,
         },
         {
                 .has_alpha = true,
-                .wl_shm_format = WL_SHM_FORMAT_XRGB8888,
+                .drm_format = DRM_FORMAT_XRGB8888,
                 .gst_format_string = "BGRx",
                 .gst_video_format = GST_VIDEO_FORMAT_BGRx,
         },
         {
                 .has_alpha = false,
-                .wl_shm_format = WL_SHM_FORMAT_YUV420,
+                .drm_format = DRM_FORMAT_YUV420,
                 .gst_format_string = "I420",
                 .gst_video_format = GST_VIDEO_FORMAT_I420,
         },
         {
                 .has_alpha = false,
-                .wl_shm_format = WL_SHM_FORMAT_NV12,
+                .drm_format = DRM_FORMAT_NV12,
                 .gst_format_string = "NV12",
                 .gst_video_format = GST_VIDEO_FORMAT_NV12,
         },
         {
                 .has_alpha = false,
-                .wl_shm_format = WL_SHM_FORMAT_YUV444,
+                .drm_format = DRM_FORMAT_YUV444,
                 .gst_format_string = "Y444",
                 .gst_video_format = GST_VIDEO_FORMAT_Y444,
         },
         {
                 .has_alpha = false,
-                .wl_shm_format = WL_SHM_FORMAT_NV21,
+                .drm_format = DRM_FORMAT_NV21,
                 .gst_format_string = "NV21",
                 .gst_video_format = GST_VIDEO_FORMAT_NV21,
         },
 };
 
-static inline void
-frame_buffer_ref_count_init(struct frame_buffer *frame_buffer) {
-    frame_buffer->user_data = malloc(sizeof(gatomicrefcount));
-    g_atomic_ref_count_init(frame_buffer->user_data);
-}
-
+/* GDestroyNotify of a GstBuffer wrapping a frame's memory: on a GStreamer thread. */
 static void
-frame_buffer_ref_count_dec(const struct frame_buffer *frame_buffer) {
-    if (g_atomic_ref_count_dec(frame_buffer->user_data)) {
-        free(frame_buffer->user_data);
-        frame_buffer->discard_cb(frame_buffer);
-    }
+release_frame(gpointer frame) {
+    nebula_frame_release(frame);
 }
 
-static inline void
-frame_buffer_ref_count_inc(const struct frame_buffer *frame_buffer) {
-    g_atomic_ref_count_inc(frame_buffer->user_data);
+/* The codec's own GPU contexts, one per device, opened on first use (on the GStreamer main loop thread). */
+struct gpu_context {
+    uint64_t device;
+    struct westfield_egl *egl;
+};
+static GArray *gpu_contexts = NULL;
+
+/* The codec's GPU context on the device (a frame's dev_t), NULL if there is none (no such device, no EGL there). */
+static struct westfield_egl *
+gpu_context_for_device(uint64_t device) {
+    if (gpu_contexts == NULL) {
+        gpu_contexts = g_array_new(FALSE, TRUE, sizeof(struct gpu_context));
+    }
+    for (guint i = 0; i < gpu_contexts->len; i++) {
+        struct gpu_context *context = &g_array_index(gpu_contexts, struct gpu_context, i);
+        if (context->device == device) {
+            return context->egl;
+        }
+    }
+    struct gpu_context context = {.device = device, .egl = NULL};
+    drmDevicePtr drm_device = NULL;
+    if (drmGetDeviceFromDevId((dev_t) device, 0, &drm_device) == 0) {
+        // its render node, else its primary node
+        const int node = drm_device->available_nodes & (1 << DRM_NODE_RENDER) ? DRM_NODE_RENDER : DRM_NODE_PRIMARY;
+        if (drm_device->available_nodes & (1 << node)) {
+            context.egl = westfield_egl_new(drm_device->nodes[node]);
+        }
+        drmFreeDevice(&drm_device);
+    }
+    if (context.egl == NULL) {
+        g_warning("No GPU context on the frames' device %" G_GUINT64_FORMAT ", their video can't be encoded.", device);
+    }
+    // a failure is kept too: it isn't tried again for every frame
+    g_array_append_val(gpu_contexts, context);
+    return context.egl;
 }
 
 static void
 gst_frame_encoder_ensure_gst_gl_setup(struct gst_frame_encoder *gst_encoder) {
-    EGLDeviceEXT egl_device = westfield_egl_get_device(gst_encoder->frame_encoder->westfield_egl);
-    EGLDisplay egl_display = westfield_egl_get_display(gst_encoder->frame_encoder->westfield_egl);
+    EGLDeviceEXT egl_device = westfield_egl_get_device(gst_encoder->egl);
+    EGLDisplay egl_display = westfield_egl_get_display(gst_encoder->egl);
 
     if (gst_encoder->wrapped_gst_gl_display == NULL) {
         GstGLDisplay *gst_gl_display;
@@ -242,7 +281,7 @@ gst_frame_encoder_ensure_gst_gl_setup(struct gst_frame_encoder *gst_encoder) {
     }
 
     if (gst_encoder->wrapped_gst_gl_context == NULL) {
-        EGLContext egl_context = westfield_egl_get_context(gst_encoder->frame_encoder->westfield_egl);
+        EGLContext egl_context = westfield_egl_get_context(gst_encoder->egl);
         if (egl_context == NULL) {
             g_warning("Failed to find EGL context.");
             return;
@@ -419,22 +458,22 @@ static GstAppSinkCallbacks encoded_frame_sample_callback = {
         .new_preroll = NULL
 };
 
+/* A sample wrapping the frame's memory (no copy): it holds a reference to the frame until GStreamer is done with it. */
 static inline GstSample *
-shm_frame_buffer_to_new_gst_frame_sample(const struct frame_buffer *frame_buffer,
-                                         const struct shmbuf_support_format *shmbuf_support_format, GstCaps *caps) {
-    const gsize buffer_size = frame_buffer->impl.shm.buffer_stride * frame_buffer->height;
+shm_frame_to_new_gst_frame_sample(struct nebula_frame *frame,
+                                  const struct shmbuf_support_format *shmbuf_support_format, GstCaps *caps) {
+    const gsize buffer_size = frame->description.shm.stride * frame->height;
     GstSample *sample;
 
     gsize offset[] = {0, 0, 0, 0};
-    gint stride[] = {(gint) frame_buffer->impl.shm.buffer_stride, 0, 0, 0};
-    frame_buffer_ref_count_inc(frame_buffer);
+    gint stride[] = {(gint) frame->description.shm.stride, 0, 0, 0};
+    nebula_frame_retain(frame);
     GstBuffer *buffer = gst_buffer_new_wrapped_full(GST_MEMORY_FLAG_READONLY | GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS,
-                                                    (gpointer) frame_buffer->impl.shm.buffer_data, buffer_size, 0,
-                                                    buffer_size, (void *) frame_buffer,
-                                                    (GDestroyNotify) frame_buffer_ref_count_dec);
+                                                    (gpointer) frame->description.shm.data, buffer_size, 0,
+                                                    buffer_size, frame, release_frame);
 
     gst_buffer_add_video_meta_full(buffer, GST_VIDEO_FRAME_FLAG_NONE, shmbuf_support_format->gst_video_format,
-                                   frame_buffer->width, frame_buffer->height, 1, offset, stride);
+                                   frame->width, frame->height, 1, offset, stride);
 
     sample = gst_sample_new(buffer, caps, NULL, NULL);
     gst_buffer_unref(buffer);
@@ -448,15 +487,15 @@ shm_frame_buffer_to_new_gst_frame_sample(const struct frame_buffer *frame_buffer
  * is opaque).
  */
 static inline GstSample *
-software_sample(const struct frame_buffer *frame_buffer, const struct shmbuf_support_format *shmbuf_support_format,
+software_sample(const struct nebula_frame *frame, const struct shmbuf_support_format *shmbuf_support_format,
                 const uint32_t coded_width, const uint32_t coded_height, const bool is_alpha) {
     const gsize size = (gsize) coded_width * coded_height * 4;
     GstBuffer *buffer = gst_buffer_new_allocate(NULL, size, NULL);
     GstMapInfo map;
     gst_buffer_map(buffer, &map, GST_MAP_WRITE);
     memset(map.data, 0, size);
-    const uint32_t offset_x = coded_width - frame_buffer->width;
-    const uint32_t offset_y = coded_height - frame_buffer->height;
+    const uint32_t offset_x = coded_width - frame->width;
+    const uint32_t offset_y = coded_height - frame->height;
     const bool has_alpha_byte = shmbuf_support_format->gst_video_format == GST_VIDEO_FORMAT_BGRA;
     for (uint32_t y = 0; y < coded_height; y++) {
         uint8_t *out = map.data + (gsize) y * coded_width * 4;
@@ -466,9 +505,9 @@ software_sample(const struct frame_buffer *frame_buffer, const struct shmbuf_sup
         if (y < offset_y) {
             continue;
         }
-        const uint8_t *in = (const uint8_t *) frame_buffer->impl.shm.buffer_data +
-                            (gsize) (y - offset_y) * frame_buffer->impl.shm.buffer_stride;
-        for (uint32_t x = 0; x < frame_buffer->width; x++) {
+        const uint8_t *in = (const uint8_t *) frame->description.shm.data +
+                            (gsize) (y - offset_y) * frame->description.shm.stride;
+        for (uint32_t x = 0; x < frame->width; x++) {
             uint8_t *pixel = out + (offset_x + x) * 4;
             if (is_alpha) {
                 const uint8_t alpha = has_alpha_byte ? in[x * 4 + 3] : 255;
@@ -685,7 +724,7 @@ sync_bus_call(__attribute__((unused)) GstBus *bus, GstMessage *msg, gpointer dat
             const gchar *context_type;
             gst_message_parse_context_type(msg, &context_type);
 
-            if (gst_encoder_pipeline->gst_frame_encoder->frame_encoder->westfield_egl &&
+            if (gst_encoder_pipeline->gst_frame_encoder->egl &&
                 g_strcmp0(context_type, GST_GL_DISPLAY_CONTEXT_TYPE) == 0) {
                 GstContext *gst_context_gl_display = gst_context_new(GST_GL_DISPLAY_CONTEXT_TYPE, FALSE);
                 gst_context_set_gl_display(gst_context_gl_display,
@@ -694,7 +733,7 @@ sync_bus_call(__attribute__((unused)) GstBus *bus, GstMessage *msg, gpointer dat
                 gst_context_unref(gst_context_gl_display);
             }
 
-            if (gst_encoder_pipeline->gst_frame_encoder->frame_encoder->westfield_egl &&
+            if (gst_encoder_pipeline->gst_frame_encoder->egl &&
                 g_strcmp0(context_type, "gst.gl.app_context") == 0) {
                 GstGLContext *shared_gst_gl_context = gst_encoder_pipeline->gst_frame_encoder->shared_gst_gl_context;
                 GstContext *gst_context_gl_context = gst_context_new("gst.gl.app_context", FALSE);
@@ -861,13 +900,17 @@ gst_frame_encoder_get_pipeline(struct gst_frame_encoder *gst_encoder, const bool
     return gst_encoder->pipelines[is_alpha];
 }
 
+/* device: the GPU whose context the pipelines use (see gpu_context_for_device), 0 for none. */
 static inline void
-gst_frame_encoder_create(struct frame_encoder *encoder, const struct frame_encoder_description *description) {
+gst_frame_encoder_create(struct frame_encoder *encoder, const struct frame_encoder_description *description,
+                         uint64_t device) {
     struct gst_frame_encoder *gst_frame_encoder = g_new0(struct gst_frame_encoder, 1);
     gst_frame_encoder->frame_encoder = encoder;
     gst_frame_encoder->description = description;
+    gst_frame_encoder->device = device;
+    gst_frame_encoder->egl = device ? gpu_context_for_device(device) : NULL;
 
-    if (encoder->westfield_egl) {
+    if (gst_frame_encoder->egl) {
         gst_frame_encoder_ensure_gst_gl_setup(gst_frame_encoder);
     }
 
@@ -972,11 +1015,11 @@ gst_frame_encoder_pipeline_encode(struct gst_frame_encoder_pipeline *gst_frame_e
 }
 
 static inline const struct shmbuf_support_format *
-shmbuf_support_format_from_wl_shm_format(const enum wl_shm_format buffer_format) {
+shmbuf_support_format_from_drm_format(const uint32_t buffer_format) {
     static const size_t shmbuf_supported_formats_size =
             sizeof(shmbuf_supported_formats) / sizeof(shmbuf_supported_formats[0]);
     for (int i = 0; i < shmbuf_supported_formats_size; ++i) {
-        if (shmbuf_supported_formats[i].wl_shm_format == buffer_format) {
+        if (shmbuf_supported_formats[i].drm_format == buffer_format) {
             return &shmbuf_supported_formats[i];
         }
     }
@@ -984,30 +1027,29 @@ shmbuf_support_format_from_wl_shm_format(const enum wl_shm_format buffer_format)
 }
 
 static inline void
-gst_frame_encoder_encode_shm(struct gst_frame_encoder *gst_frame_encoder, const struct frame_buffer *frame_buffer,
+gst_frame_encoder_encode_shm(struct gst_frame_encoder *gst_frame_encoder, struct nebula_frame *frame,
                              struct frame_encoding_result *frame_encoding_result) {
     GstCaps *sample_caps;
     GstSample *opaque_sample, *alpha_sample;
     uint32_t coded_width, coded_height;
 
-    const struct shmbuf_support_format *shmbuf_support_format = shmbuf_support_format_from_wl_shm_format(
-            frame_buffer->impl.shm.buffer_format);
+    const struct shmbuf_support_format *shmbuf_support_format = shmbuf_support_format_from_drm_format(frame->format);
     if (shmbuf_support_format == NULL) {
-        g_error("Failed to interpret shm format: %d", frame_buffer->impl.shm.buffer_format);
+        g_error("Failed to interpret shm format: %d", frame->format);
     }
 
     sample_caps = gst_caps_new_simple("video/x-raw",
                                       "framerate", GST_TYPE_FRACTION, FPS, 1,
                                       "format", G_TYPE_STRING, shmbuf_support_format->gst_format_string,
-                                      "width", G_TYPE_INT, frame_buffer->width,
-                                      "height", G_TYPE_INT, frame_buffer->height,
+                                      "width", G_TYPE_INT, frame->width,
+                                      "height", G_TYPE_INT, frame->height,
                                       NULL);
-    gst_frame_encoder_pipeline_coded_size(gst_frame_encoder->description, frame_buffer->width,
-                                          frame_buffer->height,
+    gst_frame_encoder_pipeline_coded_size(gst_frame_encoder->description, frame->width,
+                                          frame->height,
                                           &coded_width, &coded_height);
 
-    frame_encoding_result->props.width = frame_buffer->width;
-    frame_encoding_result->props.height = frame_buffer->height;
+    frame_encoding_result->props.width = frame->width;
+    frame_encoding_result->props.height = frame->height;
     frame_encoding_result->props.coded_width = coded_width;
     frame_encoding_result->props.coded_height = coded_height;
     // decided before anything is pushed: the encoded frames come back on another thread
@@ -1018,8 +1060,8 @@ gst_frame_encoder_encode_shm(struct gst_frame_encoder *gst_frame_encoder, const 
     g_mutex_unlock(&gst_frame_encoder->frame_encoder->results_mutex);
     const bool software = gst_frame_encoder->description->software;
     opaque_sample = software
-                    ? software_sample(frame_buffer, shmbuf_support_format, coded_width, coded_height, false)
-                    : shm_frame_buffer_to_new_gst_frame_sample(frame_buffer, shmbuf_support_format, sample_caps);
+                    ? software_sample(frame, shmbuf_support_format, coded_width, coded_height, false)
+                    : shm_frame_to_new_gst_frame_sample(frame, shmbuf_support_format, sample_caps);
 
     gst_frame_encoder_pipeline_encode(gst_frame_encoder_get_pipeline(gst_frame_encoder, false), opaque_sample,
                                       frame_encoding_result->props.buffer_content_serial);
@@ -1027,8 +1069,8 @@ gst_frame_encoder_encode_shm(struct gst_frame_encoder *gst_frame_encoder, const 
 
     if (has_alpha) {
         alpha_sample = software
-                       ? software_sample(frame_buffer, shmbuf_support_format, coded_width, coded_height, true)
-                       : shm_frame_buffer_to_new_gst_frame_sample(frame_buffer, shmbuf_support_format, sample_caps);
+                       ? software_sample(frame, shmbuf_support_format, coded_width, coded_height, true)
+                       : shm_frame_to_new_gst_frame_sample(frame, shmbuf_support_format, sample_caps);
         gst_frame_encoder_pipeline_encode(gst_frame_encoder_get_pipeline(gst_frame_encoder, true), alpha_sample,
                                           frame_encoding_result->props.buffer_content_serial);
         gst_sample_unref(alpha_sample);
@@ -1037,11 +1079,34 @@ gst_frame_encoder_encode_shm(struct gst_frame_encoder *gst_frame_encoder, const 
     gst_caps_unref(sample_caps);
 }
 
+/* An EGL image of a dmabuf frame: it holds a reference to the frame until the image is destroyed. */
+struct frame_egl_image {
+    struct westfield_egl *egl;
+    struct nebula_frame *frame;
+};
+
 static void
 destroy_gst_egl_image(GstEGLImage *image, gpointer user_data) {
-    struct gst_frame_encoder_pipeline *gst_encoder_pipeline = user_data;
-    westfield_egl_destroy_image(gst_encoder_pipeline->gst_frame_encoder->frame_encoder->westfield_egl,
-                                gst_egl_image_get_image(image));
+    struct frame_egl_image *frame_egl_image = user_data;
+    westfield_egl_destroy_image(frame_egl_image->egl, gst_egl_image_get_image(image));
+    nebula_frame_release(frame_egl_image->frame);
+    g_free(frame_egl_image);
+}
+
+/* The frame's dmabuf in the form westfield_egl imports. */
+static void
+frame_dmabuf_attributes(const struct nebula_frame *frame, struct dmabuf_attributes *attributes) {
+    memset(attributes, 0, sizeof(*attributes));
+    attributes->width = (int32_t) frame->width;
+    attributes->height = (int32_t) frame->height;
+    attributes->format = frame->format;
+    attributes->modifier = frame->description.dmabuf.modifier;
+    attributes->n_planes = (int) frame->description.dmabuf.n_planes;
+    for (uint32_t i = 0; i < frame->description.dmabuf.n_planes && i < WESTFIELD_DMABUF_MAX_PLANES; i++) {
+        attributes->fd[i] = frame->description.dmabuf.planes[i].fd;
+        attributes->offset[i] = frame->description.dmabuf.planes[i].offset;
+        attributes->stride[i] = frame->description.dmabuf.planes[i].stride;
+    }
 }
 
 static void
@@ -1052,8 +1117,10 @@ destroy_gst_gl_memory(gpointer data) {
 
 static inline GstBuffer *
 gst_frame_encoder_pipeline_create_gl_memory_buffer(struct gst_frame_encoder_pipeline *gst_frame_encoder_pipeline,
-                                                   const struct frame_buffer *frame_buffer, GstCaps *caps) {
-    const struct dmabuf_attributes *attributes = frame_buffer->impl.dma.attributes;
+                                                   struct nebula_frame *frame, GstCaps *caps) {
+    struct gst_frame_encoder *gst_frame_encoder = gst_frame_encoder_pipeline->gst_frame_encoder;
+    struct dmabuf_attributes attributes;
+    frame_dmabuf_attributes(frame, &attributes);
     GstGLMemoryAllocator *allocator = GST_GL_MEMORY_ALLOCATOR (gst_allocator_find(GST_GL_MEMORY_EGL_ALLOCATOR_NAME));
     GstBuffer *buffer = gst_buffer_new();
     GstVideoInfo *video_info;
@@ -1062,15 +1129,17 @@ gst_frame_encoder_pipeline_create_gl_memory_buffer(struct gst_frame_encoder_pipe
     GstGLVideoAllocationParams *params;
     gboolean ret;
     bool external_only;
-    EGLImageKHR egl_image = westfield_egl_create_image_from_dmabuf(
-            gst_frame_encoder_pipeline->gst_frame_encoder->frame_encoder->westfield_egl,
-            attributes,
-            &external_only);
+    EGLImageKHR egl_image = westfield_egl_create_image_from_dmabuf(gst_frame_encoder->egl, &attributes,
+                                                                   &external_only);
 
-    gst_egl_image = gst_egl_image_new_wrapped(gst_frame_encoder_pipeline->gst_frame_encoder->shared_gst_gl_context,
+    struct frame_egl_image *frame_egl_image = g_new0(struct frame_egl_image, 1);
+    frame_egl_image->egl = gst_frame_encoder->egl;
+    frame_egl_image->frame = frame;
+    nebula_frame_retain(frame);
+    gst_egl_image = gst_egl_image_new_wrapped(gst_frame_encoder->shared_gst_gl_context,
                                               egl_image,
                                               GST_GL_RGBA8,
-                                              gst_frame_encoder_pipeline,
+                                              frame_egl_image,
                                               destroy_gst_egl_image);
 
     video_info = gst_video_info_new();
@@ -1102,10 +1171,9 @@ gst_frame_encoder_pipeline_create_gl_memory_buffer(struct gst_frame_encoder_pipe
 static inline GstSample *
 gst_frame_encoder_pipeline_dmabuf_attributes_to_new_gst_sample(
         struct gst_frame_encoder_pipeline *gst_frame_encoder_pipeline,
-        const struct frame_buffer *frame_buffer,
+        struct nebula_frame *frame,
         GstCaps *caps) {
-    GstBuffer *buffer = gst_frame_encoder_pipeline_create_gl_memory_buffer(gst_frame_encoder_pipeline, frame_buffer,
-                                                                           caps);
+    GstBuffer *buffer = gst_frame_encoder_pipeline_create_gl_memory_buffer(gst_frame_encoder_pipeline, frame, caps);
 
     GstGLSyncMeta *sync_meta = gst_buffer_get_gl_sync_meta (buffer);
     if (sync_meta) {
@@ -1121,27 +1189,27 @@ gst_frame_encoder_pipeline_dmabuf_attributes_to_new_gst_sample(
 
 static inline void
 gst_frame_encoder_encode_dmabuf(struct gst_frame_encoder *gst_frame_encoder,
-                                const struct frame_buffer *frame_buffer,
+                                struct nebula_frame *frame,
                                 struct frame_encoding_result *frame_encoding_result) {
     GstCaps *sample_caps;
     GstSample *opaque_sample, *alpha_sample;
     uint32_t coded_width, coded_height;
 
-    const bool dmabuf_has_alpha = dmabuf_format_has_alpha(frame_buffer->impl.dma.attributes->format);
+    const bool dmabuf_has_alpha = dmabuf_format_has_alpha(frame->format);
 
     sample_caps = gst_caps_new_simple("video/x-raw",
                                       "framerate", GST_TYPE_FRACTION, FPS, 1,
                                       "format", G_TYPE_STRING, "RGBA",
-                                      "width", G_TYPE_INT, frame_buffer->width,
-                                      "height", G_TYPE_INT, frame_buffer->height,
+                                      "width", G_TYPE_INT, frame->width,
+                                      "height", G_TYPE_INT, frame->height,
                                       NULL);
-    gst_frame_encoder_pipeline_coded_size(gst_frame_encoder->description, frame_buffer->width,
-                                          frame_buffer->height,
+    gst_frame_encoder_pipeline_coded_size(gst_frame_encoder->description, frame->width,
+                                          frame->height,
                                           &coded_width,
                                           &coded_height);
 
-    frame_encoding_result->props.width = frame_buffer->width;
-    frame_encoding_result->props.height = frame_buffer->height;
+    frame_encoding_result->props.width = frame->width;
+    frame_encoding_result->props.height = frame->height;
     frame_encoding_result->props.coded_width = coded_width;
     frame_encoding_result->props.coded_height = coded_height;
     // decided before anything is pushed: the encoded frames come back on another thread
@@ -1151,7 +1219,7 @@ gst_frame_encoder_encode_dmabuf(struct gst_frame_encoder *gst_frame_encoder,
     g_mutex_unlock(&gst_frame_encoder->frame_encoder->results_mutex);
 
     struct gst_frame_encoder_pipeline *opaque_pipeline = gst_frame_encoder_get_pipeline(gst_frame_encoder, false);
-    opaque_sample = gst_frame_encoder_pipeline_dmabuf_attributes_to_new_gst_sample(opaque_pipeline, frame_buffer,
+    opaque_sample = gst_frame_encoder_pipeline_dmabuf_attributes_to_new_gst_sample(opaque_pipeline, frame,
                                                                                    sample_caps);
     gst_frame_encoder_pipeline_encode(opaque_pipeline, opaque_sample,
                                       frame_encoding_result->props.buffer_content_serial);
@@ -1159,7 +1227,7 @@ gst_frame_encoder_encode_dmabuf(struct gst_frame_encoder *gst_frame_encoder,
 
     if (frame_encoding_result->has_split_alpha) {
         struct gst_frame_encoder_pipeline *alpha_pipeline = gst_frame_encoder_get_pipeline(gst_frame_encoder, true);
-        alpha_sample = gst_frame_encoder_pipeline_dmabuf_attributes_to_new_gst_sample(alpha_pipeline, frame_buffer,
+        alpha_sample = gst_frame_encoder_pipeline_dmabuf_attributes_to_new_gst_sample(alpha_pipeline, frame,
                                                                                       sample_caps);
         gst_frame_encoder_pipeline_encode(alpha_pipeline, alpha_sample,
                                           frame_encoding_result->props.buffer_content_serial);
@@ -1170,17 +1238,17 @@ gst_frame_encoder_encode_dmabuf(struct gst_frame_encoder *gst_frame_encoder,
 }
 
 static inline void
-gst_frame_encoder_encode(struct gst_frame_encoder *gst_encoder, const struct frame_buffer *frame_buffer,
+gst_frame_encoder_encode(struct gst_frame_encoder *gst_encoder, struct nebula_frame *frame,
                          struct frame_encoding_result *encoding_result) {
     encoding_result->props.frame_encoding_type = gst_encoder->description->frame_encoding_type;
 
-    if (frame_buffer->type == DMA) {
-        gst_frame_encoder_encode_dmabuf(gst_encoder, frame_buffer, encoding_result);
+    if (frame->memory == NEBULA_FRAME_DMABUF) {
+        gst_frame_encoder_encode_dmabuf(gst_encoder, frame, encoding_result);
         return;
     }
 
-    if (frame_buffer->type == SHM) {
-        gst_frame_encoder_encode_shm(gst_encoder, frame_buffer, encoding_result);
+    if (frame->memory == NEBULA_FRAME_SHM) {
+        gst_frame_encoder_encode_shm(gst_encoder, frame, encoding_result);
         return;
     }
 }
@@ -1188,20 +1256,20 @@ gst_frame_encoder_encode(struct gst_frame_encoder *gst_encoder, const struct fra
 static inline bool
 frame_encoder_description_supports_buffer(const struct frame_encoder_description *frame_encoder_description,
                                           const char *preferred_frame_encoder,
-                                          const struct frame_buffer *frame_buffer) {
+                                          const struct nebula_frame *frame) {
     // different encoder preferred so not for this interface
     if (strcmp(frame_encoder_description->name, preferred_frame_encoder) != 0) {
         return false;
     }
 
     // small buffers are padded to the encoder's minimum size (see gst_frame_encoder_pipeline_coded_size)
-    if (frame_buffer->type == DMA) {
-        return !frame_encoder_description->software;
+    // a dmabuf is imported with the codec's GPU context on the frame's device, so the device must be known
+    if (frame->memory == NEBULA_FRAME_DMABUF) {
+        return !frame_encoder_description->software && frame->device != 0;
     }
 
-    if (frame_buffer->type == SHM) {
-        if (frame_buffer->impl.shm.buffer_format == WL_SHM_FORMAT_ARGB8888 ||
-            frame_buffer->impl.shm.buffer_format == WL_SHM_FORMAT_XRGB8888) {
+    if (frame->memory == NEBULA_FRAME_SHM) {
+        if (frame->format == DRM_FORMAT_ARGB8888 || frame->format == DRM_FORMAT_XRGB8888) {
             return true;
         }
     }
@@ -1312,7 +1380,7 @@ do_gst_init() {
 
 void
 do_gst_frame_encoder_create(char preferred_frame_encoder[16], frame_callback_func frame_ready_callback, void *user_data,
-                            struct frame_encoder **frame_encoder_pp, struct westfield_egl *westfield_egl) {
+                            struct frame_encoder **frame_encoder_pp) {
     struct frame_encoder *frame_encoder = g_new0(struct frame_encoder, 1);
 
     strncpy(frame_encoder->preferred_frame_encoder, preferred_frame_encoder,
@@ -1323,13 +1391,13 @@ do_gst_frame_encoder_create(char preferred_frame_encoder[16], frame_callback_fun
     frame_encoder->qp = QP_HIGH;
     frame_encoder->frame_encoding_results = g_queue_new();
     g_mutex_init(&frame_encoder->results_mutex);
-    frame_encoder->westfield_egl = westfield_egl;
 
     // Warm up: create the preferred (video) encoder's pipelines right away, so the first frame doesn't pay for it.
     const size_t nro_encoders = sizeof(frame_encoder_descriptions) / sizeof(frame_encoder_descriptions[0]);
     for (size_t i = 0; i < nro_encoders; i++) {
         if (strcmp(frame_encoder_descriptions[i].name, frame_encoder->preferred_frame_encoder) == 0) {
-            gst_frame_encoder_create(frame_encoder, &frame_encoder_descriptions[i]);
+            // no GPU context yet: the first dmabuf frame says which GPU (see gpu_context_for_device)
+            gst_frame_encoder_create(frame_encoder, &frame_encoder_descriptions[i], 0);
             break;
         }
     }
@@ -1337,12 +1405,10 @@ do_gst_frame_encoder_create(char preferred_frame_encoder[16], frame_callback_fun
     *frame_encoder_pp = frame_encoder;
 }
 
+/* Takes over the caller's reference to the frame. */
 void
-do_gst_frame_encoder_encode(struct frame_encoder **frame_encoder_pp, const struct frame_buffer *frame_buffer,
-                            const uint32_t buffer_content_serial,
-                            const uint32_t buffer_creation_serial) {
+do_gst_frame_encoder_encode(struct frame_encoder **frame_encoder_pp, struct nebula_frame *frame) {
     struct frame_encoder *encoder = *frame_encoder_pp;
-    frame_buffer_ref_count_init((struct frame_buffer *) frame_buffer);
 
     if (encoder->terminated) {
         g_error("BUG. Can not encode. Encoder is terminated.");
@@ -1352,8 +1418,10 @@ do_gst_frame_encoder_encode(struct frame_encoder **frame_encoder_pp, const struc
     const size_t nro_encoders = sizeof(frame_encoder_descriptions) / sizeof(frame_encoder_descriptions[0]);
 
     if (encoder->impl != NULL) {
+        // a dmabuf needs the GPU context of its own device
         if (!frame_encoder_description_supports_buffer(encoder->impl->description, encoder->preferred_frame_encoder,
-                                                       frame_buffer)) {
+                                                       frame) ||
+            (frame->memory == NEBULA_FRAME_DMABUF && encoder->impl->device != frame->device)) {
             gst_frame_encoder_eos(encoder->impl);
             encoder->impl = NULL;
         }
@@ -1363,8 +1431,9 @@ do_gst_frame_encoder_encode(struct frame_encoder **frame_encoder_pp, const struc
         for (int i = 0; i < nro_encoders; i++) {
             if (frame_encoder_description_supports_buffer(&frame_encoder_descriptions[i],
                                                           encoder->preferred_frame_encoder,
-                                                          frame_buffer)) {
-                gst_frame_encoder_create(encoder, &frame_encoder_descriptions[i]);
+                                                          frame)) {
+                gst_frame_encoder_create(encoder, &frame_encoder_descriptions[i],
+                                         frame->memory == NEBULA_FRAME_DMABUF ? frame->device : 0);
                 assert(encoder->impl != NULL && "Found matching encoder and have implementation.");
                 break;
             }
@@ -1375,18 +1444,20 @@ do_gst_frame_encoder_encode(struct frame_encoder **frame_encoder_pp, const struc
         // Buffer could have been destroyed, or no matching encoder is available, return an empty encoding result
         // FIXME log & handle this
         encoder->frame_callback(encoder->user_data, NULL);
-        frame_buffer_ref_count_dec(frame_buffer);
+        nebula_frame_release(frame);
         return;
     }
 
     encoding_result = g_new0(struct frame_encoding_result, 1);
     g_mutex_init(&encoding_result->mutex);
-    encoding_result->props.buffer_content_serial = buffer_content_serial;
-    encoding_result->props.buffer_creation_serial = buffer_creation_serial;
-    encoding_result->props.buffer_id = frame_buffer->buffer_id;
-    gst_frame_encoder_encode(encoder->impl, frame_buffer, encoding_result);
+    encoding_result->props.buffer_content_serial = frame->content_serial;
+    // buffer id and creation serial: not known to the codec, and not read by the viewer
+    encoding_result->props.buffer_creation_serial = 0;
+    encoding_result->props.buffer_id = 0;
+    gst_frame_encoder_encode(encoder->impl, frame, encoding_result);
 
-    frame_buffer_ref_count_dec(frame_buffer);
+    // the samples hold their own references while GStreamer reads the buffer
+    nebula_frame_release(frame);
 }
 
 void

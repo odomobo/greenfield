@@ -9,12 +9,10 @@ do_gst_init();
 
 extern void
 do_gst_frame_encoder_create(char preferred_frame_encoder[16], frame_callback_func frame_ready_callback, void *user_data,
-                            struct frame_encoder **frame_encoder_pp, struct westfield_egl *westfield_egl);
+                            struct frame_encoder **frame_encoder_pp);
 
 extern void
-do_gst_frame_encoder_encode(struct frame_encoder **frame_encoder_pp, const struct frame_buffer *frame_buffer,
-                            uint32_t buffer_content_serial,
-                            uint32_t buffer_creation_serial);
+do_gst_frame_encoder_encode(struct frame_encoder **frame_encoder_pp, struct nebula_frame *frame);
 
 extern void
 do_gst_frame_encoder_free(struct frame_encoder **frame_encoder_pp);
@@ -51,13 +49,10 @@ struct gf_message {
             frame_callback_func frame_ready_callback;
             void *user_data;
             struct frame_encoder **frame_encoder_pp;
-            struct westfield_egl *westfield_egl;
         } frame_encoder_create;
         struct {
             struct frame_encoder **frame_encoder_pp;
-            const struct frame_buffer *frame_buffer;
-            uint32_t buffer_content_serial;
-            uint32_t buffer_creation_serial;
+            struct nebula_frame *frame;
         } frame_encoder_encode;
         struct {
             struct frame_encoder **frame_encoder_pp;
@@ -164,16 +159,12 @@ main_loop_handle_message(struct gf_message *message) {
             do_gst_frame_encoder_create(message->body.frame_encoder_create.preferred_frame_encoder,
                                         message->body.frame_encoder_create.frame_ready_callback,
                                         message->body.frame_encoder_create.user_data,
-                                        message->body.frame_encoder_create.frame_encoder_pp,
-                                        message->body.frame_encoder_create.westfield_egl
+                                        message->body.frame_encoder_create.frame_encoder_pp
             );
             break;
         case frame_encoder_encode_type:
             do_gst_frame_encoder_encode(message->body.frame_encoder_encode.frame_encoder_pp,
-                                        message->body.frame_encoder_encode.frame_buffer,
-                                        message->body.frame_encoder_encode.buffer_content_serial,
-                                        message->body.frame_encoder_encode.buffer_creation_serial
-            );
+                                        message->body.frame_encoder_encode.frame);
             break;
         case frame_encoder_free_type:
             do_gst_frame_encoder_free(message->body.frame_encoder_free.frame_encoder_pp);
@@ -235,8 +226,7 @@ int
 frame_encoder_create(char preferred_frame_encoder[16],
                      frame_callback_func frame_ready_callback,
                      void *user_data,
-                     struct frame_encoder **frame_encoder_pp,
-                     struct westfield_egl *westfield_egl) {
+                     struct frame_encoder **frame_encoder_pp) {
     struct gf_message *message = g_new0(struct gf_message, 1);
 
     message->type = frame_encoder_create_type;
@@ -244,22 +234,17 @@ frame_encoder_create(char preferred_frame_encoder[16],
     message->body.frame_encoder_create.frame_ready_callback = frame_ready_callback;
     message->body.frame_encoder_create.user_data = user_data;
     message->body.frame_encoder_create.frame_encoder_pp = frame_encoder_pp;
-    message->body.frame_encoder_create.westfield_egl = westfield_egl;
 
     return send_message(message);
 }
 
 int
-frame_encoder_encode(struct frame_encoder **frame_encoder_pp, const struct frame_buffer *frame_buffer,
-                     uint32_t buffer_content_serial,
-                     uint32_t buffer_creation_serial) {
+frame_encoder_encode(struct frame_encoder **frame_encoder_pp, struct nebula_frame *frame) {
     struct gf_message *message = g_new0(struct gf_message, 1);
 
     message->type = frame_encoder_encode_type;
     message->body.frame_encoder_encode.frame_encoder_pp = frame_encoder_pp;
-    message->body.frame_encoder_encode.frame_buffer = frame_buffer;
-    message->body.frame_encoder_encode.buffer_content_serial = buffer_content_serial;
-    message->body.frame_encoder_encode.buffer_creation_serial = buffer_creation_serial;
+    message->body.frame_encoder_encode.frame = frame;
 
     return send_message(message);
 }

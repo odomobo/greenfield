@@ -42,7 +42,6 @@ class FakeCore {
       setPosition: (sid: number, x: number, y: number) => {
         this.positions.push([sid, x, y])
       },
-      createFrameEncoder: () => ({}),
     } as Record<string, unknown>,
     { get: (target, name: string) => target[name] ?? (() => undefined) },
   ) as unknown as WlrNative

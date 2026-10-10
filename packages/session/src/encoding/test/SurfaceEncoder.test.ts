@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { type Patch, PatchFormat } from '@gfld/scene-protocol'
 import type { EncodedPatch, Frame, Rect, SendTier, SurfaceClass } from '@nebula/session-contracts'
 import { MAX_NORMAL_ENCODES } from '@nebula/scheduler'
-import { EncoderPool } from '../EncoderPool.js'
+import { EncoderPool } from '@nebula/video-codec'
 import { CLASS_PERIOD_MS } from '../policy.js'
 import { area } from '../region.js'
 import {
@@ -211,14 +211,19 @@ class FakeSurface implements SurfaceHost<FakeEncoder> {
     }
   }
 
-  encodeVideo(encoder: FakeEncoder, buffer: BufferInfo) {
+  /** like the video codec: the frame is released once encoded */
+  encodeVideo(encoder: FakeEncoder, frame: Frame) {
     this.videoEncodes++
     return new Promise<Uint8Array>((resolve) => {
-      const frame = new Uint8Array([buffer.contentSerial])
+      const encoded = new Uint8Array([frame.contentSerial])
+      const done = (result: Uint8Array) => {
+        frame.release()
+        resolve(result)
+      }
       if (this.autoEncode) {
-        resolve(frame)
+        done(encoded)
       } else {
-        this.encodes.push({ encoder, resolve })
+        this.encodes.push({ encoder, resolve: done })
       }
     })
   }
@@ -760,6 +765,24 @@ test('video that finishes encoding after the surface was destroyed is dropped, a
   assert.equal(env.pool.available, 2)
 })
 
+test('each video frame is encoded from a frame of the buffer, held only while it is encoded', async () => {
+  const env = setup(2)
+  const { encoder, host } = env.surface('a')
+  await relentless(env, encoder, host)
+  assert.ok(encoder.usesVideo)
+  env.sink.flowFreely()
+  await settle()
+  assert.equal(host.heldFrames, 0)
+  host.autoEncode = false
+  host.touch()
+  void encoder.commit(full(host))
+  assert.equal(host.encodes.length, 1)
+  assert.equal(host.heldFrames, 1, 'the frame being encoded')
+  host.encodes[0].resolve(new Uint8Array([1]))
+  await settle()
+  assert.equal(host.heldFrames, 0)
+})
+
 test('a video frame wanted while the stream is not ready is encoded once it is', async () => {
   const env = setup(2)
   const { encoder, host } = env.surface('a')
@@ -870,36 +893,6 @@ test('without a video encoder a buffer that cannot be read is not shown: logged 
   assert.equal(env.errors.length, 1)
   assert.match(env.errors[0], /\ba\b/)
   assert.equal(env.created, 0)
-})
-
-test('an encoder that cannot be created is reported once and the pool behaves as empty', async () => {
-  let reported = 0
-  const pool = new EncoderPool<FakeEncoder>(
-    () => {
-      throw new Error('no device')
-    },
-    4,
-    () => reported++,
-  )
-  pool.warm()
-  assert.equal(pool.size, 0)
-  assert.equal(pool.available, 0)
-  assert.equal(pool.acquire(), undefined)
-  assert.equal(pool.acquireAlways(), undefined)
-  assert.equal(reported, 1)
-})
-
-test('a size 0 pool never creates an encoder', async () => {
-  let created = 0
-  const pool = new EncoderPool<FakeEncoder>(() => {
-    created++
-    return new FakeEncoder()
-  }, 0)
-  pool.warm()
-  assert.equal(pool.acquire(), undefined)
-  assert.equal(pool.acquireAlways(), undefined)
-  assert.equal(pool.size, 0)
-  assert.equal(created, 0)
 })
 
 test('refresh resends the whole surface, as a key frame for video and as patches otherwise', async () => {

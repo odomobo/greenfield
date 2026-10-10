@@ -43,9 +43,8 @@ Since wave 2 B, X11 apps run too (XWayland).
   `toplevel-request-window-menu(sid, x, y)` (main surface coordinates), which the viewer answers with our window menu.
   The `suspended` state isn't used.
 - `native/wlr-core/src/xwayland_sockets.c`: replaces wlroots' `xwayland/sockets.c` at link time (see the gotchas).
-- `native/wlr-core/src/wlr_core_encoder.c`: the existing GStreamer encoder (`native/encoding`), compiled into the same
-  addon against the system libwayland (`shim/westfield.h`), fed from wlroots buffers. `src/westfield-egl.c`,
-  `westfield-dmabuf.c` and `drm_format_set.c` (with their headers) are the encoder's EGL and dmabuf helpers.
+- Video encoding isn't in this addon: the GStreamer encoder is the video codec's (`packages/video-codec`, its own addon
+  with its EGL and dmabuf helpers), which reads frames that `takeFrame` hands out.
 - `src/wlroots/WlrCompositor.ts`: the policy, like the TypeScript compositor's `server/scene.ts`: window positions,
   stacking, activation and keyboard focus, minimize, maximize, child windows centered on their parent, frame pacing,
   and one `SurfaceEncoder` per surface. It is both the `WindowSceneEndpoint` and the `SurfaceContent` of a `ViewerHost`.
@@ -189,7 +188,7 @@ XWayland (wave 2 B):
   `ZINK` lines in the session log are that fallback. Without a compositing manager GTK draws no client-side shadow under
   X11, so an X11 window is exactly its X11 window (geometry 0, 0, width, height). xev doesn't set WM_CLASS.
 
-### Video encoder (`native/encoding/src/gst_frame_encoder.c`)
+### Video encoder (`packages/video-codec/native/src/gst_frame_encoder.c`)
 
 Since Core 2a the encoder is only used with GPU acceleration (`--encoder nvh264|vaapih264`, or `auto` finding one) and
 only for streaming surfaces (see "Encoding policy" in ARCHITECTURE.md). With `--encoder none` (what `auto` resolves to
@@ -201,7 +200,7 @@ gone. None of the following is tested here (no GPU).
   extraction), glcolorconvert, (gldownload), the encoder. They're created at warm-up.
 - **Fixed quality, variable bitrate**: constant QP, no bitrate cap (nvh264enc `rc-mode=constqp`, `qp-const`;
   vaapih264enc `rate-control=cqp`, `init-qp`). Two levels, `QP_HIGH` and `QP_LOW` at the top of the file:
-  `setQuality(encoder, high)` (TypeScript: `WlrEncoder.setQuality`, called by `SurfaceEncoder` before each frame:
+  `setQuality(encoder, high)` (TypeScript: `H264Encoder.setQuality` of `@nebula/video-codec`, called by `SurfaceEncoder` before each frame:
   low while the transport says bandwidth is short) sets the encoder element's QP property while it runs (the element is
   named `encoder` in every pipeline) and forces a key frame. Whether these encoders pick up a QP change while playing
   is unverified (on hardware): if they don't, the pipelines have to be rebuilt on a change.

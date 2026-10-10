@@ -200,8 +200,18 @@ doesn't need to know a surface's class; nothing about it is in the scene protoco
   device, missing element) is logged once and the session continues as `none`.
 - `none` means no video encoder is ever created: the encoder pool has size 0 and the GStreamer video pipelines are
   never built. **There is no video on the CPU** (decided 2026-10-05, done in item 5b phase 2): the x264 encoder and
-  the CPU alpha path (alpha bytes written as I420 luma for x264) are gone from `native/encoding/src/gst_frame_encoder.c`;
-  video exists only with a GPU, and every buffer takes the GL pipelines there.
+  the CPU alpha path (alpha bytes written as I420 luma for x264) are gone from the GStreamer encoder
+  (`packages/video-codec/native/src/gst_frame_encoder.c`); video exists only with a GPU, and every buffer takes the GL
+  pipelines there. (A dev-only software x264 path, `--dev-software-encoder`, exists for testing the video path without
+  a GPU.)
+- The video codec is its own package (`@nebula/video-codec`: the encoder in its own addon, the pool of encoder
+  instances `EncoderPool`, encoder detection `detect.ts`). It encodes **frames** (`@nebula/frames`): capture hands out a
+  frame of a surface's buffer, the codec reads it and releases it from GStreamer's thread once done (the frame library
+  takes the release back to capture's thread, where the wlroots buffer is unlocked). Capture knows nothing about video.
+- **GPU context**: the codec opens its own GPU context (EGL) on the device a frame's buffer lives on (the frame's
+  `device`, a DRM `dev_t`), one per device, instead of sharing the compositor's EGL handle. Shared-memory frames need
+  none (the GL elements make their own context). Capture doesn't receive dmabufs yet (no linux-dmabuf global, no
+  renderer), so frames carry device 0; once it does, it sets the render node it advertises.
 - A buffer whose pixels can't be read (`readPixels` fails; today only an unsupported SHM format, as there are no GPU
   buffers without the GLES2 renderer) is sent as video if an encoder exists, regardless of class. With `none` it
   can't be shown: log once per surface and send nothing for it.
