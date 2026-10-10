@@ -1,19 +1,19 @@
 /**
  * Per-surface encoding state machine (see "Encoding policy" in ARCHITECTURE.md). A surface is in the normal or the
- * streaming priority class (relentless surfaces, see RelentlessMeter). Its content goes out as patches of the damaged
- * areas, or, for streaming surfaces when a hardware video encoder is available, as H.264 video of the whole surface.
- * Patches are lossless, except a streaming surface's while the link is short of bandwidth (the sink says so): those may
- * be JPEG. The areas whose last update was lossy (JPEG patches, video) are tracked, and a surface settles them: whenever
- * it has no damage to send, it sends them again losslessly, in the transport's lowest tier (new damage comes first).
+ * streaming priority class, as its traffic-policy decision says (relentless surfaces; see @nebula/traffic-policy). Its
+ * content goes out as patches of the damaged areas, or, for streaming surfaces when a hardware video encoder is
+ * available, as H.264 video of the whole surface. Patches are lossless, except while the decision says the surface is
+ * link-bound (a streaming surface while the link is short of bandwidth): those may be JPEG. The areas whose last update
+ * was lossy (JPEG patches, video) are tracked, and a surface settles them: whenever it has no damage to send, it sends
+ * them again losslessly, in the transport's lowest tier (new damage comes first).
  * A surface encodes one item (a patch or a video frame) at a time, and starts the next only when its stream in the sink
  * is ready for it (at most about a chunk of its data waits to be sent).
  *
- * Besides the time measure (RelentlessMeter), a normal surface is promoted by a burst: each surface keeps an estimate
- * of its lossless bytes per pixel, so its unsent damage predicts a backlog in bytes, and while the normal surfaces'
- * predicted backlog needs more than BURST_MS at the link's bandwidth (known once the link was limited), the one with
- * the largest is promoted (EncodingContext.checkBurst). A streaming surface is demoted only once it has no damage left
- * and is fully settled. Native code is reached only through the injected host, sink and pool, so this runs (and is
- * tested) without it.
+ * The surface reports to traffic policy what it measures the surface by: whether it is busy (has damage work unsent),
+ * its commits, its predicted backlog (each surface keeps an estimate of its lossless bytes per pixel, so its unsent
+ * damage predicts a backlog in bytes), and whether it is settled (a streaming surface is demoted only once it has no
+ * damage left and is fully settled). Policy tells it when a burst promoted it. Native code is reached only through the
+ * injected host, sink and pool, so this runs (and is tested) without it.
  */
 import { isLossyPatchFormat, type Patch } from '@gfld/scene-protocol'
 import { PatchPump } from '@nebula/scheduler'
@@ -27,13 +27,17 @@ import type {
   PatchShape,
   PatchSource,
   Rect,
+  PeriodFractions,
   SendTier,
   StreamingEncodePool,
   SurfaceClass,
+  SurfacePolicy,
+  SurfaceTraffic,
+  TrafficSource,
   VideoEncoder,
   VideoQuality,
 } from '@nebula/session-contracts'
-import { BURST_MS, MAX_PATCH_PIXELS, MAX_PATCH_RECTS, PeriodFractions, planPatches, RelentlessMeter } from './policy.js'
+import { MAX_PATCH_PIXELS, MAX_PATCH_RECTS, planPatches } from './patch-plan.js'
 import { area, boundingBox, clip, disjoint, intersect, subtract } from './region.js'
 
 /** A surface's lossy area in more pieces than this is tracked as its bounding box (refreshing a little more). */
@@ -67,13 +71,6 @@ export type {
 export interface EncodingSink {
   /** true if a viewer is attached; nothing is encoded without one */
   readonly active: boolean
-  /** the link is short of bandwidth: streaming surfaces go lossy (JPEG patches, lower-quality video) */
-  readonly bandwidthLimited: boolean
-  /**
-   * The link's bandwidth (bytes per ms) as measured when it was last bandwidth-limited; undefined if it never was on
-   * this connection (an estimate of a link that was never full is only a lower bound).
-   */
-  readonly linkBandwidth: number | undefined
   /** The bytes of the surface's items waiting to be sent, except settling patches. */
   queuedBytes(surface: string): number
   /**
@@ -121,10 +118,9 @@ function isSmall(buffer: BufferInfo): boolean {
   return buffer.width * buffer.height <= MAX_PATCH_PIXELS
 }
 
-export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements PatchSource {
-  private readonly meter: RelentlessMeter
-  /** the class the surface's encoding follows now (the meter decides it at period ends, `evaluate` applies it) */
-  private appliedClass: SurfaceClass = 'normal'
+export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements PatchSource, TrafficSource {
+  /** its traffic-policy decision (class, bottleneck), and where it reports what policy measures it by */
+  private readonly traffic: SurfaceTraffic
   /** patches queued but not captured yet: they will read the latest pixels when they are */
   private queued: Rect[] = []
   /** bumped whenever queued content is superseded (video start or stop), results of encodings started before are dropped */
@@ -169,17 +165,13 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     private readonly host: SurfaceHost<V>,
     private readonly context: EncodingContext<V>,
   ) {
-    // demoted only once it has no damage left and is fully settled (video: stopping it sends a crisp image)
-    this.meter = new RelentlessMeter(
-      context.now(),
-      undefined,
-      () => !this.hasDamageWork && (this.lease !== undefined || this.lossyArea.length === 0),
-    )
+    this.traffic = context.traffic.addSurface(this)
     context.surfaces.add(this)
   }
 
+  /** its priority class, as traffic policy decided */
   get surfaceClass(): SurfaceClass {
-    return this.appliedClass
+    return this.traffic.surfaceClass
   }
 
   get destroyed(): boolean {
@@ -191,7 +183,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
   }
 
   get sendTier(): SendTier {
-    return this.queued.length > 0 ? this.surfaceClass : 'settle'
+    return this.traffic.sendTier(this.queued.length === 0)
   }
 
   get mayCapture(): boolean {
@@ -216,7 +208,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     return this.hasDamageWork || this.unsentSettling > 0 || this.settleQueue.length > 0
   }
 
-  /** Unsent work except settling: what makes the surface busy (see RelentlessMeter), and what settling waits for. */
+  /** Unsent work except settling: what makes the surface busy (for traffic policy), and what settling waits for. */
   get hasDamageWork(): boolean {
     return this.queued.length > 0 || this.unsentItems > this.unsentSettling || this.videoWanted !== undefined
   }
@@ -242,14 +234,24 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     return this.context.sink.queuedBytes(this.key) + this.unencodedBytes
   }
 
-  /** the surface is backlogged (see RelentlessMeter) */
+  /** the surface is backlogged (as traffic policy measures it) */
   get backlogged(): boolean {
-    return this.meter.backlogged
+    return this.traffic.backlogged
   }
 
   /** the busy and backlogged shares of the last completed period, for tests and logging */
   get lastPeriod(): PeriodFractions | undefined {
-    return this.meter.lastPeriod
+    return this.traffic.lastPeriod
+  }
+
+  /** It has a buffer and isn't destroyed: a burst can promote it. */
+  get hasContent(): boolean {
+    return this.host.currentBuffer() !== undefined && !this._destroyed
+  }
+
+  /** No damage left and fully settled (video: stopping it sends a crisp image): it may be demoted. */
+  get settled(): boolean {
+    return !this.hasDamageWork && (this.lease !== undefined || this.lossyArea.length === 0)
   }
 
   /**
@@ -270,9 +272,9 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     return this.lossyArea
   }
 
-  /** New patches may be lossy: a streaming surface while the link is short of bandwidth. */
+  /** New patches may be lossy: the surface is link-bound (a streaming surface while the link is short of bandwidth). */
   private get goesLossy(): boolean {
-    return this.surfaceClass === 'streaming' && this.context.sink.bandwidthLimited
+    return this.traffic.bottleneck === 'link'
   }
 
   /** A settling patch is queued and may be captured now. */
@@ -315,10 +317,8 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     if (!this.context.sink.active) {
       return resolved
     }
-    const now = this.context.now()
-    // backlogged if the last period was busy enough (the new work makes the surface busy, so it counts from now)
-    this.meter.markBackloggedStart(now)
-    const switched = this.evaluate(now, buffer)
+    // measured by traffic policy, which may switch its class
+    const switched = this.applyClass(this.traffic.committed(), buffer)
     if (switched) {
       // a class switch that sends the whole surface covers this damage
       return switched
@@ -353,7 +353,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     const buffer = this.host.currentBuffer()
     if (buffer && !this._destroyed) {
       this.updateBusy()
-      void this.evaluate(this.context.now(), buffer)
+      void this.applyClass(this.traffic.evaluate(), buffer)
       this.startSettling()
       this.updateBusy()
     }
@@ -414,6 +414,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     this.videoWanted = undefined
     this.releaseLease()
     // (what's queued in the sink still goes out: the viewer ignores the items of surfaces it has forgotten)
+    this.traffic.remove()
     this.context.surfaces.delete(this)
   }
 
@@ -496,7 +497,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       surfaceSize: { width: buffer.width, height: buffer.height },
       serial: buffer.contentSerial,
       epoch: this.epoch,
-      tier: settle ? 'settle' : this.surfaceClass,
+      tier: this.traffic.sendTier(settle),
       // settling is lossless, whatever the link
       lossy: !settle && this.goesLossy,
     }
@@ -611,31 +612,20 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     }
   }
 
-  /** Tell the meter whether the surface has damage to send now (settling doesn't count). */
+  /** Tell traffic policy whether the surface has damage to send now (settling doesn't count). */
   private updateBusy() {
-    const busy = this.hasDamageWork
-    if (busy && !this.meter.busy) {
-      this.meter.markBusyStart(this.context.now())
-    } else if (!busy && this.meter.busy) {
-      this.meter.markBusyEnd(this.context.now())
-    }
+    this.traffic.setBusy(this.hasDamageWork)
   }
 
   /**
-   * Switch classes if the measure says so. Returns the switch's encoding if it sent the surface's whole content (video
-   * start, crisp render); undefined if only the priority changed (or nothing).
+   * Follow a class switch (`switched`: traffic policy just changed the class). Returns the switch's encoding if it sent
+   * the surface's whole content (video start, crisp render); undefined if only the priority changed (or nothing).
    */
-  private evaluate(now: number, buffer: BufferInfo): Promise<void> | undefined {
-    const after = this.meter.evaluate(now)
-    if (after === this.appliedClass) {
+  private applyClass(switched: boolean, buffer: BufferInfo): Promise<void> | undefined {
+    if (!switched) {
       return undefined
     }
-    this.appliedClass = after
-    const last = this.meter.lastPeriod
-    this.context.logger.info?.(
-      `Surface ${this.key} is now ${after} (last period: busy ${Math.round((last?.busy ?? 0) * 100)}%, backlogged ${Math.round((last?.backlogged ?? 0) * 100)}%).`,
-    )
-    if (after === 'streaming') {
+    if (this.surfaceClass === 'streaming') {
       // video only if an encoder is free; otherwise it stays on patches, with low priority
       if (this.lease === undefined && this.videoEligible(buffer) && this.context.pool.available > 0) {
         return this.startVideo()
@@ -649,21 +639,10 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     return undefined
   }
 
-  /**
-   * Promote the surface now: a burst (see EncodingContext.checkBurst). `backlogMs`: the normal surfaces' predicted
-   * backlog that made it, for the log.
-   */
-  promoteBurst(backlogMs: number): void {
+  /** Traffic policy promoted the surface: a burst. It streams video if an encoder is free. */
+  onPromoted(): void {
     const buffer = this.host.currentBuffer()
-    if (buffer === undefined || this._destroyed || this.appliedClass === 'streaming') {
-      return
-    }
-    this.meter.promote()
-    this.appliedClass = 'streaming'
-    this.context.logger.info?.(
-      `Surface ${this.key} is now streaming (a burst: the normal surfaces' predicted backlog is ${Math.round(backlogMs)} ms).`,
-    )
-    if (this.lease === undefined && this.videoEligible(buffer) && this.context.pool.available > 0) {
+    if (buffer && this.lease === undefined && this.videoEligible(buffer) && this.context.pool.available > 0) {
       void this.startVideo()
     }
   }
@@ -745,7 +724,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
     }
     this.unsentItems++
     this.encodingNow = true
-    lease.setQuality(sink.bandwidthLimited ? 'low' : 'high')
+    lease.setQuality(this.traffic.videoQuality)
     const epoch = this.epoch
     const surfaceClass = this.surfaceClass
     let released = false
@@ -791,7 +770,7 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       }
       this.queued.push(...patches)
       // (before the pump captures any of it: a burst's first patches already go out lossy)
-      this.context.checkBurst()
+      this.context.traffic.checkBurst()
       this.context.pump.schedule(this)
     }
   }
@@ -813,7 +792,6 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
   readonly surfaces = new Set<SurfaceEncoder<V>>()
   readonly pump: PatchPump
   private ticker?: ReturnType<typeof setInterval>
-  private checkingBurst = false
   /** development only: the order surfaces capture their queued patches in */
   patchOrder: PatchOrder = 'oldest'
   /** development only: how large damage is split into patches */
@@ -823,8 +801,9 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
     readonly sink: EncodingSink,
     readonly pool: EncoderPool<V>,
     encoders: { normal: PatchEncode; streaming: StreamingEncodePool },
+    /** traffic policy: the surfaces' classes and bottlenecks (session-wide) */
+    readonly traffic: SurfacePolicy,
     readonly logger: Logger,
-    readonly now: () => number = () => performance.now(),
   ) {
     this.pump = new PatchPump(sink, encoders.normal, encoders.streaming, logger)
     sink.onStreamReady = (key) => {
@@ -836,7 +815,10 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
     }
   }
 
-  /** Re-evaluate the surfaces' classes regularly, a surface that stops committing must still be demoted. */
+  /**
+   * Re-evaluate the surfaces' classes (traffic policy's) regularly, a surface that stops committing must still be
+   * demoted.
+   */
   startTicking(intervalMs = 200): void {
     if (this.ticker === undefined) {
       this.ticker = setInterval(() => this.tick(), intervalMs)
@@ -852,61 +834,11 @@ export class EncodingContext<V extends VideoEncoder = VideoEncoder> {
   }
 
   tick(): void {
-    // (reading it also lets the sink judge its bandwidth on time, when no surface asks)
-    void this.sink.bandwidthLimited
+    // (lets traffic policy judge the link on time, when no surface asks)
+    this.traffic.judgeLink()
     for (const surface of this.surfaces) {
       surface.tick()
     }
-    this.checkBurst()
-  }
-
-  /** The surfaces' predicted backlog not handed to the sink yet (the sink adds what waits in it). */
-  get unencodedBytes(): number {
-    let bytes = 0
-    for (const surface of this.surfaces) {
-      bytes += surface.unencodedBytes
-    }
-    return bytes
-  }
-
-  /**
-   * Burst promotion: while the normal surfaces' predicted backlog would take the link more than BURST_MS (at its
-   * bandwidth as measured when it was last limited; never before it was), promote the one with the largest. Streaming
-   * surfaces don't count: they don't push others out of the normal class.
-   */
-  checkBurst(): void {
-    const bandwidth = this.sink.linkBandwidth
-    if (bandwidth === undefined || bandwidth <= 0 || !this.sink.active || this.checkingBurst) {
-      return
-    }
-    this.checkingBurst = true
-    try {
-      for (;;) {
-        let total = 0
-        let largest: SurfaceEncoder<V> | undefined
-        let largestBytes = 0
-        for (const surface of this.surfaces) {
-          if (surface.surfaceClass !== 'normal' || surface.destroyed) {
-            continue
-          }
-          const bytes = surface.predictedBacklogBytes
-          total += bytes
-          if (bytes > largestBytes) {
-            largest = surface
-            largestBytes = bytes
-          }
-        }
-        if (largest === undefined || total <= BURST_MS * bandwidth) {
-          return
-        }
-        largest.promoteBurst(total / bandwidth)
-        if (largest.surfaceClass === 'normal') {
-          // couldn't be promoted (no buffer)
-          return
-        }
-      }
-    } finally {
-      this.checkingBurst = false
-    }
+    this.traffic.checkBurst()
   }
 }

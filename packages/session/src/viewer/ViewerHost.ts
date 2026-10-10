@@ -2,11 +2,10 @@ import { WebSocket } from 'ws'
 import { CongestionController } from '@nebula/congestion'
 import { createLogger } from '../Logger.js'
 import type { EncodingSink } from '../encoding/SurfaceEncoder.js'
-import type { ViewerPacing } from '@nebula/session-contracts'
+import type { LinkPolicy, ViewerPacing } from '@nebula/session-contracts'
 import { AudioPacket, CLOSE_LOGGED_OUT, CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
 import { ControlMessage, SimulatedLink, ViewerTransport, WebSocketViewerTransport } from '@nebula/transport'
-import { LinkJudgment } from '../qos/link-judgment.js'
-import { SEND_TIERS } from '../qos/send-tiers.js'
+import { SEND_TIERS } from '@nebula/traffic-policy'
 
 const logger = createLogger('viewer-host')
 const transportLogger = createLogger('viewer-transport')
@@ -34,9 +33,6 @@ export interface WindowSceneEndpoint {
  */
 export interface SurfaceContent {
   setFrameSink(sink: EncodingSink): void
-
-  /** The predicted size of the surfaces' damage not handed to the sink yet (see SurfaceEncoder.unencodedBytes). */
-  unencodedBytes?(): number
 
   /** Send the whole current content of a surface again (a video key frame or a full set of patches). */
   requestKeyFrame(surface: string): void
@@ -74,8 +70,6 @@ export interface AudioEndpoint {
  */
 export class ViewerHost {
   private transport?: ViewerTransport
-  /** the current transport's link, judged */
-  private linkJudgment?: LinkJudgment
   private shellEndpoint?: ShellEndpoint
   private audioEndpoint?: AudioEndpoint
   /** what the surface contents send into (the current transport, if any) */
@@ -93,20 +87,14 @@ export class ViewerHost {
       link?: SimulatedLink
       /** told when a viewer attaches or detaches and what its display's refresh interval is (frame pacing) */
       pacing?: ViewerPacing
+      /** traffic policy: judges the current viewer's link */
+      traffic?: LinkPolicy
     } = {},
   ) {
     const isAttached = () => this.transport !== undefined
-    const isBandwidthLimited = () => (this.transport ? (this.linkJudgment?.bandwidthLimited ?? false) : false)
-    const linkBandwidth = () => (this.transport ? this.linkJudgment?.linkBandwidth : undefined)
     this.sink = {
       get active() {
         return isAttached()
-      },
-      get bandwidthLimited() {
-        return isBandwidthLimited()
-      },
-      get linkBandwidth() {
-        return linkBandwidth()
       },
       // settling patches never count as backlog
       queuedBytes: (surfaceKey) => this.transport?.unsentBytes(surfaceKey, 'settle') ?? 0,
@@ -168,7 +156,7 @@ export class ViewerHost {
       link: this.options.link,
       logger: transportLogger,
     })
-    this.linkJudgment = new LinkJudgment(transport, congestion, () => this.content.unencodedBytes?.() ?? 0)
+    this.options.traffic?.connect(transport, congestion)
     this.transport = transport
     transport.onMessage = (message) => this.onMessage(transport, message)
     transport.onFileChunk = (id, data) => this.scene.handleFileChunk?.(id, data)
@@ -183,6 +171,7 @@ export class ViewerHost {
       }
       logger.info(`Viewer detached. Code: ${code}. Reason: ${reason}`)
       this.transport = undefined
+      this.options.traffic?.disconnect()
       this.options.pacing?.setViewerAttached(false)
       this.scene.detach()
       this.shellEndpoint?.detach()
@@ -211,6 +200,7 @@ export class ViewerHost {
       return
     }
     this.transport = undefined
+    this.options.traffic?.disconnect()
     previous.onClose = () => {
       /* noop, already detached */
     }

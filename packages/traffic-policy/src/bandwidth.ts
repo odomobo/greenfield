@@ -1,4 +1,7 @@
 /**
+ * Bottleneck, traffic policy's second axis: we consider ourselves CPU-bound until the link becomes the limit. This is
+ * the measure of the link side, derived from congestion estimation's output.
+ *
  * Whether the link to the viewer is short of bandwidth, for the streaming class's encoding (see "QOI patches, and lossy
  * encoding only when bandwidth is short" in ARCHITECTURE.md): while it is, streaming surfaces are sent as JPEG patches (or
  * lower-quality video). Their lossy areas are settled (sent again losslessly) at the lowest priority whenever they
@@ -21,7 +24,7 @@
  *
  * Pure: no I/O and no clock of its own, the caller passes the time (ms) to every call.
  */
-import { BURST_MS } from '../encoding/policy.js'
+import { BURST_MS } from './priority.js'
 
 export const BANDWIDTH_PERIOD_MS = 1000
 /** Limited at the end of LIMITED_PERIODS periods in a row in which streaming items were held back at least this share of the time. */

@@ -1,4 +1,4 @@
-.PHONY: all check lint test scene-protocol session-contracts patch-codec frames congestion scheduler video-codec transport session viewer gatekeeper clean
+.PHONY: all check lint test scene-protocol session-contracts patch-codec frames congestion scheduler video-codec transport traffic-policy session viewer gatekeeper clean
 
 all: session viewer gatekeeper
 
@@ -39,7 +39,12 @@ video-codec: session-contracts frames
 transport: session-contracts congestion
 	cd packages/transport && npm run build
 
-session: session-contracts frames congestion scheduler patch-codec video-codec transport
+# Traffic policy: priority (relentless or not, burst promotion), bottleneck (the link judgment), the send tiers. Its
+# tests use the congestion estimator's simulated link.
+traffic-policy: session-contracts congestion
+	cd packages/traffic-policy && npm run build
+
+session: session-contracts frames congestion scheduler patch-codec video-codec transport traffic-policy
 	cd packages/session && rm -rf dist types && npm run build:native && npx tsc -b && node dist/build-dconf.js && node dist/build-audio.js
 
 viewer: scene-protocol patch-codec
@@ -59,6 +64,7 @@ lint:
 	cd packages/patch-codec && npm run lint
 	cd packages/video-codec && npm run lint
 	cd packages/transport && npm run lint
+	cd packages/traffic-policy && npm run lint
 	cd packages/session && npm run lint
 
 test:
@@ -69,6 +75,7 @@ test:
 	cd packages/patch-codec && npm test
 	cd packages/video-codec && npm test
 	cd packages/transport && npm test
+	cd packages/traffic-policy && npm test
 	cd packages/session && npm test
 	cd packages/viewer && npm test
 
@@ -88,6 +95,7 @@ clean:
 	rm -rf packages/patch-codec/build packages/patch-codec/dist packages/patch-codec/types packages/patch-codec/tsconfig.tsbuildinfo
 	rm -rf packages/video-codec/build packages/video-codec/dist packages/video-codec/types packages/video-codec/tsconfig.tsbuildinfo
 	rm -rf packages/transport/build packages/transport/dist packages/transport/types packages/transport/tsconfig.tsbuildinfo
+	rm -rf packages/traffic-policy/dist packages/traffic-policy/types packages/traffic-policy/tsconfig.tsbuildinfo
 	rm -rf packages/session/build packages/session/dist packages/session/types
 	rm -rf packages/viewer/dist
 	# tsc -b's incremental state: left behind, it would take the removed output for up to date

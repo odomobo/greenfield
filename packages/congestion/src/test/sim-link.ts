@@ -8,6 +8,9 @@
  * TCP). The viewer acks on arrival (optionally batched to the next 16 ms frame), applies items at a configurable rate,
  * and sends a fresh ack when its backlog shrinks while its last report was over the hold threshold. Acks take the
  * return propagation delay. Control messages bypass the controller and go first.
+ *
+ * Test support, also for other packages' tests: exported as `@nebula/congestion/sim-link` (the link judgment's tests in
+ * @nebula/traffic-policy run it, as a devDependency). Not part of the package's public API.
  */
 import { CongestionController, CongestionState } from '../index.js'
 

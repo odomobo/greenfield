@@ -187,6 +187,14 @@ A surface has a **priority class** and an **encoding**, decided separately:
 A surface's class and encoding are per surface (a window's subsurfaces and popups each have their own). The viewer
 doesn't need to know a surface's class; nothing about it is in the scene protocol.
 
+The class, and whether a surface goes lossy, are **traffic policy**'s (`packages/traffic-policy`, see "Traffic policy"
+in `docs/MODULARIZATION.md`), along two separate axes: *priority* (relentless or not: the class, burst promotion,
+settling's tier; `priority.ts`, `TrafficPolicy.ts`) and *bottleneck* (CPU-bound until the link becomes the limit;
+link-bound means going lossy: the link judgment, `bandwidth.ts`, `link-judgment.ts`). It publishes a decision per
+surface (`TrafficDecision` in `@nebula/session-contracts`: its class and send tier, its bottleneck, its video
+quality); the surface's encoder (`SurfaceEncoder`) reads it and reports what policy measures it by (busy, commits,
+predicted backlog, settled). The encoding is the encoder's own choice, from the class.
+
 ### GPU acceleration and encoders
 
 - **Without GPU acceleration on the server (the norm: mostly VPSes), everything is sent as lossless patches**, streaming
@@ -240,8 +248,8 @@ sending the old. Defined precisely, on **discrete periods** (fixed, back to back
   period, no hold timer).
 - Nothing happens before a surface has completed two periods (a commit needs a completed previous period to count as
   backlogged at all).
-- Periods are closed on every commit and on a 200 ms tick (the existing `EncodingContext.startTicking`), so a surface
-  that goes quiet is demoted without committing.
+- Periods are closed on every commit and on a 200 ms tick (`EncodingContext.startTicking`), so a surface that goes
+  quiet is demoted without committing. The measure is `RelentlessMeter` (`packages/traffic-policy/src/priority.ts`).
 
 Why this works:
 
@@ -341,17 +349,19 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
 
 **As built** (item 5b phase 2, scene protocol 18):
 
-- **Bandwidth-limited** is judged in the session from the transport's link stats (data held back, unsent bytes, the
-  congestion controller's estimate): `qos/bandwidth.ts`, `BandwidthMonitor`, one per connection, wired up by
-  `qos/link-judgment.ts`.
+- **Bandwidth-limited** is judged by traffic policy from the transport's link stats (data held back, unsent bytes, the
+  congestion controller's estimate): `packages/traffic-policy/src/bandwidth.ts`, `BandwidthMonitor`, one per
+  connection, wired up by `link-judgment.ts`; `ViewerHost` connects each viewer's transport and congestion estimate to
+  it (`LinkPolicy`).
   Since phase 3 it is either/or: the link is saturated (1 s periods; 2 in a row in which streaming items waited in
   the transport while the congestion controller, or the socket's safety limit, held them back at least 80% of the time;
   one isn't enough: Startup and ProbeRTT hold data back for a period on a busy link that keeps up), or, at once, the
   predicted backlog is over `BURST_MS` (see phase 3 below). It ends at the end of a period held back under 50% with
   the predicted backlog under `BURST_MS`, at least 2 s after it began. (Phase 2's lossless-demand check, with
-  per-surface sizes in the monitor, was replaced by the predicted backlog.) On the simulated link (`qos/test/sim-link.ts`, 20 Mbit/s): a stream at 40-80% of the link
+  per-surface sizes in the monitor, was replaced by the predicted backlog.) On the simulated link (`packages/congestion/src/test/sim-link.ts`, 20 Mbit/s): a stream at 40-80% of the link
   never makes it limited, an endless one does within 2-3 s. Transitions are logged ("Bandwidth-limited: ...", "No
-  longer bandwidth-limited: ..."). The sink tells the encoders (`EncodingSink.bandwidthLimited`).
+  longer bandwidth-limited: ..."). A streaming surface is then link-bound: its decision says so (`TrafficDecision.bottleneck`), and its encoder goes
+  lossy.
 - **JPEG or lossless, whichever is smaller** (a deviation from "JPEG patches while limited"): a streaming surface's
   patches captured while limited are encoded with the lossless cascade *and* as JPEG (quality 70, 4:4:4,
   libjpeg-turbo, `JPEG_QUALITY` in `packages/patch-codec/src/patch-encoder.ts`), and the smaller goes out. UI content is often smaller
@@ -369,8 +379,8 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
     size, settling patches excluded) plus its damage queued or encoding times its bytes per pixel. In time at the link's
     bandwidth: `max_bw` remembered from the last saturated period (or the current `max_bw` if higher); unknown, and
     nothing below applies, until the link was saturated once on the connection.
-  - **Burst promotion** (`EncodingContext.checkBurst`, run whenever damage is queued, before the pump captures it, and
-    on every tick): while the normal surfaces' predicted backlog is over `BURST_MS` (200 ms, `policy.ts`), the normal
+  - **Burst promotion** (`TrafficPolicy.checkBurst`, run whenever damage is queued, before the pump captures it, and
+    on every tick): while the normal surfaces' predicted backlog is over `BURST_MS` (200 ms, `priority.ts`), the normal
     surface with the largest is promoted ("is now streaming (a burst: ...)"). The total backlog (all surfaces) over
     `BURST_MS` makes the link bandwidth-limited at once, so a burst's first patches already go out as JPEG.
   - **Settling** takes the surface's stream like any item (up to about a chunk of settling patches may wait), but new
@@ -465,7 +475,7 @@ data message handed to the socket at a time and `bufferedAmount` under 64 KB; in
 allows it). Since the modularization it is `packages/transport`: the mechanism in `FairQueue.ts` (tier ids and quanta
 given to it), chunking in `chunking.ts`, the WebSocket, socket tuning (its own small native addon), the simulated link
 and receive decoding in `link.ts`; the tiers and their quanta below are the session's configuration
-(`qos/send-tiers.ts`).
+(traffic policy's: `packages/traffic-policy/src/tiers.ts`).
 
 1. Control messages first, always, all of them.
 2. Data items (patches and video frames) by **deficit round-robin between the two classes, weighted by bytes** (since

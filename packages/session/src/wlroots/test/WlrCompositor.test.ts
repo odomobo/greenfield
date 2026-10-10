@@ -975,8 +975,6 @@ function holdingSink() {
   const held: { surface: string; done: (sent: boolean) => void }[] = []
   const sink: EncodingSink = {
     active: true,
-    bandwidthLimited: false,
-    linkBandwidth: undefined,
     queuedBytes: () => 0,
     streamReady: (surface) => held.filter((item) => item.surface === surface).length <= 1,
     sendFrame: (surface, _frame, _class, done) => held.push({ surface, done }),

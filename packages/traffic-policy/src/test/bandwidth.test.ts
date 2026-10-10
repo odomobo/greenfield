@@ -1,8 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { BURST_MS } from '../../encoding/policy.js'
+import { BURST_MS } from '../priority.js'
 import { BANDWIDTH_PERIOD_MS, BandwidthMonitor, LIMITED_PERIODS, MIN_LIMITED_MS } from '../bandwidth.js'
-import { constantRate, mbit, saturating, simulate } from './sim-link.js'
+import { constantRate, mbit, saturating, simulate } from '@nebula/congestion/sim-link'
 
 const PERIOD = BANDWIDTH_PERIOD_MS
 /** when a monitor held back from 0 on is limited */

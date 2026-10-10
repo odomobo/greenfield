@@ -1,4 +1,4 @@
-import type { SendTier } from '@nebula/session-contracts'
+import type { SendTier, SurfaceClass } from '@nebula/session-contracts'
 
 /**
  * The transport's send tiers and their weights (traffic policy's, given to the transport): from the highest priority,
@@ -12,3 +12,11 @@ export const SEND_TIERS: readonly { readonly id: SendTier; readonly quantum: num
   { id: 'streaming', quantum: QUANTUM_STREAMING_BASE },
   { id: 'settle', quantum: Math.round(QUANTUM_STREAMING_BASE / 3) },
 ]
+
+/**
+ * The tier a surface's item goes in: its class for damage; settling (the lossless resend of its lossy areas) always at
+ * the lowest priority, so new damage of any surface comes first.
+ */
+export function sendTierOf(surfaceClass: SurfaceClass, settling: boolean): SendTier {
+  return settling ? 'settle' : surfaceClass
+}
