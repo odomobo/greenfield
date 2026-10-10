@@ -278,3 +278,132 @@ export interface LinkPolicy {
   /** The viewer is gone: no link to judge (it isn't short, its bandwidth is unknown). */
   disconnect(): void
 }
+
+// Rendering: the surface and its renderers (see "The surface package" in docs/MODULARIZATION.md) ---------------------
+
+/** A surface's current buffer, as rendering sees it. */
+export type BufferInfo = {
+  bufferId: number
+  creationSerial: number
+  contentSerial: number
+  width: number
+  height: number
+}
+
+/** Capture's side of a surface, as its patch renderer sees it: its current buffer and frames of it. */
+export interface FrameSource {
+  currentBuffer(): BufferInfo | undefined
+  /** A frame of the current buffer, which the caller releases; undefined if it can't be taken. */
+  takeFrame(): Frame | undefined
+}
+
+/** Capture's side of a surface: given by capture to the surface, which passes it on to its renderers. */
+export interface SurfaceHost<V extends VideoEncoder> extends FrameSource {
+  /** Encodes a frame as video; the encoder takes the frame over and releases it once it has read it. */
+  encodeVideo(encoder: V, frame: Frame): Promise<Uint8Array>
+}
+
+/** Where rendered items (patches and video frames) go: the attached viewer. */
+export interface EncodingSink extends PatchSink {
+  /** The bytes of the surface's items waiting to be sent, except settling patches. */
+  queuedBytes(surface: string): number
+  /**
+   * Whether the surface's stream is ready for its next item (at most about one chunk of its data waits to be sent; see
+   * ViewerTransport.streamReady). `exceptSettling`: its settling patches don't count. A stream found not ready gets
+   * `onStreamReady` once it is.
+   */
+  streamReady(surface: string, exceptSettling?: boolean): boolean
+  /** Set by the encoding context: a surface's stream that `streamReady` found not ready is ready now. */
+  onStreamReady?: (surface: string) => void
+  /**
+   * `done` must be called exactly once: when the frame was handed to the network (true) or not sent (false: the viewer
+   * went away). A queued item is never dropped otherwise, also not when the surface is destroyed.
+   */
+  sendFrame(surface: string, frame: Uint8Array, surfaceClass: SurfaceClass, done: (sent: boolean) => void): void
+}
+
+/** Where rendering logs. */
+export type RenderLogger = { error(message: string): void; info?(message: string): void }
+
+/** The video encoders as the surfaces see them: a session-wide pool, lending one to a surface at a time. */
+export interface VideoEncoderPool<V extends VideoEncoder> {
+  /** How many surfaces can be streamed as video at most; 0 if there is no video encoder. */
+  readonly size: number
+  /** How many more surfaces can get an encoder. */
+  readonly available: number
+  /** An encoder, or undefined if all are in use (or there are none). */
+  acquire(): V | undefined
+  /** An encoder even if all are in use (undefined only if there is no video encoder). */
+  acquireAlways(): V | undefined
+  release(encoder: V): void
+}
+
+/** The patch pump (scheduler) as a patch renderer sees it: it encodes the renderer's patches when there is room. */
+export interface PatchScheduler {
+  schedule(source: PatchSource): void
+}
+
+/** What a renderer needs of the surface that owns it. */
+export interface RendererOwner {
+  /**
+   * An item of the surface, of either renderer, is encoding: the next waits for it (one encode at a time per surface,
+   * patches and video alike).
+   */
+  readonly encoding: boolean
+  /**
+   * Something the surface's next item may have waited for happened (an encode ended, an item was handed to the socket
+   * or reported unsent): the surface goes on.
+   */
+  next(): void
+}
+
+/** What a patch renderer needs of the surface that owns it. */
+export interface PatchRendererOwner extends RendererOwner {
+  /**
+   * As far as the rest of the surface goes, its lossy areas may be sent again now: nothing else renders the surface,
+   * and nothing else of it has damage unsent.
+   */
+  readonly maySettle: boolean
+  /** New damage was queued as patches, before any of it is captured. */
+  patchesQueued(): void
+  /** The surface's buffer can't be read as pixels: patches can't show it (the renderer dropped its queue). */
+  unreadable(): void
+}
+
+/** The session-wide resources a patch renderer uses. */
+export interface PatchRendererContext {
+  readonly sink: Pick<EncodingSink, 'active' | 'streamReady'>
+  readonly pump: PatchScheduler
+  /** development only: the order a surface's queued patches are captured in */
+  readonly patchOrder: PatchOrder
+  /** development only: how large damage is split into patches */
+  readonly patchShape: PatchShape
+  readonly logger: RenderLogger
+}
+
+/** The session-wide resources a video renderer uses. */
+export interface VideoRendererContext<V extends VideoEncoder> {
+  readonly sink: Pick<EncodingSink, 'active' | 'streamReady' | 'sendFrame'>
+  readonly pool: VideoEncoderPool<V>
+  readonly logger: RenderLogger
+}
+
+/** What the session's encoding context needs of a surface: its ticks, and its stream's readiness. */
+export interface ContextSurface {
+  readonly key: string
+  /** Re-evaluate the class without a commit (regularly). */
+  tick(): void
+  /** The surface's stream in the sink is ready for its next item (after the sink found it wasn't). */
+  onStreamReady(): void
+}
+
+/** The session-wide resources a surface uses (and passes on to its renderers). */
+export interface SurfaceContext<V extends VideoEncoder> extends PatchRendererContext, VideoRendererContext<V> {
+  readonly sink: EncodingSink
+  /** traffic policy: the surfaces' classes and bottlenecks */
+  readonly traffic: SurfacePolicy
+  /** The surface was created: it gets the ticks and its stream's readiness from now on. */
+  addSurface(surface: ContextSurface): void
+  /** The surface is gone. */
+  removeSurface(surface: ContextSurface): void
+}

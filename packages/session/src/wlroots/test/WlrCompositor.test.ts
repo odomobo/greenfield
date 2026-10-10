@@ -2,7 +2,7 @@ import { after, afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { FramePacing, MAX_FRAME_HOLD_MS } from '@nebula/scheduler'
 import { ControlMessage } from '@nebula/transport'
-import type { EncodingSink } from '../../encoding/SurfaceEncoder.js'
+import type { EncodingSink } from '@nebula/session-contracts'
 import { FRAME_BORDER, FRAME_TITLE_HEIGHT } from '@gfld/scene-protocol'
 import { WlrCompositor, WlrNative } from '../WlrCompositor.js'
 
