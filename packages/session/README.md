@@ -61,6 +61,14 @@ users' sessions never have access to the key. There is no plain-HTTP mode: witho
 `--cert`/`--key` the web process generates a self-signed certificate. A user's desktop dies when they log out or when the
 login helper stops; closing the browser doesn't affect it.
 
+## Inside the session process
+
+`src/wlroots/WlrCompositor.ts` only captures: surfaces, buffers, damage, windows, input. `src/streaming.ts` is the
+wiring: it creates the objects of the streaming packages and connects them to the compositor and to `ViewerHost`
+(`src/viewer`). The packages, each with one job: `session-contracts` (interfaces), `frames`, `congestion`,
+`traffic-policy`, `scheduler` (patch workers, frame pacing), `surface`, `patch-renderer`, `video-renderer`,
+`patch-codec`, `video-codec` and `transport`. Their design and boundaries: [docs/MODULARIZATION.md](../../docs/MODULARIZATION.md).
+
 ## Building
 
 Ubuntu 24.04 (wlroots 0.17 needs its libwayland 1.22; 22.04 is too old). The session's Wayland side is wlroots, a git
