@@ -7,16 +7,19 @@ import type * as WlrCoreAddon from '../addons/wlr-core-addon'
 import { createLogger } from '../Logger.js'
 import { FramePacing } from '@nebula/scheduler'
 import { EncoderPool, H264Encoder, type H264EncoderType } from '@nebula/video-codec'
-import {
-  EncodingContext,
+import { EncodingContext } from '../encoding/EncodingContext.js'
+import { Surface as RenderedSurface } from '../surface/index.js'
+import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool, encodePng } from '@nebula/patch-codec'
+import type {
   EncodingSink,
+  FrameCallbackScheduler,
+  Frame,
   PatchOrder,
   PatchShape,
-  SurfaceEncoder,
+  Rect,
   SurfaceHost,
-} from '../encoding/SurfaceEncoder.js'
-import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool, encodePng } from '@nebula/patch-codec'
-import type { FrameCallbackScheduler, Frame, Rect, VideoEncoder } from '@nebula/session-contracts'
+  VideoEncoder,
+} from '@nebula/session-contracts'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
 import { ControlMessage, SimulatedLink } from '@nebula/transport'
 import { TrafficPolicy } from '@nebula/traffic-policy'
@@ -83,7 +86,7 @@ type Surface = {
   /** input region, undefined: the whole surface */
   input?: SceneRect[]
   buffer?: { width: number; height: number; contentSerial: number }
-  encoder?: SurfaceEncoder<FrameEncoder>
+  encoder?: RenderedSurface<FrameEncoder>
   frameScheduled: boolean
 }
 
@@ -556,7 +559,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     this.scheduleScene()
   }
 
-  private encoderOf(surface: Surface): SurfaceEncoder<FrameEncoder> {
+  private encoderOf(surface: Surface): RenderedSurface<FrameEncoder> {
     if (surface.encoder === undefined) {
       const host: SurfaceHost<FrameEncoder> = {
         currentBuffer: () =>
@@ -570,7 +573,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         takeFrame: () => surface.buffer && this.wlr.takeFrame(surface.sid, surface.buffer.contentSerial),
         encodeVideo: (encoder, frame) => encoder.encode(frame),
       }
-      surface.encoder = new SurfaceEncoder(surface.key, host, this.encoding)
+      surface.encoder = new RenderedSurface(surface.key, host, this.encoding)
     }
     return surface.encoder
   }

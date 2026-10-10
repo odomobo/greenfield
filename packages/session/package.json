@@ -14,7 +14,7 @@
     "build:native": "mkdir -p build && cmake -G Ninja -B./build -S./ && ninja -C ./build install",
     "build:typescript": "npx tsc -b",
     "build": "rm -rf dist types && npm run build:native && npx tsc -b",
-    "test": "node --test --test-force-exit dist/encoding/test/ dist/wlroots/test/ dist/test/",
+    "test": "node --test --test-force-exit dist/surface/test/ dist/patch-renderer/test/ dist/video-renderer/test/ dist/wlroots/test/ dist/test/",
     "watch": "npm run build && npx tsc -b -w",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write 'src/**/*.ts'"

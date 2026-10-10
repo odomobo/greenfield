@@ -192,8 +192,15 @@ in `docs/MODULARIZATION.md`), along two separate axes: *priority* (relentless or
 settling's tier; `priority.ts`, `TrafficPolicy.ts`) and *bottleneck* (CPU-bound until the link becomes the limit;
 link-bound means going lossy: the link judgment, `bandwidth.ts`, `link-judgment.ts`). It publishes a decision per
 surface (`TrafficDecision` in `@nebula/session-contracts`: its class and send tier, its bottleneck, its video
-quality); the surface's encoder (`SurfaceEncoder`) reads it and reports what policy measures it by (busy, commits,
-predicted backlog, settled). The encoding is the encoder's own choice, from the class.
+quality); the surface (`Surface`, `packages/session/src/surface`) reads it and reports what policy measures it by
+(busy, commits, predicted backlog, settled). The encoding is the surface's own choice, from the class: it owns a patch
+renderer (`PatchRenderer`, `src/patch-renderer`: damage queue, patch planning and order, lossy and settle areas) and,
+while it streams video, a video renderer (`VideoRenderer`, `src/video-renderer`: the encoder's lease, on-demand
+frames, key frames, quality), and switches between them (video start drops the queued patches and makes the whole
+surface lossy; video stop sends a crisp lossless image of the whole surface). The renderers don't know each other;
+their interfaces with the surface and the session (`RendererOwner`, `PatchRendererContext`, `SurfaceContext`, ...) are
+in `@nebula/session-contracts`. The session-wide side (the sink, the encoder pool, the patch pump, traffic policy, the
+tick) is `EncodingContext` (`src/encoding/EncodingContext.ts`).
 
 ### GPU acceleration and encoders
 
@@ -366,7 +373,7 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
   patches captured while limited are encoded with the lossless cascade *and* as JPEG (quality 70, 4:4:4,
   libjpeg-turbo, `JPEG_QUALITY` in `packages/patch-codec/src/patch-encoder.ts`), and the smaller goes out. UI content is often smaller
   losslessly (QOI + LZ4), and then nothing needs refreshing; QOI costs a fraction of the JPEG encode.
-- **Lossy areas** are tracked per surface (`SurfaceEncoder.lossyArea`, at most 32 rectangles, else their bounding
+- **Lossy areas** are tracked per surface (`PatchRenderer.lossyRegion`, at most 32 rectangles, else their bounding
   box), updated in send order (each patch as it goes to the sink, so a later lossless patch always clears an earlier
   lossy one), the whole surface while it streams video. Settling (phase 3; phase 2 refreshed only once the surface
   no longer went lossy, at normal priority): whenever the surface has no damage to send (none queued, encoding or
@@ -374,7 +381,7 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
   (logged: "sending its N lossy pixels again, losslessly (settling)").
 - **Phase 3, bursts and settling** (built 2026-10-05):
   - Each surface keeps a pixel-weighted, decayed (0.8 per patch) average of its lossless bytes per pixel, from all its
-    lossless patches (`SurfaceEncoder.bytesPerPixel`; 4 before any).
+    lossless patches (`PatchRenderer.bytesPerPixel`; 4 before any).
   - Predicted backlog of a surface (`predictedBacklogBytes`): its frames and patches waiting in the transport (real
     size, settling patches excluded) plus its damage queued or encoding times its bytes per pixel. In time at the link's
     bandwidth: `max_bw` remembered from the last saturated period (or the current `max_bw` if higher); unknown, and
@@ -494,7 +501,7 @@ and receive decoding in `link.ts`; the tiers and their quanta below are the sess
    items (it doesn't know what a key frame is). An item is reported unsent only when the transport closes (the viewer
    disconnects; a new viewer starts over from every surface's whole content). Lifecycle edges need no queue changes:
    - The viewer's video decoder fails: it sends `keyframe`, and the surface's video makes its next frame a key frame
-     (`SurfaceEncoder.refresh`). The deltas still on their way can't be decoded; the viewer discards them quietly
+     (`Surface.refresh`). The deltas still on their way can't be decoded; the viewer discards them quietly
      (`KeyFrameNeeded`) and asks for a key frame only once until something decodes.
    - A surface starts video, is sent whole again (`refresh`), or loses its buffer: the patches already queued go out
      first, and the newer content paints over them.

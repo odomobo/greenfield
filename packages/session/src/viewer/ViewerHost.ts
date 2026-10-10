@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws'
 import { CongestionController } from '@nebula/congestion'
 import { createLogger } from '../Logger.js'
-import type { EncodingSink } from '../encoding/SurfaceEncoder.js'
+import type { EncodingSink } from '@nebula/session-contracts'
 import type { LinkPolicy, ViewerPacing } from '@nebula/session-contracts'
 import { AudioPacket, CLOSE_LOGGED_OUT, CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
 import { ControlMessage, SimulatedLink, ViewerTransport, WebSocketViewerTransport } from '@nebula/transport'

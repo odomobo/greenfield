@@ -47,7 +47,7 @@ Since wave 2 B, X11 apps run too (XWayland).
   with its EGL and dmabuf helpers), which reads frames that `takeFrame` hands out.
 - `src/wlroots/WlrCompositor.ts`: the policy, like the TypeScript compositor's `server/scene.ts`: window positions,
   stacking, activation and keyboard focus, minimize, maximize, child windows centered on their parent, frame pacing,
-  and one `SurfaceEncoder` per surface. It is both the `WindowSceneEndpoint` and the `SurfaceContent` of a `ViewerHost`.
+  and one `Surface` (`src/surface`, rendering's view of it) per surface. It is both the `WindowSceneEndpoint` and the `SurfaceContent` of a `ViewerHost`.
   The native core is passed in (`WlrNative`), so `src/wlroots/test/` tests the policy against a fake core.
 - `src/wlroots/X11.ts`: what's left for X11 windows on the TypeScript side: telling them their position when the scene
   moves them.
@@ -200,7 +200,7 @@ gone. None of the following is tested here (no GPU).
   extraction), glcolorconvert, (gldownload), the encoder. They're created at warm-up.
 - **Fixed quality, variable bitrate**: constant QP, no bitrate cap (nvh264enc `rc-mode=constqp`, `qp-const`;
   vaapih264enc `rate-control=cqp`, `init-qp`). Two levels, `QP_HIGH` and `QP_LOW` at the top of the file:
-  `setQuality(encoder, high)` (TypeScript: `H264Encoder.setQuality` of `@nebula/video-codec`, called by `SurfaceEncoder` before each frame:
+  `setQuality(encoder, high)` (TypeScript: `H264Encoder.setQuality` of `@nebula/video-codec`, called by the surface's `VideoRenderer` before each frame:
   low while the transport says bandwidth is short) sets the encoder element's QP property while it runs (the element is
   named `encoder` in every pipeline) and forces a key frame. Whether these encoders pick up a QP change while playing
   is unverified (on hardware): if they don't, the pipelines have to be rebuilt on a change.

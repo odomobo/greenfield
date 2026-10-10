@@ -1,20 +1,33 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { type Patch, PatchFormat } from '@gfld/scene-protocol'
-import type { EncodedPatch, Frame, Rect, SendTier, SurfaceClass } from '@nebula/session-contracts'
-import { MAX_NORMAL_ENCODES } from '@nebula/scheduler'
-import { CLASS_PERIOD_MS, TrafficPolicy } from '@nebula/traffic-policy'
-import { EncoderPool } from '@nebula/video-codec'
-import { area } from '../region.js'
-import {
+import type {
   BufferInfo,
-  EncodingContext,
+  ContextSurface,
+  EncodedPatch,
   EncodingSink,
+  Frame,
+  PatchEncode,
+  PatchOrder,
+  PatchShape,
+  Rect,
+  SendTier,
   StreamingEncodePool,
-  SurfaceEncoder,
+  SurfaceClass,
+  SurfaceContext,
   SurfaceHost,
   VideoQuality,
-} from '../SurfaceEncoder.js'
+} from '@nebula/session-contracts'
+import { PatchPump } from '@nebula/scheduler'
+import { CLASS_PERIOD_MS, TrafficPolicy } from '@nebula/traffic-policy'
+import { EncoderPool } from '@nebula/video-codec'
+import { area } from '../../patch-renderer/index.js'
+import { Surface } from '../index.js'
+
+/**
+ * The surface with both renderers, in a context like the session's (real traffic policy, patch pump and encoder pool;
+ * fake sink, capture and codecs). The tests of one renderer alone are in the renderers' own tests.
+ */
 
 const r = (x: number, y: number, width: number, height: number): Rect => ({ x, y, width, height })
 
@@ -262,6 +275,47 @@ class FakeStreamingPool implements StreamingEncodePool {
   }
 }
 
+/** Like the session's encoding context: the shared resources, the ticks, and the streams' readiness. */
+class TestContext implements SurfaceContext<FakeEncoder> {
+  readonly surfaces = new Set<ContextSurface>()
+  readonly pump: PatchPump
+  patchOrder: PatchOrder = 'oldest'
+  patchShape: PatchShape = 'bands'
+
+  constructor(
+    readonly sink: EncodingSink,
+    readonly pool: EncoderPool<FakeEncoder>,
+    encoders: { normal: PatchEncode; streaming: StreamingEncodePool },
+    readonly traffic: TrafficPolicy,
+    readonly logger: { error(message: string): void; info(message: string): void },
+  ) {
+    this.pump = new PatchPump(sink, encoders.normal, encoders.streaming, logger)
+    sink.onStreamReady = (key) => {
+      for (const surface of this.surfaces) {
+        if (surface.key === key) {
+          surface.onStreamReady()
+        }
+      }
+    }
+  }
+
+  addSurface(surface: ContextSurface) {
+    this.surfaces.add(surface)
+  }
+
+  removeSurface(surface: ContextSurface) {
+    this.surfaces.delete(surface)
+  }
+
+  tick() {
+    this.traffic.judgeLink()
+    for (const surface of this.surfaces) {
+      surface.tick()
+    }
+    this.traffic.checkBurst()
+  }
+}
+
 function setup(poolSize = 2) {
   let now = 1000
   const sink = new FakeSink()
@@ -285,7 +339,7 @@ function setup(poolSize = 2) {
   const link = { bandwidthLimited: false, linkBandwidth: undefined as number | undefined }
   const traffic = new TrafficPolicy({ logger, now: () => now })
   traffic.useLink(link)
-  const context = new EncodingContext<FakeEncoder>(
+  const context = new TestContext(
     sink,
     pool,
     {
@@ -333,7 +387,7 @@ function setup(poolSize = 2) {
     },
     surface(key: string, width = 1000, height = 1000) {
       const host = new FakeSurface(width, height)
-      return { host, encoder: new SurfaceEncoder(key, host, context) }
+      return { host, encoder: new Surface(key, host, context) }
     },
   }
 }
@@ -345,12 +399,7 @@ const settle = () => new Promise((resolve) => setImmediate(resolve))
 const full = (host: FakeSurface) => [r(0, 0, host.buffer!.width, host.buffer!.height)]
 
 /** A relentless surface: full repaints every 50 ms while the network takes nothing, so its patches queue up. */
-async function relentless(
-  env: Env,
-  encoder: SurfaceEncoder<FakeEncoder>,
-  host: FakeSurface,
-  ms = 2 * CLASS_PERIOD_MS + 100,
-) {
+async function relentless(env: Env, encoder: Surface<FakeEncoder>, host: FakeSurface, ms = 2 * CLASS_PERIOD_MS + 100) {
   env.sink.autoDone = false
   for (let t = 0; t < ms; t += 50) {
     env.advance(50)
@@ -359,35 +408,6 @@ async function relentless(
   }
   await settle()
 }
-
-test("a patch reads its pixels from a frame, released right after the read (not held while it's encoded)", async () => {
-  const env = setup()
-  const { encoder, host } = env.surface('a')
-  env.sink.autoDone = false
-  await encoder.commit(full(host))
-  assert.ok(host.framesTaken > 0)
-  assert.equal(host.framesTaken, host.reads.length)
-  assert.equal(host.heldFrames, 0)
-  await settle()
-  assert.equal(host.heldFrames, 0)
-})
-
-test("the opaque flag the host reports for a patch's pixels goes to the encoder", async () => {
-  const env = setup()
-  const { encoder, host } = env.surface('a')
-  host.opaque = true
-  await encoder.commit(full(host))
-  await settle()
-  assert.ok(env.opaqueSeen.length > 0)
-  assert.ok(env.opaqueSeen.every((opaque) => opaque))
-  env.opaqueSeen.length = 0
-  host.opaque = false
-  host.touch()
-  await encoder.commit(full(host))
-  await settle()
-  assert.ok(env.opaqueSeen.length > 0)
-  assert.ok(env.opaqueSeen.every((opaque) => !opaque))
-})
 
 test('a new surface is normal and sends patches, not video', async () => {
   const env = setup()
@@ -510,6 +530,33 @@ test('a quiet streaming surface is demoted within two periods and its video is r
   assert.ok(covered.every((rect) => rect.width * rect.height <= 64 * 1024))
 })
 
+test('a surface promoted again after its video stopped streams video again, from a key frame', async () => {
+  const env = setup(1)
+  const { encoder, host } = env.surface('a')
+  await relentless(env, encoder, host)
+  assert.ok(encoder.usesVideo)
+  env.sink.flowFreely()
+  await settle()
+  for (let quietMs = 0; encoder.surfaceClass === 'streaming' && quietMs < 20_000; quietMs += 200) {
+    env.advance(200)
+    env.context.tick()
+    await settle()
+  }
+  assert.ok(!encoder.usesVideo)
+  assert.equal(env.pool.available, 1)
+  await relentless(env, encoder, host)
+  assert.ok(encoder.usesVideo)
+  assert.equal(env.pool.available, 0)
+  assert.equal(encoder.lossyRegion.length, 1, 'the whole surface is lossy again')
+  const keyUnits = env.encoders.reduce((sum, { keyUnits }) => sum + keyUnits, 0)
+  assert.ok(keyUnits >= 2, 'a key frame at each start')
+  const frames = env.sink.frames.length
+  env.sink.flowFreely()
+  await settle()
+  await settle()
+  assert.ok(env.sink.frames.length > frames)
+})
+
 test('demotion without video changes only the priority', async () => {
   const env = setup(0)
   const { encoder, host } = env.surface('a')
@@ -543,7 +590,7 @@ test('a surface captures its next patch only while its stream is ready: the rest
   // each item a chunk: the first is captured, then a second while one chunk waits, then the stream isn't ready
   assert.equal(env.sink.held.length, ITEMS_HELD)
   assert.equal(host.reads.length, ITEMS_HELD)
-  assert.ok(!encoder.mayCapture)
+  assert.ok(!encoder.mayEncode)
   const queued = encoder.queuedPatches.length
   assert.ok(queued > 0)
 
@@ -554,55 +601,15 @@ test('a surface captures its next patch only while its stream is ready: the rest
   await settle()
   assert.equal(host.reads.length, ITEMS_HELD + 1)
   assert.equal(encoder.queuedPatches.length, queued - 1)
-  assert.ok(!encoder.mayCapture)
+  assert.ok(!encoder.mayEncode)
 
   // everything goes out eventually
   for (let i = 0; i < 100 && encoder.hasUnsentWork; i++) {
     env.sink.sendHeld()
     await settle()
   }
-  assert.ok(encoder.mayCapture)
+  assert.ok(encoder.mayEncode)
   assert.equal(area(env.sink.patches.map(({ patch }) => patch.rect)), 1000 * 1000)
-})
-
-test('several small items are encoded until about a chunk of the surface waits', async () => {
-  const env = setup()
-  const { encoder, host } = env.surface('a')
-  env.sink.autoDone = false
-  // a tenth of a chunk each: ten fit in a chunk, so an eleventh is encoded while ten wait
-  env.sink.sizeOf = () => FAKE_CHUNK / 10
-  await encoder.commit(full(host))
-  for (let i = 0; i < 40; i++) {
-    await settle()
-  }
-  assert.equal(env.sink.held.length, 11)
-  assert.ok(!encoder.mayCapture)
-  assert.ok(encoder.hasQueuedPatches)
-})
-
-test('a large item holds the next back until the stream is ready again', async () => {
-  const env = setup()
-  const { encoder, host } = env.surface('a', 300, 200)
-  env.sink.autoDone = false
-  // the first item is three chunks
-  let first = true
-  env.sink.sizeOf = () => {
-    const size = first ? 3 * FAKE_CHUNK : 1
-    first = false
-    return size
-  }
-  await encoder.commit([r(0, 0, 10, 10)])
-  await settle()
-  await encoder.commit([r(20, 20, 10, 10)])
-  await settle()
-  await settle()
-  assert.equal(env.sink.held.length, 1, 'the next waits')
-  assert.equal(encoder.queuedPatches.length, 1)
-  assert.equal(host.reads.length, 1)
-  env.sink.held.shift()!.done(true)
-  await settle()
-  await settle()
-  assert.equal(host.reads.length, 2, 'captured once the stream is ready')
 })
 
 test('one encode at a time per surface; different surfaces encode in parallel', async () => {
@@ -612,7 +619,7 @@ test('one encode at a time per surface; different surfaces encode in parallel', 
   const b = env.surface('b')
   await a.encoder.commit(full(a.host))
   assert.equal(env.normalStarted, 1, 'the stream is ready, but one patch of a surface encodes at a time')
-  assert.ok(!a.encoder.mayCapture)
+  assert.ok(!a.encoder.mayEncode)
   await b.encoder.commit(full(b.host))
   assert.equal(env.normalStarted, 2)
   env.normalCalls.shift()!.resolve()
@@ -632,23 +639,6 @@ test("frame callbacks wait for the surface's stream to be ready", async () => {
   assert.ok(!encoder.readyForFrame, 'more than a chunk waits')
   env.sink.held.shift()!.done(true)
   assert.ok(encoder.readyForFrame, 'a chunk left: the app may draw')
-})
-
-test('an item reported unsent counts as gone too', async () => {
-  const env = setup()
-  const { encoder, host } = env.surface('a')
-  env.sink.autoDone = false
-  await encoder.commit(full(host))
-  await settle()
-  await settle()
-  assert.ok(!encoder.mayCapture)
-  assert.ok(encoder.hasQueuedPatches)
-  const handedOver = env.sink.patches.length
-  env.sink.dropHeld()
-  await settle()
-  await settle()
-  assert.equal(env.sink.held.length, ITEMS_HELD, 'the next queued patches follow')
-  assert.equal(env.sink.patches.length, handedOver + ITEMS_HELD)
 })
 
 test('refresh takes back nothing handed over: the whole surface is queued behind it', async () => {
@@ -688,150 +678,6 @@ test('destroying a surface takes back nothing handed over', async () => {
   await settle()
   await settle()
   assert.equal(env.sink.patches.length, patches, 'nothing new of it is captured')
-})
-
-test('at most MAX_NORMAL_ENCODES normal patches are encoded at once; streaming ones wait for their workers', async () => {
-  const env = setup(0)
-  env.holdNormal(true)
-  const surfaces = Array.from({ length: 6 }, (_, i) => env.surface(`s${i}`))
-  for (const { encoder, host } of surfaces) {
-    await encoder.commit(full(host))
-  }
-  assert.equal(env.normalStarted, MAX_NORMAL_ENCODES)
-  assert.equal(env.context.pump.normalEncoding, MAX_NORMAL_ENCODES)
-  env.normalCalls.shift()!.resolve()
-  await settle()
-  assert.equal(env.normalStarted, MAX_NORMAL_ENCODES + 1, 'a finished encode makes room for the next')
-  assert.equal(env.streaming.calls, 0)
-})
-
-test('a streaming surface captures only while a streaming worker can take its patch', async () => {
-  const env = setup(0)
-  const { encoder, host } = env.surface('a')
-  await relentless(env, encoder, host)
-  assert.equal(encoder.surfaceClass, 'streaming')
-  env.sink.flowFreely()
-  await settle()
-  await settle()
-
-  env.streaming.canAccept = false
-  const reads = host.reads.length
-  host.touch()
-  await encoder.commit(full(host))
-  await settle()
-  assert.equal(host.reads.length, reads, 'nothing is captured while the workers are busy')
-  assert.ok(encoder.hasQueuedPatches)
-
-  env.streaming.setCapacity(true)
-  await settle()
-  assert.ok(host.reads.length > reads)
-})
-
-test('new damage over a queued patch is not queued again, over a captured one it is', async () => {
-  const env = setup()
-  const { encoder, host } = env.surface('a')
-  env.sink.autoDone = false // patches stay unsent, the surface's stream isn't ready
-  await encoder.commit(full(host))
-  await settle()
-  await settle()
-  const queued = encoder.queuedPatches.length
-  assert.ok(queued > 0)
-  const captured = env.sink.patches.map(({ patch }) => patch.rect)
-  assert.equal(captured.length, ITEMS_HELD)
-  const queuedRect = encoder.queuedPatches[encoder.queuedPatches.length - 1]
-
-  await encoder.commit([r(queuedRect.x + 1, queuedRect.y + 1, 10, 10)])
-  assert.equal(encoder.queuedPatches.length, queued, 'a queued patch will pick up the latest pixels')
-
-  await encoder.commit([r(captured[0].x + 1, captured[0].y + 1, 10, 10)])
-  assert.equal(encoder.queuedPatches.length, queued + 1, 'a captured patch may be stale, queue again')
-  assert.deepEqual(encoder.queuedPatches[queued], r(captured[0].x + 1, captured[0].y + 1, 10, 10))
-})
-
-test('video that finishes encoding after the surface was destroyed is dropped, and its encode is over', async () => {
-  const env = setup(2)
-  const { encoder, host } = env.surface('a')
-  await relentless(env, encoder, host)
-  assert.ok(encoder.usesVideo)
-  env.sink.flowFreely()
-  await settle()
-  host.autoEncode = false
-  host.touch()
-  void encoder.commit(full(host))
-  const framesBefore = env.sink.frames.length
-  assert.equal(host.encodes.length, 1)
-  assert.ok(!encoder.mayCapture, 'encoding')
-  encoder.destroy()
-  host.encodes[0].resolve(new Uint8Array([1]))
-  await settle()
-  assert.equal(env.sink.frames.length, framesBefore, 'the stale frame is not sent')
-  assert.ok(encoder.mayCapture)
-  assert.equal(env.pool.available, 2)
-})
-
-test('each video frame is encoded from a frame of the buffer, held only while it is encoded', async () => {
-  const env = setup(2)
-  const { encoder, host } = env.surface('a')
-  await relentless(env, encoder, host)
-  assert.ok(encoder.usesVideo)
-  env.sink.flowFreely()
-  await settle()
-  assert.equal(host.heldFrames, 0)
-  host.autoEncode = false
-  host.touch()
-  void encoder.commit(full(host))
-  assert.equal(host.encodes.length, 1)
-  assert.equal(host.heldFrames, 1, 'the frame being encoded')
-  host.encodes[0].resolve(new Uint8Array([1]))
-  await settle()
-  assert.equal(host.heldFrames, 0)
-})
-
-test('a video frame wanted while the stream is not ready is encoded once it is', async () => {
-  const env = setup(2)
-  const { encoder, host } = env.surface('a')
-  await relentless(env, encoder, host)
-  assert.ok(encoder.usesVideo)
-  await settle()
-  // fill the stream with frames the network doesn't take
-  while (encoder.mayCapture) {
-    host.touch()
-    await encoder.commit(full(host))
-    await settle()
-  }
-  const encodes = host.videoEncodes
-  host.touch()
-  await encoder.commit(full(host))
-  assert.equal(host.videoEncodes, encodes, 'not ready, no encode')
-  assert.ok(encoder.hasUnsentWork)
-  env.sink.held.shift()!.done(true)
-  await settle()
-  assert.equal(host.videoEncodes, encodes + 1, 'the latest content is encoded once the stream is ready')
-})
-
-test('video: one frame encodes at a time; frames wanted meanwhile become one frame of the latest content', async () => {
-  const env = setup(2)
-  const { encoder, host } = env.surface('a')
-  await relentless(env, encoder, host)
-  assert.ok(encoder.usesVideo)
-  env.sink.flowFreely()
-  await settle()
-  await settle()
-  host.autoEncode = false
-  const encodes = host.videoEncodes
-  host.touch()
-  void encoder.commit(full(host))
-  assert.equal(host.videoEncodes, encodes + 1)
-  host.touch()
-  void encoder.commit(full(host))
-  host.touch()
-  void encoder.commit(full(host))
-  assert.equal(host.videoEncodes, encodes + 1, 'the stream is ready, but the encode in flight comes first')
-  const frames = env.sink.frames.length
-  host.encodes.shift()!.resolve(new Uint8Array([1]))
-  await settle()
-  assert.equal(env.sink.frames.length, frames + 1)
-  assert.equal(host.videoEncodes, encodes + 2, 'then one frame of the latest content')
 })
 
 test('small surfaces are never video, whatever their class', async () => {
@@ -941,7 +787,7 @@ const inTier = <T extends { tier: SendTier }>(patches: T[], tier: SendTier) =>
  * A streaming surface without video while bandwidth is short, its whole area damaged. The network takes nothing:
  * `send` hands over what's held until `until` holds.
  */
-async function lossyStreaming(env: Env, encoder: SurfaceEncoder<FakeEncoder>, host: FakeSurface) {
+async function lossyStreaming(env: Env, encoder: Surface<FakeEncoder>, host: FakeSurface) {
   await relentless(env, encoder, host)
   assert.equal(encoder.surfaceClass, 'streaming')
   env.link.bandwidthLimited = true
@@ -963,50 +809,6 @@ async function sendUntil(env: Env, until: () => boolean) {
   assert.ok(until(), 'reached')
 }
 
-test("while bandwidth is short a streaming surface's damage may be lossy, a normal surface's never is", async () => {
-  const env = setup(0)
-  const { encoder, host } = env.surface('a')
-  await lossyStreaming(env, encoder, host)
-  await sendUntil(env, () => !encoder.hasDamageWork)
-  const damage = inTier(env.sink.patches, 'streaming')
-  assert.deepEqual(formatsOf(damage), new Set([PatchFormat.JPEG_ALPHA]))
-  assert.equal(areaOf(damage), 1000 * 1000)
-  const normal = env.surface('b', 100, 100)
-  env.sink.flowFreely()
-  env.sink.patches.length = 0
-  await normal.encoder.commit(full(normal.host))
-  await settle()
-  const ofB = env.sink.patches.filter(({ surface }) => surface === 'b')
-  assert.equal(normal.encoder.surfaceClass, 'normal')
-  assert.ok(ofB.length > 0)
-  assert.deepEqual(formatsOf(ofB), new Set([PatchFormat.QOI]))
-  assert.deepEqual(normal.encoder.lossyRegion, [])
-})
-
-test('once its damage is sent, a surface settles: its lossy areas go again losslessly, in the settle tier, while bandwidth is still short', async () => {
-  const env = setup(0)
-  const { encoder, host } = env.surface('a')
-  await lossyStreaming(env, encoder, host)
-  // not while damage is left
-  await sendUntil(env, () => env.sink.patches.some(({ tier }) => tier === 'settle'))
-  const first = env.sink.patches.findIndex(({ tier }) => tier === 'settle')
-  assert.equal(areaOf(env.sink.patches.slice(0, first)), 1000 * 1000)
-  assert.ok(env.infos.some((message) => message.includes('lossy pixels again, losslessly (settling)')))
-  env.sink.flowFreely()
-  await settle()
-  await settle()
-  const settling = inTier(env.sink.patches, 'settle')
-  assert.deepEqual(formatsOf(settling), new Set([PatchFormat.QOI]))
-  assert.equal(areaOf(settling), 1000 * 1000)
-  assert.deepEqual(encoder.lossyRegion, [])
-  assert.equal(env.link.bandwidthLimited, true)
-  // nothing more to settle
-  const sent = env.sink.patches.length
-  env.context.tick()
-  await settle()
-  assert.equal(env.sink.patches.length, sent)
-})
-
 test('new damage pre-empts settling, and the settling patches it covers are dropped', async () => {
   const env = setup(0)
   const { encoder, host } = env.surface('a')
@@ -1015,7 +817,7 @@ test('new damage pre-empts settling, and the settling patches it covers are drop
   // settling fills the stream, but the app may still draw (its frame callbacks wait for readyForFrame, which doesn't
   // count settling)
   assert.equal(env.sink.held.length, ITEMS_HELD)
-  assert.ok(!encoder.mayCapture)
+  assert.ok(!encoder.mayEncode)
   assert.ok(encoder.readyForFrame)
   // damage in a corner not settled yet, which comes out lossless: it goes as soon as the stream is ready
   env.streaming.jpegWins = false
@@ -1037,26 +839,6 @@ test('new damage pre-empts settling, and the settling patches it covers are drop
   assert.deepEqual(encoder.lossyRegion, [])
 })
 
-test('damage that goes lossy again during settling is settled once the queue is done', async () => {
-  const env = setup(0)
-  const { encoder, host } = env.surface('a')
-  await lossyStreaming(env, encoder, host)
-  await sendUntil(env, () => env.sink.patches.some(({ tier }) => tier === 'settle'))
-  host.touch()
-  await encoder.commit([r(990, 990, 10, 10)])
-  env.sink.flowFreely()
-  await settle()
-  await settle()
-  await settle()
-  const damage = env.sink.patches.findIndex(({ patch }) => patch.rect.x === 990 && patch.rect.width === 10)
-  assert.equal(env.sink.patches[damage].patch.format, PatchFormat.JPEG_ALPHA)
-  const after = inTier(env.sink.patches.slice(damage + 1), 'settle')
-  assert.ok(
-    after.some(({ patch }) => patch.rect.x <= 990 && patch.rect.x + patch.rect.width >= 1000 && patch.rect.y <= 990),
-  )
-  assert.deepEqual(encoder.lossyRegion, [])
-})
-
 test('a streaming surface is demoted only once it is fully settled', async () => {
   const env = setup(0)
   const { encoder, host } = env.surface('a')
@@ -1075,84 +857,6 @@ test('a streaming surface is demoted only once it is fully settled', async () =>
   assert.deepEqual(encoder.lossyRegion, [])
   env.context.tick()
   assert.equal(encoder.surfaceClass, 'normal')
-})
-
-test('random patch order: every queued rectangle is still sent once, just not oldest first', async () => {
-  const env = setup(0)
-  env.context.patchOrder = 'random'
-  env.holdNormal(true)
-  const { encoder, host } = env.surface('a', 1000, 1000)
-  await encoder.commit(full(host))
-  // (one is encoding already)
-  const planned = encoder.queuedPatches.length + env.normalCalls.length
-  for (let i = 0; i < 200 && env.normalCalls.length > 0; i++) {
-    env.normalCalls.shift()!.resolve()
-    await settle()
-  }
-  const rects = env.sink.patches.map(({ patch }) => patch.rect)
-  assert.equal(rects.length, planned)
-  assert.equal(area(rects), 1000 * 1000)
-  const ys = rects.map((rect) => rect.y * 1000 + rect.x)
-  assert.notDeepEqual(
-    ys,
-    [...ys].sort((a, b) => a - b),
-    'not in order (could be by chance with 16 patches: 1 in 16!)',
-  )
-})
-
-test("random patch order: each commit's patches are a batch, batches go oldest first", async () => {
-  const env = setup(0)
-  env.context.patchOrder = 'random'
-  env.holdNormal(true)
-  const { encoder, host } = env.surface('a', 1000, 1000)
-  // two commits while a patch encodes: the top half, then the bottom half
-  await encoder.commit([r(0, 0, 1000, 500)])
-  host.touch()
-  await encoder.commit([r(0, 500, 1000, 500)])
-  const top = (rect: Rect) => rect.y < 500
-  for (let i = 0; i < 200 && env.normalCalls.length > 0; i++) {
-    env.normalCalls.shift()!.resolve()
-    await settle()
-  }
-  const rects = env.sink.patches.map(({ patch }) => patch.rect)
-  assert.equal(area(rects), 1000 * 1000)
-  const firstBottom = rects.findIndex((rect) => !top(rect))
-  assert.ok(firstBottom > 0)
-  assert.ok(
-    rects.slice(firstBottom).every((rect) => !top(rect)),
-    'all of the first batch before any of the second',
-  )
-})
-
-test("a surface's lossless bytes per pixel: measured on all its lossless patches", async () => {
-  const env = setup(0)
-  const { encoder, host } = env.surface('a', 100, 100)
-  assert.equal(encoder.bytesPerPixel, 4)
-  // the fake normal encoder: 1 byte for 10000 pixels
-  await encoder.commit(full(host))
-  await settle()
-  assert.equal(encoder.bytesPerPixel, 1 / 10_000)
-  const big = env.surface('b')
-  await lossyStreaming(env, big.encoder, big.host)
-  const measured = big.encoder.bytesPerPixel
-  // JPEG patches don't count
-  const before = env.sink.patches.length
-  env.sink.sendHeld()
-  await settle()
-  await settle()
-  const handed = env.sink.patches.slice(before)
-  assert.equal(handed.length, ITEMS_HELD)
-  assert.deepEqual(formatsOf(handed), new Set([PatchFormat.JPEG_ALPHA]))
-  assert.equal(big.encoder.bytesPerPixel, measured)
-  // a patch that could have been lossy but came out lossless (the smaller) does
-  await sendUntil(env, () => !big.encoder.hasUnsentWork)
-  env.streaming.jpegWins = false
-  big.host.touch()
-  const settled = big.encoder.bytesPerPixel
-  await big.encoder.commit([r(0, 0, 10, 10)])
-  await sendUntil(env, () => !big.encoder.hasUnsentWork)
-  assert.equal(env.sink.patches.at(-1)!.patch.format, PatchFormat.QOI)
-  assert.notEqual(big.encoder.bytesPerPixel, settled)
 })
 
 test("a burst's first patches already go out lossy when bandwidth is short", async () => {
