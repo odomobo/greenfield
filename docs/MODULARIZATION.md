@@ -458,3 +458,16 @@ updated where it names files or modules that moved; this document's status updat
 Design and step plan agreed (2026-10-09). All 14 steps (0-13) are done and merged into the `modularization` branch: the
 session's streaming stack lives in the packages above, `WlrCompositor` only captures, and `src/streaming.ts` in
 `packages/session` creates and connects the packages.
+
+Open follow-ups, for the user to decide:
+
+- **Separate CPU and link measurements.** Priority and bottleneck are separate in the code's structure (step 10), but
+  `RelentlessMeter` still combines "busy" (which also counts items waiting in the transport) and "backlogged" into
+  one priority verdict. Measuring the CPU and link sides separately would change when surfaces are promoted, so it
+  would be a step of its own.
+- **`@nebula/congestion/sim-link`.** The link simulator used by congestion's and traffic-policy's tests is exported
+  from congestion through a test-only subpath, an exception to "exports only `.`". Alternatives: a test-support
+  package, or accepting the exception.
+- **`lossy.sh`'s audio-wait check** (no audio packet waits over 60 ms, wall clock) occasionally fails when the full
+  suite loads the machine (seen twice, 67 ms; never alone). It needs a more robust form (e.g. fail only when it
+  happens twice, or a wider margin).
