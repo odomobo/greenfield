@@ -365,7 +365,7 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
     damage is captured first as soon as the stream is ready, and drops the settling patches it covers. An app's frame
     callbacks wait for `readyForFrame`: the surface's stream is ready, not counting its settling patches unless damage
     already waits. Settling doesn't make the surface busy or backlogged for the relentless measure.
-  - **Minimum frame rate** (`FramePacing.ts`, `MIN_FRAME_RATE` 10): a frame callback held because the surface isn't
+  - **Minimum frame rate** (`packages/scheduler/src/FramePacing.ts`, `MIN_FRAME_RATE` 10): a frame callback held because the surface isn't
     ready goes anyway after `MAX_FRAME_HOLD_MS` (100 ms). The app's next frame is queued as damage and read when its
     stream is ready, so a slow repaint may show parts of different frames (tearing), but the app keeps responding while
     a page takes the link seconds to send. Not for a surface streamed as video: a video frame is the whole surface,
@@ -422,7 +422,7 @@ surfaces' patches are encoded on threads with a low OS priority, and the kernel'
 that nothing else wants.
 
 - **Normal surfaces**: a pool of `NORMAL_ENCODE_WORKERS` = 4 worker threads at normal priority (nice 0; the same
-  `PatchWorkerPool` class and `patch-worker.ts`, in `packages/patch-codec`). At most `MAX_NORMAL_ENCODES` = 4 patches encoding at once.
+  `PatchWorkerPool` class and `patch-worker.ts`, in `packages/patch-codec`). At most `MAX_NORMAL_ENCODES` = 4 patches encoding at once (`PatchPump` in `packages/scheduler`, which decides which surface gets the next free encoder).
 - **Streaming surfaces**: a separate pool of `STREAMING_ENCODE_WORKERS` = 2 Node `worker_threads`, each started with
   its own OS thread at nice `STREAMING_ENCODE_NICE` = 19. A worker does the whole encode (the native QOI
   cascade, synchronously, on the worker's own thread, so the nice level applies to it), one patch at a time.
@@ -480,7 +480,7 @@ allows it):
 
 - A surface's frame callbacks are held while its stream isn't ready (more than a chunk of its data unsent, settling
   patches aside unless damage waits, see Stream readiness); they're released at the next tick of the frame clock
-  (`FramePacing.ts`) once it is, so an app draws at the rate its output leaves. The clock ticks at 30 Hz
+  (`FramePacing` in `@nebula/scheduler`) once it is, so an app draws at the rate its output leaves. The clock ticks at 30 Hz
   (`MAX_FRAME_RATE`, user decision 2026-10-04: everything apps draw goes over the network, and 30 frames a second is the
   minimum for smooth motion, so nothing above it is targeted), or at the viewer's display rate if that's slower. Moving
   windows, the cursor and the shell are the browser's and run at the display's own rate. So an app slows down to what we

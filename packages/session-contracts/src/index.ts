@@ -2,7 +2,7 @@
  * The shared types between the session's packages (see "Packages and enforced boundaries" in docs/MODULARIZATION.md).
  * Types and tiny pure helpers only, no implementation logic.
  */
-import type { PatchFormat, ViewerAck } from '@gfld/scene-protocol'
+import type { Patch, PatchFormat, ViewerAck } from '@gfld/scene-protocol'
 
 /** A rectangle in pixels. */
 export type Rect = { x: number; y: number; width: number; height: number }
@@ -91,4 +91,88 @@ export interface Congestion {
    * anything back.
    */
   readonly bandwidthEstimate?: number
+}
+
+/** A patch captured from a surface, to be encoded. */
+export type CapturedPatch = {
+  rect: Rect
+  pixels: Uint8Array
+  opaque: boolean
+  surfaceSize: { width: number; height: number }
+  serial: number
+  epoch: number
+  /** the surface's class, or settle: a lossless resend of a lossy area */
+  tier: SendTier
+  /** may be encoded lossily (JPEG), if that's smaller */
+  lossy: boolean
+}
+
+/** What the patch pump (scheduler) needs of a surface. */
+export interface PatchSource {
+  readonly key: string
+  readonly destroyed: boolean
+  readonly hasQueuedPatches: boolean
+  /** it may capture its next patch: nothing of it is encoding (one encode at a time) and its stream is ready */
+  readonly mayCapture: boolean
+  /** the tier of its next patch: its class for damage, settle when it settles */
+  readonly sendTier: SendTier
+  /**
+   * Starts the surface's one encode: the pump calls `encodeDone` once the patch was handed to the sink (or dropped), and
+   * `itemDone` once it was sent or reported unsent.
+   */
+  capturePatch(): CapturedPatch | undefined
+  /** A captured patch goes to the sink now, encoded. */
+  patchSending(captured: CapturedPatch, encoded: EncodedPatch): void
+  /** The patch's encode is over: it was handed to the sink (after `patchSending`), or dropped. */
+  encodeDone(captured: CapturedPatch): void
+  /** The patch was handed to the socket, or reported unsent (sent or not), or dropped. */
+  itemDone(captured?: CapturedPatch): void
+  /** false if results captured at this epoch are stale (class switched, surface destroyed) */
+  isCurrent(epoch: number): boolean
+}
+
+/** Where the patch pump sends encoded patches: the attached viewer. */
+export interface PatchSink {
+  /** true if a viewer is attached; nothing is encoded without one */
+  readonly active: boolean
+  /**
+   * `done` must be called exactly once: when the patch was handed to the network (true) or not sent (false). `tier`: the
+   * surface's class, or settle for a settling patch.
+   */
+  sendPatch(surface: string, patch: Patch, tier: SendTier, done: (sent: boolean) => void): void
+}
+
+/** Encodes a patch's pixels (a session-wide resource: the patch codec's worker pools). */
+export type PatchEncode = (
+  rgba: Uint8Array,
+  width: number,
+  height: number,
+  opaque: boolean,
+  lossy?: boolean,
+) => Promise<EncodedPatch>
+
+/** A pool of worker threads that encodes patches: the low priority one is the streaming class's. */
+export interface StreamingEncodePool {
+  encode: PatchEncode
+  /** whether another patch may be captured for it: a worker is free, or about to be */
+  readonly canAccept: boolean
+  /** set by the pump: called when `canAccept` may have changed */
+  onCapacity?: () => void
+}
+
+/**
+ * Frame callback scheduling: what the compositor needs of frame pacing. The callback goes on a later tick of the frame
+ * clock once `ready()` (the surface is ready for a new frame) is true, or after the longest hold anyway if `mayForce()`
+ * (the surface isn't streamed as video); throttled without a pacing viewer. It gets the frame time (ms).
+ */
+export interface FrameCallbackScheduler {
+  schedule(ready: () => boolean, callback: (time: number) => void, mayForce?: () => boolean): void
+}
+
+/** What the viewer's connection reports to frame pacing. */
+export interface ViewerPacing {
+  /** A viewer attached or detached. */
+  setViewerAttached(attached: boolean): void
+  /** The viewer reported its display's refresh interval (ms; 0: unknown). */
+  onViewerFeedback(refreshInterval: number): void
 }

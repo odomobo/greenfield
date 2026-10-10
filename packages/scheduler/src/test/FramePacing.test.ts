@@ -6,7 +6,7 @@ import {
   MAX_FRAME_RATE,
   MIN_FRAME_RATE,
   tickIntervalFor,
-} from '../../FramePacing.js'
+} from '../FramePacing.js'
 
 test("a frame callback is held while the surface's stream is not ready and released at the next tick once it is", () => {
   const queue = new FrameCallbackQueue()

@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, test } from 'node:test'
+import { after, afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { FramePacing } from '@nebula/scheduler'
 import { ControlMessage } from '../../viewer/ViewerTransport.js'
 import { WlrCompositor, WlrNative } from '../WlrCompositor.js'
 
@@ -83,9 +84,12 @@ const lastScene = () => scenes()[scenes().length - 1]
 const windowsOf = (scene: ControlMessage) => scene.windows as any[]
 const positionsOf = (sid: number) => core.positions.filter(([of]) => of === sid).map(([, x, y]) => [x, y])
 
+const framePacing = new FramePacing()
+after(() => framePacing.stop())
+
 beforeEach(() => {
   core = new FakeCore()
-  compositor = new WlrCompositor({ videoStreams: 1 }, core.native, () => undefined)
+  compositor = new WlrCompositor({ videoStreams: 1, framePacing }, core.native, () => undefined)
   sent = []
   compositor.attach((message) => sent.push(message))
 })
