@@ -1,10 +1,12 @@
-import { after, afterEach, beforeEach, test } from 'node:test'
+import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { FramePacing, MAX_FRAME_HOLD_MS } from '@nebula/scheduler'
+import { type FramePacing, MAX_FRAME_HOLD_MS } from '@nebula/scheduler'
 import { ControlMessage } from '@nebula/transport'
 import type { EncodingSink } from '@nebula/session-contracts'
 import { FRAME_BORDER, FRAME_TITLE_HEIGHT } from '@gfld/scene-protocol'
 import { WlrCompositor, WlrNative } from '../WlrCompositor.js'
+import { Streaming } from '../../streaming.js'
+import type { SurfaceContent } from '../../viewer/ViewerHost.js'
 
 type Configure = { sid: number; width: number; height: number; state: Record<string, boolean | undefined> }
 type Toplevel = {
@@ -209,38 +211,38 @@ const lastScene = () => scenes()[scenes().length - 1]
 const windowsOf = (scene: ControlMessage) => scene.windows as any[]
 const lastConfigure = (sid: number) => [...core.configures].reverse().find((configure) => configure.sid === sid)
 
-const framePacing = new FramePacing()
-after(() => framePacing.stop())
+let streaming: Streaming
+let content: SurfaceContent
+let framePacing: FramePacing
 
 beforeEach(() => {
   core = new FakeCore()
   const fakeCore = core
-  compositor = new WlrCompositor(
-    {
-      videoStreams: 1,
-      framePacing,
-      createVideoEncoder: () => {
-        fakeCore.encodersCreated++
-        return {
-          encode: (frame) => {
-            frame.release()
-            return Promise.resolve(new Uint8Array())
-          },
-          requestKeyUnit: () => undefined,
-          setQuality: () => undefined,
-          destroy: () => undefined,
-        }
-      },
+  streaming = new Streaming({
+    videoStreams: 1,
+    createVideoEncoder: () => {
+      fakeCore.encodersCreated++
+      return {
+        encode: (frame) => {
+          frame.release()
+          return Promise.resolve(new Uint8Array())
+        },
+        requestKeyUnit: () => undefined,
+        setQuality: () => undefined,
+        destroy: () => undefined,
+      }
     },
-    core.native,
-    () => undefined,
-  )
+  })
+  framePacing = streaming.framePacing
+  compositor = new WlrCompositor({ framePacing, createSurface: streaming.createSurface }, core.native, () => undefined)
+  content = streaming.contentOf(compositor)
   sent = []
   compositor.attach((message) => sent.push(message))
 })
 
 afterEach(() => {
   compositor.detach()
+  streaming.stop()
 })
 
 test('a window is told its bounds from its first commit: the output minus our frame, again when its frame changes (not the output)', async () => {
@@ -1005,7 +1007,7 @@ function readablePixels() {
 
 test('without a hardware encoder no video encoder is ever created, whatever the surfaces do', async () => {
   const { sink, held } = holdingSink()
-  compositor.setFrameSink(sink)
+  content.setFrameSink(sink)
   readablePixels()
   core.newWindow(1, { width: 800, height: 600 })
   for (let i = 0; i < 20; i++) {
@@ -1024,7 +1026,7 @@ test('frame callbacks are held while the surface’s stream is not ready, and re
   framePacing.setViewerAttached(true)
   framePacing.onViewerFeedback(16)
   const { sink, held, release } = holdingSink()
-  compositor.setFrameSink(sink)
+  content.setFrameSink(sink)
   readablePixels()
   try {
     core.newWindow(1, { width: 400, height: 256 })
@@ -1049,7 +1051,7 @@ test('a surface whose stream stays not ready still gets its frame callback after
   framePacing.setViewerAttached(true)
   framePacing.onViewerFeedback(16)
   const { sink, held } = holdingSink()
-  compositor.setFrameSink(sink)
+  content.setFrameSink(sink)
   readablePixels()
   try {
     core.newWindow(1, { width: 400, height: 256 })

@@ -455,5 +455,6 @@ updated where it names files or modules that moved; this document's status updat
 
 ## Status
 
-Design and step plan agreed (2026-10-09). Steps 0–6 done and merged into the `modularization` branch. Steps 7, 8 and 9
-were started and stopped unfinished (usage limit); they restart from scratch.
+Design and step plan agreed (2026-10-09). All 14 steps (0-13) are done and merged into the `modularization` branch: the
+session's streaming stack lives in the packages above, `WlrCompositor` only captures, and `src/streaming.ts` in
+`packages/session` creates and connects the packages.

@@ -26,6 +26,21 @@ For the task list see [ROADMAP.md](ROADMAP.md). For completed work see [HISTORY.
   compositor on wlroots (with XWayland), as a Node process with C addons. Encodes frames (QOI/LZ4 patches, PNG, and
   lossy via GStreamer when bandwidth is short), runs the shell service (desktop entries, icons, notifications, system tray) and
   audio, and sends everything over the session's WebSocket.
+- **The session's streaming packages.** The session's streaming stack lives in packages, each with one job behind a
+  narrow interface (the design, the boundaries and how they're enforced: [MODULARIZATION.md](MODULARIZATION.md)):
+  - `session-contracts`: the interfaces between the packages (frames, items, streams, congestion, traffic-policy decisions);
+  - `frames`: the native frame object (reference count, cross-thread release) and its TypeScript handle;
+  - `congestion`: the BBRv3-style estimator, nothing else;
+  - `traffic-policy`: surface priority, bottleneck (CPU- or link-bound), tiers and weights, the link judgment;
+  - `scheduler`: which surface gets the next free patch worker (`PatchPump`) and frame pacing (`FramePacing`);
+  - `surface`: one surface's rendering, patches or video, and the switch between them;
+  - `patch-renderer` and `video-renderer`: per surface, patch planning and order, and on-demand video frames;
+  - `patch-codec`: PNG, QOI and JPEG patch encoding and the worker pools;
+  - `video-codec`: the GStreamer encoder and the hardware encoder pool;
+  - `transport`: the fair-queueing send mechanism, stream readiness, chunking, the WebSocket and the simulated link.
+
+  `packages/session` captures (`wlroots/WlrCompositor.ts`: surfaces, buffers, damage, windows, input) and wires the
+  packages together in `src/streaming.ts`, which the compositor and the viewer host (`ViewerHost`) are handed to.
 - **Viewer** (`packages/viewer`): the browser side. Receives a window-scene protocol (windows, positions, sizes,
   frames) over one WebSocket, decodes frames (WebCodecs plus QOI/LZ4 patches in a worker), shows each window as its
   own DOM element with a canvas per surface (the browser composites), does all window management and draws the shell.
@@ -200,7 +215,7 @@ frames, key frames, quality), and switches between them (video start drops the q
 surface lossy; video stop sends a crisp lossless image of the whole surface). The renderers don't know each other;
 their interfaces with the surface and the session (`RendererOwner`, `PatchRendererContext`, `SurfaceContext`, ...) are
 in `@nebula/session-contracts`. The session-wide side (the sink, the encoder pool, the patch pump, traffic policy, the
-tick) is `EncodingContext` (`src/encoding/EncodingContext.ts`).
+tick) is the session's wiring (`packages/session/src/streaming.ts`, `EncodingContext`).
 
 ### GPU acceleration and encoders
 
@@ -255,7 +270,7 @@ sending the old. Defined precisely, on **discrete periods** (fixed, back to back
   period, no hold timer).
 - Nothing happens before a surface has completed two periods (a commit needs a completed previous period to count as
   backlogged at all).
-- Periods are closed on every commit and on a 200 ms tick (`EncodingContext.startTicking`), so a surface that goes
+- Periods are closed on every commit and on a 200 ms tick (`EncodingContext.startTicking` in `streaming.ts`), so a surface that goes
   quiet is demoted without committing. The measure is `RelentlessMeter` (`packages/traffic-policy/src/priority.ts`).
 
 Why this works:
@@ -564,7 +579,7 @@ end to end.
 It follows BBRv3 as specified in the IETF draft draft-ietf-ccwg-bbr (revision 06, July 2026; the constants below are
 from it), adapted to messages instead of packets, with one substitution: we can't see packet loss or ECN, so a
 **delay signal** takes the place of loss (below). Code: a pure TypeScript module with an injected clock and no I/O
-(e.g. `packages/session/src/viewer/congestion.ts`), one instance per viewer connection (a new connection
+(`packages/congestion`), one instance per viewer connection (a new connection
 starts from scratch).
 
 Units: bytes and milliseconds. "Item" = one data envelope (PATCH or FRAME). Control messages (CONTROL envelopes) are
@@ -719,8 +734,8 @@ single large item never stalls the link. Initial window before any estimate: 64 
   11. 2-item floor: a single item larger than the in-flight limit is still sent.
 - `scripts/test-gateway.sh` must still pass (the e2e link is local, so the controller should simply stay out of the
   way: check that no e2e step got slower).
-- As implemented (phase 1 of 2b, `packages/session/src/viewer/congestion.ts`, test in `test/congestion.test.ts`
-  with the harness `test/sim-link.ts`): every scenario runs on three seeds (item sizes 4–30 KB, jitter, bursts), about
+- As implemented (phase 1 of 2b, `packages/congestion/src/index.ts`, test in `packages/congestion/src/test/congestion.test.ts`
+  with the harness `sim-link.ts`): every scenario runs on three seeds (item sizes 4–30 KB, jitter, bursts), about
   0.5 s for all. Where the assertions differ from the list above:
   - Bandwidth probes (ProbeBW_UP and the ProbeBW_DOWN that drains it) have their own bound. A probe sends 25% faster
     than the link on purpose and only sees its queue a round trip later, so its peak is about threshold-to-end-it plus

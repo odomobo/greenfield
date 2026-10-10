@@ -11,7 +11,7 @@
  */
 import { createLogger } from './Logger.js'
 import { createSessionController, SessionController } from './SessionController.js'
-import { startWlrootsCompositor } from './wlroots/WlrCompositor.js'
+import { startWlrootsCompositor } from './streaming.js'
 import { Apps, KILL_AFTER_MS } from './wlroots/Apps.js'
 import { createServer, IncomingMessage, Server } from 'node:http'
 import { Socket } from 'node:net'

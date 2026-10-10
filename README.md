@@ -19,8 +19,18 @@ manager, the desktop shell, and the input handling. Sign-in is PAM, over TLS, pr
 |---|---|---|
 | `packages/scene-protocol` | TypeScript | Wire protocol (windows, frames, control messages) |
 | `packages/viewer` | TypeScript, React, C→WASM | Browser client: sign-in, desktop shell, window management, decoding |
-| `packages/session` | TypeScript, C (Node addons, wlroots) | Per-user desktop: compositor, encoding, transport, shell service, audio |
+| `packages/session` | TypeScript, C (Node addons, wlroots) | Per-user desktop: compositor (capture), the wiring of the streaming packages, viewer host, shell service, audio |
+| `packages/session-contracts` | TypeScript | The interfaces between the session's streaming packages |
+| `packages/frames` | TypeScript, C (Node addon) | The native frame object and its handle |
+| `packages/congestion` | TypeScript | BBRv3-style congestion estimator |
+| `packages/traffic-policy` | TypeScript | Surface priority, bottleneck, tiers and weights, link judgment |
+| `packages/scheduler` | TypeScript | Patch worker scheduling and frame pacing |
+| `packages/surface` | TypeScript | One surface's rendering: patches or video, and the switch |
+| `packages/patch-renderer` | TypeScript | Per surface: damage queue, patch planning and order |
+| `packages/video-renderer` | TypeScript | Per surface: on-demand video frames, key frames, quality |
 | `packages/patch-codec` | TypeScript, C (Node addon) | Patch encoding: PNG, QOI / LZ4 / JPEG in a native addon, the worker pools |
+| `packages/video-codec` | TypeScript, C (Node addon) | The GStreamer encoder, the hardware encoder pool, detection |
+| `packages/transport` | TypeScript, C (Node addon) | Fair-queueing send mechanism, chunking, WebSocket, simulated link |
 | `packages/gatekeeper` | Rust | Login helpers (PAM + dev), web front (TLS, HTTP, WebSocket, seccomp sandbox) |
 | `scripts/` | Bash, JS, C | End-to-end test suite |
 
@@ -38,6 +48,7 @@ make viewer     # just the browser client
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — design decisions, encoding policy, transport, audio
 - [ROADMAP.md](docs/ROADMAP.md) — remaining work
 - [DESIGN.md](docs/DESIGN.md) — shell UI, theme, motion
+- [docs/MODULARIZATION.md](docs/MODULARIZATION.md) — the session's streaming packages and their boundaries
 - [packages/session/README.md](packages/session/README.md) — process architecture, how sign-in works
 - [packages/gatekeeper/README.md](packages/gatekeeper/README.md) — the Rust crates, the web front, the sandbox
 - [packages/viewer/README.md](packages/viewer/README.md) — the browser side, the shell, query parameters

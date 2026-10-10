@@ -1,31 +1,19 @@
 /**
  * The session's Wayland side (ARCHITECTURE.md): wlroots 0.17 (native/wlr-core) implements the protocols; this
- * is the policy: window
- * positions, stacking, focus and minimize state, frame pacing, and the encoding of every surface's content.
+ * is the policy: window positions, stacking, focus and minimize state, and the capture of every surface's content. What
+ * is done with the content (patches, video, frame pacing) is the streaming's (streaming.ts): it hands the compositor
+ * `createSurface` and the frame callback scheduler.
  */
 import type * as WlrCoreAddon from '../addons/wlr-core-addon'
 import { createLogger } from '../Logger.js'
-import { FramePacing } from '@nebula/scheduler'
-import { EncoderPool, H264Encoder, type H264EncoderType } from '@nebula/video-codec'
-import { EncodingContext } from '../encoding/EncodingContext.js'
 import { Surface as RenderedSurface } from '@nebula/surface'
-import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool, encodePng } from '@nebula/patch-codec'
-import type {
-  EncodingSink,
-  FrameCallbackScheduler,
-  Frame,
-  PatchOrder,
-  PatchShape,
-  Rect,
-  SurfaceHost,
-  VideoEncoder,
-} from '@nebula/session-contracts'
-import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
-import { ControlMessage, SimulatedLink } from '@nebula/transport'
-import { TrafficPolicy } from '@nebula/traffic-policy'
+import { encodePng } from '@nebula/patch-codec'
+import type { FrameEncoder, RenderedSurfaces } from '../streaming.js'
+import type { FrameCallbackScheduler, Rect, SurfaceHost } from '@nebula/session-contracts'
+import { WindowSceneEndpoint } from '../viewer/ViewerHost.js'
+import { ControlMessage } from '@nebula/transport'
 import { frameInsets, type SceneRect, type SceneSurface, type SceneWindow } from '@gfld/scene-protocol'
 import { EvDevKeyCode } from './keys.js'
-import { Apps } from './Apps.js'
 import { X11Windows } from './X11.js'
 import { KeyboardConfig, systemKeyboardConfig } from './keyboard-config.js'
 import { Clipboard } from './Clipboard.js'
@@ -73,9 +61,6 @@ const V120_CLICK = 120
 /** a click's DOM delta in lines (Firefox) */
 const LINES_PER_CLICK = 3
 
-/** A pooled video encoder (H264Encoder of @nebula/video-codec in production): encodes frames, releasing them when done. */
-export type FrameEncoder = VideoEncoder & { encode(frame: Frame): Promise<Uint8Array> }
-
 type Surface = {
   sid: number
   key: string
@@ -86,7 +71,8 @@ type Surface = {
   /** input region, undefined: the whole surface */
   input?: SceneRect[]
   buffer?: { width: number; height: number; contentSerial: number }
-  encoder?: RenderedSurface<FrameEncoder>
+  /** the rendered side (patches or video) of the surface's content; created at its first buffer */
+  rendered?: RenderedSurface<FrameEncoder>
   frameScheduled: boolean
 }
 
@@ -110,15 +96,7 @@ type Window = {
   bounds?: string
 }
 
-const inactiveSink: EncodingSink = {
-  active: false,
-  queuedBytes: () => 0,
-  streamReady: () => true,
-  sendFrame: (_surface, _frame, _class, done) => done(false),
-  sendPatch: (_surface, _patch, _tier, done) => done(false),
-}
-
-export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
+export class WlrCompositor implements WindowSceneEndpoint, RenderedSurfaces {
   readonly waylandDisplay: string
   /** the X11 display for X11 apps (XWayland), undefined if there's none */
   readonly x11Display?: string
@@ -126,12 +104,6 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private readonly clipboard: Clipboard
   private readonly fileDrops: FileDrops
   private send?: (message: ControlMessage) => void
-  private sink: EncodingSink = inactiveSink
-  /** what the encoders send into: the current sink */
-  private readonly forwardingSink: EncodingSink
-  private readonly encoding: EncodingContext<FrameEncoder>
-  /** traffic policy: the surfaces' classes and bottlenecks; the viewer connection gives it its link to judge */
-  readonly traffic: TrafficPolicy
   private readonly surfaces = new Map<number, Surface>()
   private readonly sids = new Map<string, number>()
   private readonly windows = new Map<number, Window>()
@@ -152,19 +124,16 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   viewerScale = 1
   clientListener?: ClientListener
   private readonly framePacing: FrameCallbackScheduler
+  private readonly createSurface: (key: string, host: SurfaceHost<FrameEncoder>) => RenderedSurface<FrameEncoder>
   /** the pointer lock or confinement the app has on a surface (pointer-constraints), while it's active */
   private constraint?: { sid: number; confined: boolean }
 
   constructor(
     config: {
-      h264Encoder?: H264EncoderType
-      videoStreams: number
-      patchOrder?: PatchOrder
-      patchShape?: PatchShape
-      /** creates the pool's video encoders (replaceable in tests) */
-      createVideoEncoder?: (type: H264EncoderType) => FrameEncoder
       /** schedules the apps' frame callbacks */
       framePacing: FrameCallbackScheduler
+      /** creates the rendered side of a new surface (see streaming.ts) */
+      createSurface: (key: string, host: SurfaceHost<FrameEncoder>) => RenderedSurface<FrameEncoder>
     },
     private readonly wlr: WlrNative,
     watchFd: FdWatcher,
@@ -172,44 +141,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     dropsDirectory?: string,
   ) {
     this.framePacing = config.framePacing
-    const currentSink = () => this.sink
-    const forwardingSink: EncodingSink = (this.forwardingSink = {
-      get active() {
-        return currentSink().active
-      },
-      queuedBytes: (surface) => this.sink.queuedBytes(surface),
-      streamReady: (surface, exceptSettling) => this.sink.streamReady(surface, exceptSettling),
-      sendFrame: (surface, frame, surfaceClass, done) => this.sink.sendFrame(surface, frame, surfaceClass, done),
-      sendPatch: (surface, patch, tier, done) => this.sink.sendPatch(surface, patch, tier, done),
-    })
-    // without a hardware encoder the pool has size 0 and no video encoder is ever created; one that fails to create is
-    // reported once and the pool then behaves the same
-    const h264Encoder = config.h264Encoder
-    const createVideoEncoder = config.createVideoEncoder ?? ((type: H264EncoderType) => new H264Encoder(type))
-    const pool = new EncoderPool<FrameEncoder>(
-      () => createVideoEncoder(h264Encoder!),
-      h264Encoder ? config.videoStreams : 0,
-      (error) =>
-        logger.error(`Video encoder ${h264Encoder} is unavailable (${error.message}), sending lossless patches only.`),
-    )
-    pool.warm()
-    const streamingPool = new PatchWorkerPool(logger)
-    const normalPool = new PatchWorkerPool(logger, NORMAL_ENCODE_WORKERS, NORMAL_ENCODE_NICE)
-    // the link judgment's lines are logged as the transport's: they were before the judgment moved out of it
-    this.traffic = new TrafficPolicy({ logger, linkLogger: createLogger('viewer-transport') })
-    this.encoding = new EncodingContext(
-      forwardingSink,
-      pool,
-      {
-        normal: (rgba, width, height, opaque) => normalPool.encode(rgba, width, height, opaque),
-        streaming: streamingPool,
-      },
-      this.traffic,
-      logger,
-    )
-    this.encoding.patchOrder = config.patchOrder ?? 'oldest'
-    this.encoding.patchShape = config.patchShape ?? 'bands'
-    this.encoding.startTicking()
+    this.createSurface = config.createSurface
 
     this.clipboard = new Clipboard((text) => this.wlr.setClipboardText(text))
     this.fileDrops = new FileDrops(
@@ -234,28 +166,18 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   }
 
   // -------------------------------------------------------------------------------------------------------------------
-  // SurfaceContent
+  // RenderedSurfaces (what the viewer host's content resends from)
 
-  setFrameSink(sink: EncodingSink): void {
-    this.sink = sink
-    sink.onStreamReady = (surface) => this.forwardingSink.onStreamReady?.(surface)
-  }
-
-  requestKeyFrame(key: string): void {
+  renderedSurface(key: string): RenderedSurface<FrameEncoder> | undefined {
     const sid = this.sids.get(key)
-    const surface = sid === undefined ? undefined : this.surfaces.get(sid)
-    if (surface?.encoder && this.sink.active) {
-      void surface.encoder.refresh()
-    }
+    return sid === undefined ? undefined : this.surfaces.get(sid)?.rendered
   }
 
-  requestKeyFramesForAllSurfaces(): void {
-    for (const key of this.sids.keys()) {
-      this.requestKeyFrame(key)
-    }
+  renderedSurfaceKeys(): Iterable<string> {
+    return this.sids.keys()
   }
 
-  // -------------------------------------------------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------------------------------------------------
   // wlroots events
 
   private onEvent(type: string, args: any[]) {
@@ -303,7 +225,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       case 'surface-destroy': {
         const surface = this.surfaces.get(args[0])
         if (surface) {
-          surface.encoder?.destroy()
+          surface.rendered?.destroy()
           this.surfaces.delete(surface.sid)
           this.sids.delete(surface.key)
           if (this.send) {
@@ -526,7 +448,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
 
     if (!hasBuffer) {
       surface.buffer = undefined
-      surface.encoder?.bufferDetached()
+      surface.rendered?.bufferDetached()
     } else if (newBuffer) {
       surface.buffer = { width: bufferWidth, height: bufferHeight, contentSerial: ++this.contentSerial }
       const damage: Rect[] = []
@@ -538,7 +460,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
           height: bufferDamage[i + 3],
         })
       }
-      void this.encoderOf(surface).commit(damage)
+      void this.renderedOf(surface).commit(damage)
     }
 
     if (hasFrameCallbacks && !surface.frameScheduled) {
@@ -546,21 +468,21 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       // held until the surface's stream is ready (settling aside): an app slows down to what can be sent (but see
       // MIN_FRAME_RATE; not for video, a whole frame at a time)
       this.framePacing.schedule(
-        () => surface.encoder?.readyForFrame ?? true,
+        () => surface.rendered?.readyForFrame ?? true,
         (time) => {
           surface.frameScheduled = false
           if (this.surfaces.get(sid) === surface) {
             this.wlr.sendFrameDone(sid, time)
           }
         },
-        () => !surface.encoder?.usesVideo,
+        () => !surface.rendered?.usesVideo,
       )
     }
     this.scheduleScene()
   }
 
-  private encoderOf(surface: Surface): RenderedSurface<FrameEncoder> {
-    if (surface.encoder === undefined) {
+  private renderedOf(surface: Surface): RenderedSurface<FrameEncoder> {
+    if (surface.rendered === undefined) {
       const host: SurfaceHost<FrameEncoder> = {
         currentBuffer: () =>
           surface.buffer && {
@@ -573,9 +495,9 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         takeFrame: () => surface.buffer && this.wlr.takeFrame(surface.sid, surface.buffer.contentSerial),
         encodeVideo: (encoder, frame) => encoder.encode(frame),
       }
-      surface.encoder = new RenderedSurface(surface.key, host, this.encoding)
+      surface.rendered = this.createSurface(surface.key, host)
     }
-    return surface.encoder
+    return surface.rendered
   }
 
   private windowMapped(window: Window) {
@@ -1234,54 +1156,6 @@ function inputRegion(rects: Int32Array, width: number, height: number): SceneRec
     return [{ x: x0, y: y0, width: x1 - x0, height: y1 - y0 }]
   }
   return boxes
-}
-
-/** Start the session's Wayland side on wlroots, with its app processes. */
-export function startWlrootsCompositor(config: {
-  h264Encoder?: H264EncoderType
-  videoStreams?: number
-  /** development only: a simulated slow link to the viewer (see SimulatedLink) */
-  link?: SimulatedLink
-  /** development only: the order a surface's queued patches are captured in (see PatchOrder) */
-  patchOrder?: PatchOrder
-  /** development only: how large damage is split into patches (see PatchShape) */
-  patchShape?: PatchShape
-}): {
-  viewerHost: ViewerHost
-  compositor: WlrCompositor
-  apps: Apps
-} {
-  // loaded here, not at import: tests use the policy with a fake core
-  /* eslint-disable @typescript-eslint/no-var-requires */
-  const native = require('../addons/wlr-core-addon') as WlrNative
-  const { startPoll } = require('../addons/proxy-poll-addon') as typeof import('../addons/proxy-poll-addon')
-  /* eslint-enable @typescript-eslint/no-var-requires */
-  const framePacing = new FramePacing()
-  const compositor = new WlrCompositor(
-    {
-      framePacing,
-      h264Encoder: config.h264Encoder,
-      videoStreams: config.videoStreams ?? 4,
-      patchOrder: config.patchOrder,
-      patchShape: config.patchShape,
-    },
-    native,
-    (fd, readable) => {
-      startPoll(fd, readable)
-    },
-  )
-  const apps = new Apps(compositor.waylandDisplay)
-  apps.x11Display = compositor.x11Display
-  compositor.clientListener = apps
-  return {
-    viewerHost: new ViewerHost(compositor, compositor, {
-      link: config.link,
-      pacing: framePacing,
-      traffic: compositor.traffic,
-    }),
-    compositor,
-    apps,
-  }
 }
 
 /** The scene's size limit fields: only the ones that are set (0 is unbounded). */
