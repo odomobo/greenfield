@@ -5,7 +5,7 @@
  */
 import type * as WlrCoreAddon from '../addons/wlr-core-addon'
 import { createLogger } from '../Logger.js'
-import { scheduleFrameCallback } from '../FramePacing.js'
+import { FramePacing } from '@nebula/scheduler'
 import { EncoderPool } from '../encoding/EncoderPool.js'
 import {
   EncodingContext,
@@ -17,7 +17,7 @@ import {
   VideoQuality,
 } from '../encoding/SurfaceEncoder.js'
 import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool, encodePng } from '@nebula/patch-codec'
-import type { Rect } from '@nebula/session-contracts'
+import type { FrameCallbackScheduler, Rect } from '@nebula/session-contracts'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
 import { ControlMessage, SimulatedLink } from '../viewer/ViewerTransport.js'
 import { frameInsets, type SceneRect, type SceneSurface, type SceneWindow } from '@gfld/scene-protocol'
@@ -197,16 +197,25 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   private sceneScheduled = false
   viewerScale = 1
   clientListener?: ClientListener
+  private readonly framePacing: FrameCallbackScheduler
   /** the pointer lock or confinement the app has on a surface (pointer-constraints), while it's active */
   private constraint?: { sid: number; confined: boolean }
 
   constructor(
-    config: { h264Encoder?: H264Encoder; videoStreams: number; patchOrder?: PatchOrder; patchShape?: PatchShape },
+    config: {
+      h264Encoder?: H264Encoder
+      videoStreams: number
+      patchOrder?: PatchOrder
+      patchShape?: PatchShape
+      /** schedules the apps' frame callbacks */
+      framePacing: FrameCallbackScheduler
+    },
     private readonly wlr: WlrNative,
     watchFd: FdWatcher,
     /** where files dropped from the user's computer are saved */
     dropsDirectory?: string,
   ) {
+    this.framePacing = config.framePacing
     const currentSink = () => this.sink
     const forwardingSink: EncodingSink = (this.forwardingSink = {
       get active() {
@@ -586,7 +595,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       surface.frameScheduled = true
       // held until the surface's stream is ready (settling aside): an app slows down to what can be sent (but see
       // MIN_FRAME_RATE; not for video, a whole frame at a time)
-      scheduleFrameCallback(
+      this.framePacing.schedule(
         () => surface.encoder?.readyForFrame ?? true,
         (time) => {
           surface.frameScheduled = false
@@ -1297,8 +1306,10 @@ export function startWlrootsCompositor(config: {
   const native = require('../addons/wlr-core-addon') as WlrNative
   const { startPoll } = require('../addons/proxy-poll-addon') as typeof import('../addons/proxy-poll-addon')
   /* eslint-enable @typescript-eslint/no-var-requires */
+  const framePacing = new FramePacing()
   const compositor = new WlrCompositor(
     {
+      framePacing,
       h264Encoder: config.h264Encoder,
       videoStreams: config.videoStreams ?? 4,
       patchOrder: config.patchOrder,
@@ -1312,7 +1323,11 @@ export function startWlrootsCompositor(config: {
   const apps = new Apps(compositor.waylandDisplay)
   apps.x11Display = compositor.x11Display
   compositor.clientListener = apps
-  return { viewerHost: new ViewerHost(compositor, compositor, { link: config.link }), compositor, apps }
+  return {
+    viewerHost: new ViewerHost(compositor, compositor, { link: config.link, pacing: framePacing }),
+    compositor,
+    apps,
+  }
 }
 
 /** The scene's size limit fields: only the ones that are set (0 is unbounded). */

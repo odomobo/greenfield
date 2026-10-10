@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, test } from 'node:test'
+import { after, afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { MAX_FRAME_HOLD_MS, onViewerFeedback, setViewerAttached } from '../../FramePacing.js'
+import { FramePacing, MAX_FRAME_HOLD_MS } from '@nebula/scheduler'
 import { ControlMessage } from '../../viewer/ViewerTransport.js'
 import type { EncodingSink } from '../../encoding/SurfaceEncoder.js'
 import { FRAME_BORDER, FRAME_TITLE_HEIGHT } from '@gfld/scene-protocol'
@@ -217,9 +217,12 @@ const lastScene = () => scenes()[scenes().length - 1]
 const windowsOf = (scene: ControlMessage) => scene.windows as any[]
 const lastConfigure = (sid: number) => [...core.configures].reverse().find((configure) => configure.sid === sid)
 
+const framePacing = new FramePacing()
+after(() => framePacing.stop())
+
 beforeEach(() => {
   core = new FakeCore()
-  compositor = new WlrCompositor({ videoStreams: 1 }, core.native, () => undefined)
+  compositor = new WlrCompositor({ videoStreams: 1, framePacing }, core.native, () => undefined)
   sent = []
   compositor.attach((message) => sent.push(message))
 })
@@ -590,8 +593,8 @@ test('the input region is sent unless it is the whole surface, and as a box when
 })
 
 test('frame callbacks are sent, paced by the viewer', async () => {
-  setViewerAttached(true)
-  onViewerFeedback(16)
+  framePacing.setViewerAttached(true)
+  framePacing.onViewerFeedback(16)
   core.newWindow(1)
   core.commit(1, 400, 300, true)
   core.commit(1, 400, 300, true)
@@ -601,7 +604,7 @@ test('frame callbacks are sent, paced by the viewer', async () => {
   }
   // one frame callback for both commits: they're all sent at once
   assert.deepEqual(core.frameDone, [1])
-  setViewerAttached(false)
+  framePacing.setViewerAttached(false)
 })
 
 test('cursors: the app’s surface, a named shape, or hidden', () => {
@@ -1008,8 +1011,8 @@ test('without a hardware encoder no video encoder is ever created, whatever the 
 })
 
 test('frame callbacks are held while the surface’s stream is not ready, and released once it is', async () => {
-  setViewerAttached(true)
-  onViewerFeedback(16)
+  framePacing.setViewerAttached(true)
+  framePacing.onViewerFeedback(16)
   const { sink, held, release } = holdingSink()
   compositor.setFrameSink(sink)
   readablePixels()
@@ -1028,13 +1031,13 @@ test('frame callbacks are held while the surface’s stream is not ready, and re
     }
     assert.deepEqual(core.frameDone, [1])
   } finally {
-    setViewerAttached(false)
+    framePacing.setViewerAttached(false)
   }
 })
 
 test('a surface whose stream stays not ready still gets its frame callback after MAX_FRAME_HOLD_MS (10 a second)', async () => {
-  setViewerAttached(true)
-  onViewerFeedback(16)
+  framePacing.setViewerAttached(true)
+  framePacing.onViewerFeedback(16)
   const { sink, held } = holdingSink()
   compositor.setFrameSink(sink)
   readablePixels()
@@ -1049,7 +1052,7 @@ test('a surface whose stream stays not ready still gets its frame callback after
     assert.ok(waited >= MAX_FRAME_HOLD_MS - 40 && waited < MAX_FRAME_HOLD_MS + 150, `after ${Math.round(waited)} ms`)
     assert.equal(held.length, 2, 'nothing was sent meanwhile')
   } finally {
-    setViewerAttached(false)
+    framePacing.setViewerAttached(false)
   }
 })
 

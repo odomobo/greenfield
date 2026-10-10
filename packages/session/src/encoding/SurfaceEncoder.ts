@@ -16,14 +16,19 @@
  * tested) without it.
  */
 import { isLossyPatchFormat, type Patch } from '@gfld/scene-protocol'
+import { PatchPump } from '@nebula/scheduler'
 import { EncoderPool } from './EncoderPool.js'
 import type {
+  CapturedPatch,
   EncodedPatch,
   Frame,
+  PatchEncode,
   PatchOrder,
   PatchShape,
+  PatchSource,
   Rect,
   SendTier,
+  StreamingEncodePool,
   SurfaceClass,
   VideoEncoder,
   VideoQuality,
@@ -31,8 +36,6 @@ import type {
 import { BURST_MS, MAX_PATCH_PIXELS, MAX_PATCH_RECTS, PeriodFractions, planPatches, RelentlessMeter } from './policy.js'
 import { area, boundingBox, clip, disjoint, intersect, subtract } from './region.js'
 
-/** Patches of normal surfaces encoding at once (on libuv's thread pool). */
-export const MAX_NORMAL_ENCODES = 4
 /** A surface's lossy area in more pieces than this is tracked as its bounding box (refreshing a little more). */
 export const MAX_LOSSY_RECTS = 32
 /** A surface's lossless bytes per pixel before any lossless patch of it was measured: uncompressed RGBA. */
@@ -49,7 +52,16 @@ export type BufferInfo = {
 }
 
 /** Shared types, re-exported for the code that has always imported them from here. */
-export type { PatchOrder, PatchShape, VideoEncoder, VideoQuality }
+export type {
+  CapturedPatch,
+  PatchEncode,
+  PatchOrder,
+  PatchShape,
+  PatchSource,
+  StreamingEncodePool,
+  VideoEncoder,
+  VideoQuality,
+}
 
 /** Where encoded frames and patches go: the attached viewer. */
 export interface EncodingSink {
@@ -106,43 +118,6 @@ function boundsOf(buffer: BufferInfo): Rect {
  */
 function isSmall(buffer: BufferInfo): boolean {
   return buffer.width * buffer.height <= MAX_PATCH_PIXELS
-}
-
-export type CapturedPatch = {
-  rect: Rect
-  pixels: Uint8Array
-  opaque: boolean
-  surfaceSize: { width: number; height: number }
-  serial: number
-  epoch: number
-  /** the surface's class, or settle: a lossless resend of a lossy area */
-  tier: SendTier
-  /** may be encoded lossily (JPEG), if that's smaller */
-  lossy: boolean
-}
-
-/** What the patch pump needs of a surface. */
-export interface PatchSource {
-  readonly key: string
-  readonly destroyed: boolean
-  readonly hasQueuedPatches: boolean
-  /** it may capture its next patch: nothing of it is encoding (one encode at a time) and its stream is ready */
-  readonly mayCapture: boolean
-  /** the tier of its next patch: its class for damage, settle when it settles */
-  readonly sendTier: SendTier
-  /**
-   * Starts the surface's one encode: the pump calls `encodeDone` once the patch was handed to the sink (or dropped), and
-   * `itemDone` once it was sent or reported unsent.
-   */
-  capturePatch(): CapturedPatch | undefined
-  /** A captured patch goes to the sink now, encoded. */
-  patchSending(captured: CapturedPatch, encoded: EncodedPatch): void
-  /** The patch's encode is over: it was handed to the sink (after `patchSending`), or dropped. */
-  encodeDone(captured: CapturedPatch): void
-  /** The patch was handed to the socket, or reported unsent (sent or not), or dropped. */
-  itemDone(captured?: CapturedPatch): void
-  /** false if results captured at this epoch are stale (class switched, surface destroyed) */
-  isCurrent(epoch: number): boolean
 }
 
 export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements PatchSource {
@@ -823,170 +798,6 @@ export class SurfaceEncoder<V extends VideoEncoder = VideoEncoder> implements Pa
       this.context.pool.release(this.lease)
       this.lease = undefined
     }
-  }
-}
-
-export type PatchEncode = (
-  rgba: Uint8Array,
-  width: number,
-  height: number,
-  opaque: boolean,
-  lossy?: boolean,
-) => Promise<EncodedPatch>
-
-/** A pool of worker threads that encodes patches (PatchWorkerPool): the low priority one is the streaming class's. */
-export interface StreamingEncodePool {
-  encode: PatchEncode
-  /** whether another patch may be captured for it: a worker is free, or about to be */
-  readonly canAccept: boolean
-  /** set by the pump: called when `canAccept` may have changed */
-  onCapacity?: () => void
-}
-
-/**
- * Encodes queued patches when there is room: the surface may capture (nothing of it encoding, its stream ready), and an
- * encoder is free in the surface's class's pool. Patches wait in their surface's queue (where new damage merges into
- * them) instead of in a send buffer. A surface encodes one patch at a time, so its patches reach the sink in capture
- * order (a newer patch can overlap an older one, and the older one must not be drawn over it).
- */
-export class PatchPump {
-  private readonly ready: Record<SendTier, Set<PatchSource>> = {
-    normal: new Set(),
-    streaming: new Set(),
-    settle: new Set(),
-  }
-  private normalEncodes = 0
-  private pumping = false
-  private again = false
-
-  constructor(
-    private readonly sink: EncodingSink,
-    private readonly encodeNormal: PatchEncode,
-    private readonly streaming: StreamingEncodePool,
-    private readonly logger: Logger,
-    private readonly maxNormalEncodes = MAX_NORMAL_ENCODES,
-  ) {
-    streaming.onCapacity = () => this.pump()
-  }
-
-  /** normal patches encoding right now */
-  get normalEncoding(): number {
-    return this.normalEncodes
-  }
-
-  schedule(surface: PatchSource): void {
-    this.ready[surface.sendTier].add(surface)
-    this.pump()
-  }
-
-  pump(): void {
-    if (this.pumping) {
-      // a pump is running up the stack (a synchronous callback): it goes round again
-      this.again = true
-      return
-    }
-    this.pumping = true
-    try {
-      do {
-        this.again = false
-        // settling shares the low priority pool with the streaming class, after it
-        this.pumpClass('streaming')
-        this.pumpClass('settle')
-        this.pumpClass('normal')
-      } while (this.again)
-    } finally {
-      this.pumping = false
-    }
-  }
-
-  private hasCapacity(tier: SendTier): boolean {
-    return tier === 'normal' ? this.normalEncodes < this.maxNormalEncodes : this.streaming.canAccept
-  }
-
-  private pumpClass(tier: SendTier) {
-    const set = this.ready[tier]
-    while (this.sink.active && this.hasCapacity(tier)) {
-      const next = set.values().next()
-      if (next.done) {
-        return
-      }
-      const surface = next.value
-      set.delete(surface)
-      if (surface.destroyed || !surface.hasQueuedPatches) {
-        continue
-      }
-      if (surface.sendTier !== tier) {
-        // its class changed since it was scheduled, or it has damage again (or none left)
-        this.ready[surface.sendTier].add(surface)
-        this.again = true
-        continue
-      }
-      if (!surface.mayCapture) {
-        // scheduled again when its encode is done or its stream is ready
-        continue
-      }
-      const captured = surface.capturePatch()
-      if (surface.hasQueuedPatches) {
-        // back of the line, for fairness between surfaces
-        this.ready[surface.sendTier].add(surface)
-        this.again ||= surface.sendTier !== tier
-      }
-      if (captured === undefined) {
-        continue
-      }
-      this.encode(surface, captured)
-    }
-  }
-
-  private encode(surface: PatchSource, captured: ReturnType<PatchSource['capturePatch']> & object) {
-    const tier = captured.tier
-    let released = false
-    const done = () => {
-      if (!released) {
-        released = true
-        surface.itemDone(captured)
-      }
-    }
-    let encoding: Promise<EncodedPatch>
-    if (tier === 'normal') {
-      this.normalEncodes++
-      encoding = this.encodeNormal(captured.pixels, captured.rect.width, captured.rect.height, captured.opaque)
-      const finished = () => {
-        this.normalEncodes--
-        this.pump()
-      }
-      encoding.then(finished, finished)
-    } else {
-      encoding = this.streaming.encode(
-        captured.pixels,
-        captured.rect.width,
-        captured.rect.height,
-        captured.opaque,
-        captured.lossy,
-      )
-    }
-    encoding.then(
-      (encoded) => {
-        if (!surface.isCurrent(captured.epoch) || !this.sink.active) {
-          surface.encodeDone(captured)
-          done()
-          return
-        }
-        surface.patchSending(captured, encoded)
-        this.sink.sendPatch(
-          surface.key,
-          { contentSerial: captured.serial, surfaceSize: captured.surfaceSize, rect: captured.rect, ...encoded },
-          tier,
-          done,
-        )
-        surface.encodeDone(captured)
-      },
-      (error: Error) => {
-        this.logger.error(`Patch encoding of ${surface.key} failed: ${error.message}`)
-        surface.encodeDone(captured)
-        done()
-      },
-    )
   }
 }
 

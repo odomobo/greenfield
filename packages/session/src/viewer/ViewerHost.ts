@@ -1,8 +1,8 @@
 import { WebSocket } from 'ws'
 import { CongestionController } from '@nebula/congestion'
 import { createLogger } from '../Logger.js'
-import { onViewerFeedback, setViewerAttached } from '../FramePacing.js'
 import type { EncodingSink } from '../encoding/SurfaceEncoder.js'
+import type { ViewerPacing } from '@nebula/session-contracts'
 import { AudioPacket, CLOSE_LOGGED_OUT, CLOSE_TAKEN_OVER, PROTOCOL_VERSION } from './protocol.js'
 import { ControlMessage, SimulatedLink, ViewerTransport, WebSocketViewerTransport } from './ViewerTransport.js'
 
@@ -84,7 +84,11 @@ export class ViewerHost {
   constructor(
     private readonly scene: WindowSceneEndpoint,
     private readonly content: SurfaceContent,
-    private readonly options: { link?: SimulatedLink } = {},
+    private readonly options: {
+      link?: SimulatedLink
+      /** told when a viewer attaches or detaches and what its display's refresh interval is (frame pacing) */
+      pacing?: ViewerPacing
+    } = {},
   ) {
     const isAttached = () => this.transport !== undefined
     const isBandwidthLimited = () => this.transport?.bandwidthLimited ?? false
@@ -169,14 +173,14 @@ export class ViewerHost {
       }
       logger.info(`Viewer detached. Code: ${code}. Reason: ${reason}`)
       this.transport = undefined
-      setViewerAttached(false)
+      this.options.pacing?.setViewerAttached(false)
       this.scene.detach()
       this.shellEndpoint?.detach()
       this.audioEndpoint?.detach()
     }
 
     logger.info('Viewer attached.')
-    setViewerAttached(true)
+    this.options.pacing?.setViewerAttached(true)
     transport.send({
       priority: 'control',
       message: { type: 'welcome', protocolVersion: PROTOCOL_VERSION },
@@ -201,7 +205,7 @@ export class ViewerHost {
       /* noop, already detached */
     }
     previous.close(code, reason)
-    setViewerAttached(false)
+    this.options.pacing?.setViewerAttached(false)
     this.scene.detach()
     this.shellEndpoint?.detach()
     this.audioEndpoint?.detach()
@@ -222,7 +226,7 @@ export class ViewerHost {
         }
         break
       case 'feedback':
-        onViewerFeedback(Number(message.refreshInterval) || 0)
+        this.options.pacing?.onViewerFeedback(Number(message.refreshInterval) || 0)
         break
       case 'keyframe':
         // the viewer's decoder failed: the surface's content makes its next frame a key frame (the viewer discards the

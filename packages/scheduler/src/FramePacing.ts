@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks'
+import type { FrameCallbackScheduler, ViewerPacing } from '@nebula/session-contracts'
 
 /**
  * Frame callback pacing shared by all surfaces of the session, driven by the attached viewer. No native code.
@@ -96,65 +97,75 @@ export class FrameCallbackQueue {
   }
 }
 
-let tickInterval = tickIntervalFor(0)
-const callbacks = new FrameCallbackQueue()
-
 /**
- * The frame clock: ticks every `tickInterval` ms, scheduled against exact deadlines (timers only have whole
+ * The session's frame pacing: the frame clock and the frame callbacks waiting for it, driven by the attached viewer.
+ *
+ * The frame clock ticks every `tickInterval` ms, scheduled against exact deadlines (timers only have whole
  * milliseconds: an interval timer of 33.3 ms would tick every 33). A changed interval applies from the next tick; a
  * clock that fell behind (a busy event loop) starts over from now instead of catching up with a burst of ticks.
  */
-let nextTickAt = performance.now()
-function scheduleTick() {
-  nextTickAt += tickInterval
-  const now = performance.now()
-  if (nextTickAt < now - tickInterval) {
-    nextTickAt = now
+export class FramePacing implements FrameCallbackScheduler, ViewerPacing {
+  private tickInterval = tickIntervalFor(0)
+  private readonly callbacks = new FrameCallbackQueue()
+  private nextTickAt = performance.now()
+  private timer?: ReturnType<typeof setTimeout>
+  private stopped = false
+  private attached = false
+  private lastFeedbackTimestamp = 0
+
+  constructor() {
+    this.scheduleTick()
   }
-  setTimeout(
-    () => {
-      const interval = tickInterval
-      callbacks.tick(interval, performance.now() >>> 0)
-      scheduleTick()
-    },
-    Math.max(0, nextTickAt - now),
-  )
-}
-scheduleTick()
 
-const viewerPacing = {
-  attached: false,
-  lastFeedbackTimestamp: 0,
-}
-
-export function setViewerAttached(attached: boolean): void {
-  viewerPacing.attached = attached
-  viewerPacing.lastFeedbackTimestamp = performance.now()
-  if (!attached) {
-    tickInterval = DETACHED_TICK_INTERVAL
+  /** Stops the frame clock. */
+  stop(): void {
+    this.stopped = true
+    clearTimeout(this.timer)
   }
-}
 
-export function onViewerFeedback(refreshInterval: number): void {
-  viewerPacing.lastFeedbackTimestamp = performance.now()
-  if (refreshInterval > 0) {
-    tickInterval = tickIntervalFor(refreshInterval)
+  setViewerAttached(attached: boolean): void {
+    this.attached = attached
+    this.lastFeedbackTimestamp = performance.now()
+    if (!attached) {
+      this.tickInterval = DETACHED_TICK_INTERVAL
+    }
   }
-}
 
-function viewerIsPacing(): boolean {
-  return viewerPacing.attached && performance.now() - viewerPacing.lastFeedbackTimestamp < VIEWER_FEEDBACK_TIMEOUT
-}
+  onViewerFeedback(refreshInterval: number): void {
+    this.lastFeedbackTimestamp = performance.now()
+    if (refreshInterval > 0) {
+      this.tickInterval = tickIntervalFor(refreshInterval)
+    }
+  }
 
-/**
- * Call back on a later tick of the frame clock once `ready()` (the surface is ready for a new frame) is true, or after
- * MAX_FRAME_HOLD_MS anyway if `mayForce()` (the surface isn't streamed as video); throttled without a pacing viewer.
- * The callback gets the frame time (ms).
- */
-export function scheduleFrameCallback(
-  ready: () => boolean,
-  callback: (time: number) => void,
-  mayForce: () => boolean = () => true,
-): void {
-  callbacks.schedule(viewerIsPacing() ? 0 : DETACHED_FRAME_CALLBACK_DELAY, ready, callback, mayForce)
+  /**
+   * Call back on a later tick of the frame clock once `ready()` (the surface is ready for a new frame) is true, or
+   * after MAX_FRAME_HOLD_MS anyway if `mayForce()` (the surface isn't streamed as video); throttled without a pacing
+   * viewer. The callback gets the frame time (ms).
+   */
+  schedule(ready: () => boolean, callback: (time: number) => void, mayForce: () => boolean = () => true): void {
+    this.callbacks.schedule(this.viewerIsPacing() ? 0 : DETACHED_FRAME_CALLBACK_DELAY, ready, callback, mayForce)
+  }
+
+  private viewerIsPacing(): boolean {
+    return this.attached && performance.now() - this.lastFeedbackTimestamp < VIEWER_FEEDBACK_TIMEOUT
+  }
+
+  private scheduleTick() {
+    if (this.stopped) {
+      return
+    }
+    this.nextTickAt += this.tickInterval
+    const now = performance.now()
+    if (this.nextTickAt < now - this.tickInterval) {
+      this.nextTickAt = now
+    }
+    this.timer = setTimeout(
+      () => {
+        this.callbacks.tick(this.tickInterval, performance.now() >>> 0)
+        this.scheduleTick()
+      },
+      Math.max(0, this.nextTickAt - now),
+    )
+  }
 }
