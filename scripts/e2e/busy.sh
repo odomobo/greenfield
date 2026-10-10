@@ -89,6 +89,8 @@ nice19_ticks() {
     line="$(cat "$stat" 2>/dev/null)" || continue
     rest="${line##*) }"
     set -- $rest
+    # (a thread that ended while it was read leaves no fields: skip it, `set -u` would end the script)
+    [ $# -ge 17 ] || continue
     [ "${17}" = 19 ] && total=$((total + ${12} + ${13}))
   done
   echo "$total"
