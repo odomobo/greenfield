@@ -1,12 +1,14 @@
 /**
- * The per-surface encoding policy (see "Encoding policy" in ARCHITECTURE.md). Pure, no Node or native dependencies.
+ * Priority, traffic policy's first axis (see "Encoding policy" in ARCHITECTURE.md): is the surface relentless? A surface
+ * that keeps producing work uses whatever resources it's given, which is itself the reason it gets low priority: the
+ * streaming class (its patches encode on the low-priority pool, its items go in a lower tier). Pure, no Node or native
+ * dependencies.
  *
- * A surface has a priority class: normal, or streaming when it is relentless (it keeps sending new data before its old
- * data has gone out). Whether a surface is sent as video or as patches is decided separately, by the surface
- * encoder (video only for streaming surfaces, with a hardware encoder, when the surface isn't small).
+ * This is the time measure (RelentlessMeter); a burst promotes a surface at once (TrafficPolicy.checkBurst).
  */
-import type { PatchShape, Rect, SurfaceClass } from '@nebula/session-contracts'
-import { boundingBox, clip, disjoint, splitRect, subtract } from './region.js'
+import type { PeriodFractions, SurfaceClass } from '@nebula/session-contracts'
+
+export type { PeriodFractions }
 
 /** Surfaces are judged on fixed, back-to-back periods of this length. */
 export const CLASS_PERIOD_MS = 750
@@ -18,16 +20,10 @@ export const PROMOTE_FRACTION = 0.6
 /** Streaming -> normal at the end of a period in which the backlogged share was below this. */
 export const DEMOTE_FRACTION = 0.15
 /**
- * Burst promotion and lossy mode (see SurfaceEncoder.ts, bandwidth.ts): the predicted backlog, in time at the link's
- * bandwidth, over which normal surfaces are promoted (the largest backlog first) and streaming surfaces go lossy.
+ * Burst promotion and the link judgment (see TrafficPolicy.ts, bandwidth.ts): the predicted backlog, in time at the
+ * link's bandwidth, over which normal surfaces are promoted (the largest backlog first) and the link is short at once.
  */
 export const BURST_MS = 200
-/** Max pixels per patch, larger areas are split. */
-export const MAX_PATCH_PIXELS = 64 * 1024
-/** A commit's damage in more pieces than this is sent as its bounding box instead (fewer, larger patches). */
-export const MAX_PATCH_RECTS = 32
-
-export type PeriodFractions = { busy: number; backlogged: number }
 
 /**
  * Measures how relentless a surface is, on discrete periods, and decides its class from that. Times are in ms.
@@ -149,27 +145,4 @@ export class RelentlessMeter {
       this._class = 'normal'
     }
   }
-}
-
-/**
- * The patches to queue for new damage.
- *
- * `queued` are patches that are queued but whose pixels haven't been read yet: they will pick up the latest content
- * when they are encoded, so the parts of the damage they cover are left out (possibly all of it). Patches that already
- * started encoding must not be passed here, their pixels are fixed and may be stale.
- */
-export function planPatches(
-  damage: Rect[],
-  queued: Rect[],
-  bounds: Rect,
-  maxPixels = MAX_PATCH_PIXELS,
-  maxRects = MAX_PATCH_RECTS,
-  shape: PatchShape = 'bands',
-): Rect[] {
-  let region = subtract(disjoint(clip(damage, bounds)), queued)
-  if (region.length > maxRects) {
-    const box = boundingBox(region)
-    region = box ? subtract([box], queued) : []
-  }
-  return region.flatMap((rect) => splitRect(rect, maxPixels, shape))
 }

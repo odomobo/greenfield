@@ -19,6 +19,7 @@ import { NORMAL_ENCODE_NICE, NORMAL_ENCODE_WORKERS, PatchWorkerPool, encodePng }
 import type { FrameCallbackScheduler, Frame, Rect, VideoEncoder } from '@nebula/session-contracts'
 import { SurfaceContent, ViewerHost, WindowSceneEndpoint } from '../viewer/ViewerHost.js'
 import { ControlMessage, SimulatedLink } from '@nebula/transport'
+import { TrafficPolicy } from '@nebula/traffic-policy'
 import { frameInsets, type SceneRect, type SceneSurface, type SceneWindow } from '@gfld/scene-protocol'
 import { EvDevKeyCode } from './keys.js'
 import { Apps } from './Apps.js'
@@ -108,8 +109,6 @@ type Window = {
 
 const inactiveSink: EncodingSink = {
   active: false,
-  bandwidthLimited: false,
-  linkBandwidth: undefined,
   queuedBytes: () => 0,
   streamReady: () => true,
   sendFrame: (_surface, _frame, _class, done) => done(false),
@@ -128,6 +127,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   /** what the encoders send into: the current sink */
   private readonly forwardingSink: EncodingSink
   private readonly encoding: EncodingContext<FrameEncoder>
+  /** traffic policy: the surfaces' classes and bottlenecks; the viewer connection gives it its link to judge */
+  readonly traffic: TrafficPolicy
   private readonly surfaces = new Map<number, Surface>()
   private readonly sids = new Map<string, number>()
   private readonly windows = new Map<number, Window>()
@@ -173,12 +174,6 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
       get active() {
         return currentSink().active
       },
-      get bandwidthLimited() {
-        return currentSink().bandwidthLimited
-      },
-      get linkBandwidth() {
-        return currentSink().linkBandwidth
-      },
       queuedBytes: (surface) => this.sink.queuedBytes(surface),
       streamReady: (surface, exceptSettling) => this.sink.streamReady(surface, exceptSettling),
       sendFrame: (surface, frame, surfaceClass, done) => this.sink.sendFrame(surface, frame, surfaceClass, done),
@@ -197,6 +192,8 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
     pool.warm()
     const streamingPool = new PatchWorkerPool(logger)
     const normalPool = new PatchWorkerPool(logger, NORMAL_ENCODE_WORKERS, NORMAL_ENCODE_NICE)
+    // the link judgment's lines are logged as the transport's: they were before the judgment moved out of it
+    this.traffic = new TrafficPolicy({ logger, linkLogger: createLogger('viewer-transport') })
     this.encoding = new EncodingContext(
       forwardingSink,
       pool,
@@ -204,6 +201,7 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
         normal: (rgba, width, height, opaque) => normalPool.encode(rgba, width, height, opaque),
         streaming: streamingPool,
       },
+      this.traffic,
       logger,
     )
     this.encoding.patchOrder = config.patchOrder ?? 'oldest'
@@ -238,10 +236,6 @@ export class WlrCompositor implements WindowSceneEndpoint, SurfaceContent {
   setFrameSink(sink: EncodingSink): void {
     this.sink = sink
     sink.onStreamReady = (surface) => this.forwardingSink.onStreamReady?.(surface)
-  }
-
-  unencodedBytes(): number {
-    return this.encoding.unencodedBytes
   }
 
   requestKeyFrame(key: string): void {
@@ -1277,7 +1271,11 @@ export function startWlrootsCompositor(config: {
   apps.x11Display = compositor.x11Display
   compositor.clientListener = apps
   return {
-    viewerHost: new ViewerHost(compositor, compositor, { link: config.link, pacing: framePacing }),
+    viewerHost: new ViewerHost(compositor, compositor, {
+      link: config.link,
+      pacing: framePacing,
+      traffic: compositor.traffic,
+    }),
     compositor,
     apps,
   }

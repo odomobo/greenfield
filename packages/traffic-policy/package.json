@@ -1,7 +1,7 @@
 {
-  "name": "@nebula/congestion",
+  "name": "@nebula/traffic-policy",
   "version": "0.1.0",
-  "description": "The BBR-style congestion estimator for the data sent to one viewer.",
+  "description": "How the link and the CPU are shared between surfaces: priority (relentless or not, burst promotion, settling), bottleneck (CPU- or link-bound), the send tiers and their weights.",
   "type": "commonjs",
   "private": true,
   "main": "dist/index.js",
@@ -10,10 +10,6 @@
     ".": {
       "types": "./types/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./sim-link": {
-      "types": "./types/test/sim-link.d.ts",
-      "default": "./dist/test/sim-link.js"
     }
   },
   "files": [
@@ -30,10 +26,10 @@
     "format": "prettier --write 'src/**/*.ts'"
   },
   "dependencies": {
-    "@gfld/scene-protocol": "*",
     "@nebula/session-contracts": "*"
   },
   "devDependencies": {
+    "@nebula/congestion": "*",
     "@tsconfig/node18": "^18.2.4",
     "@types/node": "20.14.8",
     "@typescript-eslint/eslint-plugin": "^7.14.1",

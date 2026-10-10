@@ -176,3 +176,105 @@ export interface ViewerPacing {
   /** The viewer reported its display's refresh interval (ms; 0: unknown). */
   onViewerFeedback(refreshInterval: number): void
 }
+
+// Traffic policy (see "Traffic policy" in docs/MODULARIZATION.md) ----------------------------------------------------
+
+/**
+ * A surface's bottleneck: CPU-bound until the link becomes the limit. Link-bound means going lossy (spending CPU to
+ * save bandwidth): JPEG patches where they're smaller.
+ */
+export type Bottleneck = 'cpu' | 'link'
+
+/**
+ * Traffic policy's decision for one surface. Live: read it whenever it's needed, it follows the surface's measures and
+ * the link (reading it is also what lets the link judgment close its periods on time).
+ */
+export interface TrafficDecision {
+  /**
+   * Priority: streaming while the surface is relentless (or a burst promoted it), else normal. A streaming surface's
+   * patches encode on the low-priority pool and its items go in the streaming tier.
+   */
+  readonly surfaceClass: SurfaceClass
+  /** Link-bound: its new damage may be encoded lossily. Only a streaming surface is, while the link is short. */
+  readonly bottleneck: Bottleneck
+  /** The quality its video is encoded at: lower while the link is short. */
+  readonly videoQuality: VideoQuality
+  /** The send tier of its items: its class for damage, the lowest (settle) for settling, the lossless resend. */
+  sendTier(settling: boolean): SendTier
+}
+
+/** The measures of a surface's last completed period, as shares of the period. */
+export type PeriodFractions = { busy: number; backlogged: number }
+
+/** What traffic policy needs of a surface: its encoder reports it (and is told when a burst promoted it). */
+export interface TrafficSource {
+  readonly key: string
+  /** It has content to send (a buffer, and it isn't destroyed): only then can a burst promote it. */
+  readonly hasContent: boolean
+  /**
+   * It is settled: no damage left to send, and nothing lossy left to send again (or it streams video, which a crisp
+   * image replaces when it stops). Only then may it be demoted.
+   */
+  readonly settled: boolean
+  /**
+   * The predicted size of its unsent damage (handed to the sink or not), at its lossless bytes per pixel. Settling never
+   * counts.
+   */
+  readonly predictedBacklogBytes: number
+  /** Of that, the part not handed to the sink yet (queued or encoding). */
+  readonly unencodedBytes: number
+  /** A burst promoted it: its decision's class is streaming now. */
+  onPromoted(): void
+}
+
+/** A surface's traffic: its decision, and the reports traffic policy measures it by. */
+export interface SurfaceTraffic extends TrafficDecision {
+  /** Whether the surface has damage work unsent now (busy); reported whenever that may have changed. */
+  setBusy(busy: boolean): void
+  /** A commit with new damage arrived: measured, then the class re-evaluated. true if the class changed. */
+  committed(): boolean
+  /** Re-evaluate the class now (closing the periods that ended). true if it changed. */
+  evaluate(): boolean
+  /** It is backlogged now. */
+  readonly backlogged: boolean
+  /** The measures of its last completed period, for tests and logging. */
+  readonly lastPeriod: PeriodFractions | undefined
+  /** The surface is gone. */
+  remove(): void
+}
+
+/** Traffic policy as the surfaces see it: a session-wide resource. */
+export interface SurfacePolicy {
+  addSurface(source: TrafficSource): SurfaceTraffic
+  /**
+   * Burst promotion: run whenever damage is queued (before it's captured) and on every tick. Promotes surfaces (telling
+   * them) while the normal surfaces' predicted backlog is too much for the link.
+   */
+  checkBurst(): void
+  /** Judge the link now, so its periods close on time even when no surface asks. */
+  judgeLink(): void
+}
+
+/** What traffic policy reads of a viewer connection's link: the transport's link stats. */
+export interface LinkStats {
+  /** The bytes of all surfaces' items not sent yet, except those in `exceptTier`. */
+  totalUnsentBytes(exceptTier?: SendTier): number
+  /** Whether any surface's items wait in the tier. */
+  tierWaiting(tier: SendTier): boolean
+  /**
+   * Set by traffic policy: called after every attempt to send data, with whether data waits because the congestion
+   * controller or the socket holds it back, and the time (ms).
+   */
+  onDataHeld: (held: boolean, now: number) => void
+}
+
+/** What traffic policy reads of the congestion estimate. */
+export type CongestionEstimate = Pick<Congestion, 'bandwidthEstimate'>
+
+/** Traffic policy as a viewer connection sees it: the link it judges is the current connection's. */
+export interface LinkPolicy {
+  /** A viewer connected: judge its link from now on. */
+  connect(link: LinkStats, estimate: CongestionEstimate): void
+  /** The viewer is gone: no link to judge (it isn't short, its bandwidth is unknown). */
+  disconnect(): void
+}

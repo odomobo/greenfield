@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import { type Patch, PatchFormat } from '@gfld/scene-protocol'
 import type { EncodedPatch, Frame, Rect, SendTier, SurfaceClass } from '@nebula/session-contracts'
 import { MAX_NORMAL_ENCODES } from '@nebula/scheduler'
+import { CLASS_PERIOD_MS, TrafficPolicy } from '@nebula/traffic-policy'
 import { EncoderPool } from '@nebula/video-codec'
-import { CLASS_PERIOD_MS } from '../policy.js'
 import { area } from '../region.js'
 import {
   BufferInfo,
@@ -56,8 +56,6 @@ const ITEMS_HELD = 2
 
 class FakeSink implements EncodingSink {
   active = true
-  bandwidthLimited = false
-  linkBandwidth: number | undefined = undefined
   /** call items' done right away (as if the network took them immediately) */
   autoDone = true
   frames: { surface: string; frame: Uint8Array; surfaceClass: SurfaceClass }[] = []
@@ -282,6 +280,11 @@ function setup(poolSize = 2) {
   let holdNormal = false
   let normalStarted = 0
   const opaqueSeen: boolean[] = []
+  const logger = { error: (message: string) => errors.push(message), info: (message: string) => infos.push(message) }
+  // traffic policy, judging a link the tests set
+  const link = { bandwidthLimited: false, linkBandwidth: undefined as number | undefined }
+  const traffic = new TrafficPolicy({ logger, now: () => now })
+  traffic.useLink(link)
   const context = new EncodingContext<FakeEncoder>(
     sink,
     pool,
@@ -302,11 +305,12 @@ function setup(poolSize = 2) {
       },
       streaming,
     },
-    { error: (message) => errors.push(message), info: (message) => infos.push(message) },
-    () => now,
+    traffic,
+    logger,
   )
   return {
     sink,
+    link,
     pool,
     encoders,
     context,
@@ -940,7 +944,7 @@ const inTier = <T extends { tier: SendTier }>(patches: T[], tier: SendTier) =>
 async function lossyStreaming(env: Env, encoder: SurfaceEncoder<FakeEncoder>, host: FakeSurface) {
   await relentless(env, encoder, host)
   assert.equal(encoder.surfaceClass, 'streaming')
-  env.sink.bandwidthLimited = true
+  env.link.bandwidthLimited = true
   env.sink.sendHeld()
   await settle()
   env.sink.patches.length = 0
@@ -995,7 +999,7 @@ test('once its damage is sent, a surface settles: its lossy areas go again lossl
   assert.deepEqual(formatsOf(settling), new Set([PatchFormat.QOI]))
   assert.equal(areaOf(settling), 1000 * 1000)
   assert.deepEqual(encoder.lossyRegion, [])
-  assert.equal(env.sink.bandwidthLimited, true)
+  assert.equal(env.link.bandwidthLimited, true)
   // nothing more to settle
   const sent = env.sink.patches.length
   env.context.tick()
@@ -1151,45 +1155,10 @@ test("a surface's lossless bytes per pixel: measured on all its lossless patches
   assert.notEqual(big.encoder.bytesPerPixel, settled)
 })
 
-test('burst promotion: while the normal surfaces would need more than BURST_MS of the link, the largest is promoted', async () => {
-  const env = setup(0)
-  env.sink.autoDone = false
-  env.holdNormal(true)
-  const small = env.surface('small', 100, 100)
-  const large = env.surface('large', 1000, 1000)
-  // 100 bytes per ms: BURST_MS is 20 KB
-  env.sink.linkBandwidth = 100
-  // 10000 pixels at 4 bytes (nothing measured yet): 40 KB
-  await small.encoder.commit(full(small.host))
-  assert.equal(small.encoder.surfaceClass, 'streaming', 'alone over the threshold')
-  const other = env.surface('other', 50, 50)
-  // 2500 pixels at 4 bytes: 10 KB, under the threshold; the streaming surface doesn't count
-  await other.encoder.commit(full(other.host))
-  assert.equal(other.encoder.surfaceClass, 'normal')
-  // 4 MB: the largest, promoted first; then 10 KB of normal backlog is left
-  await large.encoder.commit(full(large.host))
-  assert.equal(large.encoder.surfaceClass, 'streaming')
-  assert.equal(other.encoder.surfaceClass, 'normal')
-  assert.ok(env.infos.some((message) => message.startsWith('Surface large is now streaming (a burst')))
-})
-
-test('no burst promotion before the link was bandwidth-limited (its bandwidth is unknown)', async () => {
-  const env = setup(0)
-  env.sink.autoDone = false
-  env.holdNormal(true)
-  const { encoder, host } = env.surface('a')
-  await encoder.commit(full(host))
-  env.context.tick()
-  assert.equal(encoder.surfaceClass, 'normal')
-  env.sink.linkBandwidth = 100
-  env.context.tick()
-  assert.equal(encoder.surfaceClass, 'streaming')
-})
-
 test("a burst's first patches already go out lossy when bandwidth is short", async () => {
   const env = setup(0)
-  env.sink.linkBandwidth = 100
-  env.sink.bandwidthLimited = true
+  env.link.linkBandwidth = 100
+  env.link.bandwidthLimited = true
   env.sink.autoDone = false
   const { encoder, host } = env.surface('a')
   await encoder.commit(full(host))
@@ -1209,12 +1178,12 @@ test('video is encoded at the lower quality while bandwidth is short, and its ar
   assert.equal(env.encoders.length, 1)
   const lease = env.encoders[0]
   assert.equal(area(encoder.lossyRegion as Rect[]), 1000 * 1000)
-  env.sink.bandwidthLimited = true
+  env.link.bandwidthLimited = true
   host.touch()
   await encoder.commit(full(host))
   await settle()
   assert.equal(lease.quality, 'low')
-  env.sink.bandwidthLimited = false
+  env.link.bandwidthLimited = false
   host.touch()
   await encoder.commit(full(host))
   await settle()
