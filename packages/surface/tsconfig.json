@@ -1,0 +1,35 @@
+{
+  "extends": "@tsconfig/node18/tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "declarationDir": "types",
+    "outDir": "dist",
+    "declaration": true,
+    "sourceMap": true,
+    "strict": true
+  },
+  "references": [
+    {
+      "path": "../session-contracts"
+    },
+    {
+      "path": "../patch-renderer"
+    },
+    {
+      "path": "../video-renderer"
+    },
+    {
+      "path": "../scheduler"
+    },
+    {
+      "path": "../traffic-policy"
+    },
+    {
+      "path": "../video-codec"
+    }
+  ],
+  "include": [
+    "src"
+  ]
+}

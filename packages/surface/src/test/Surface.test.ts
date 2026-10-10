@@ -21,7 +21,7 @@ import type {
 import { PatchPump } from '@nebula/scheduler'
 import { CLASS_PERIOD_MS, TrafficPolicy } from '@nebula/traffic-policy'
 import { EncoderPool } from '@nebula/video-codec'
-import { area } from '../../patch-renderer/index.js'
+import { area } from '@nebula/patch-renderer'
 import { Surface } from '../index.js'
 
 /**

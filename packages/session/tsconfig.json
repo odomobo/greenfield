@@ -15,6 +15,7 @@
     { "path": "../session-contracts" },
     { "path": "../congestion" },
     { "path": "../scheduler" },
+    { "path": "../surface" },
     { "path": "../patch-codec" },
     { "path": "../video-codec" },
     { "path": "../transport" },

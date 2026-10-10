@@ -1,0 +1,44 @@
+{
+  "name": "@nebula/video-renderer",
+  "version": "0.1.0",
+  "description": "Per surface: on-demand video frames, key frames and recovery, quality.",
+  "type": "commonjs",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "types"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "npx tsc -b",
+    "test": "node --test --test-force-exit dist/test/",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write 'src/**/*.ts'"
+  },
+  "dependencies": {
+    "@nebula/session-contracts": "*"
+  },
+  "devDependencies": {
+    "@tsconfig/node18": "^18.2.4",
+    "@types/node": "20.14.8",
+    "@typescript-eslint/eslint-plugin": "^7.14.1",
+    "@typescript-eslint/parser": "^7.14.1",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-prettier": "^5.1.3",
+    "prettier": "^3.3.2",
+    "typescript": "~5.5.2"
+  },
+  "license": "AGPL-3.0-or-later"
+}
