@@ -43,6 +43,9 @@ Nothing queued; the user picks the next item from Later.
 
 - Real PAM sign-in (needs root).
 - GPU (dmabuf) buffers on a machine with a GPU.
+- The video codec's own GPU context (`gpu_context_for_device` in `packages/video-codec/native/src/gst_frame_encoder.c`,
+  opened on a frame's `device`) and its import of dmabuf frames, on a GPU machine. Also, once capture receives dmabufs,
+  that it sets the frame's `device` (0 today).
 - GPU acceleration: `--encoder auto` picking `vaapih264`/`nvh264`, streaming surfaces sent as hardware video.
 - Lossy encoding and congestion control on real slow/distant/Wi-Fi links (only the simulated link is tested).
 - Congestion control sharing a bottleneck with other traffic.
