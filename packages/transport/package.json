@@ -1,9 +1,22 @@
 {
-  "name": "@gfld/session",
+  "name": "@nebula/transport",
   "version": "0.1.0",
-  "description": "The per-user desktop session: Wayland compositor (wlroots), frame encoding, transport, shell service, audio.",
+  "description": "The connection to a viewer: the fair-queueing mechanism across streams (tiers and weights given to it), stream readiness, chunking, and the link (the WebSocket, socket options, the simulated link, receive decoding).",
   "type": "commonjs",
   "private": true,
+  "main": "dist/index.js",
+  "types": "types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "types",
+    "native"
+  ],
   "engines": {
     "node": ">=18"
   },
@@ -12,27 +25,19 @@
   ],
   "scripts": {
     "build:native": "mkdir -p build && cmake -G Ninja -B./build -S./ && ninja -C ./build install",
-    "build:typescript": "npx tsc -b",
-    "build": "rm -rf dist types && npm run build:native && npx tsc -b",
-    "test": "node --test --test-force-exit dist/encoding/test/ dist/wlroots/test/ dist/qos/test/ dist/test/",
-    "watch": "npm run build && npx tsc -b -w",
+    "build": "npm run build:native && npx tsc -b",
+    "test": "node --test --test-force-exit dist/test/",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write 'src/**/*.ts'"
   },
   "dependencies": {
     "@gfld/scene-protocol": "*",
-    "@nebula/frames": "*",
-    "@nebula/congestion": "*",
-    "@nebula/scheduler": "*",
-    "@nebula/patch-codec": "*",
     "@nebula/session-contracts": "*",
-    "@nebula/video-codec": "*",
-    "@nebula/transport": "*",
     "ws": "^8.17.1"
   },
   "devDependencies": {
+    "@nebula/congestion": "*",
     "@tsconfig/node18": "^18.2.4",
-    "@types/js-yaml": "^4.0.9",
     "@types/node": "20.14.8",
     "@types/ws": "^8.5.10",
     "@typescript-eslint/eslint-plugin": "^7.14.1",

@@ -6,7 +6,7 @@
  * (when the user pastes) and becomes the session's selection. The last text either way is remembered, so the same text
  * isn't set twice, and the selection we set ourselves is never reported back by the core.
  */
-import type { ControlMessage } from '../viewer/ViewerTransport.js'
+import type { ControlMessage } from '@nebula/transport'
 
 /** The most text (UTF-16 units; a UTF-8 byte is never fewer) taken from the browser. The core caps apps' selections. */
 export const MAX_CLIPBOARD_CHARS = 4 * 1024 * 1024

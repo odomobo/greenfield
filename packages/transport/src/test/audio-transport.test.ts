@@ -4,7 +4,8 @@ import { EventEmitter } from 'node:events'
 import { WebSocket } from 'ws'
 import { decodeEnvelope, PatchFormat } from '@gfld/scene-protocol'
 import type { Congestion } from '@nebula/session-contracts'
-import { WebSocketViewerTransport } from '../ViewerTransport.js'
+import { WebSocketViewerTransport } from '../index.js'
+import { TIERS } from './tiers.js'
 
 /** Just enough of a ws WebSocket: every send is kept, and completes when the test says so. */
 class FakeWebSocket extends EventEmitter {
@@ -37,7 +38,7 @@ const refusing: Congestion = {
 
 function setup() {
   const ws = new FakeWebSocket()
-  const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, { congestion: refusing })
+  const transport = new WebSocketViewerTransport(ws as unknown as WebSocket, { congestion: refusing, tiers: TIERS })
   return { ws, transport }
 }
 

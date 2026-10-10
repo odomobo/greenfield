@@ -14,7 +14,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createLogger } from '../Logger.js'
-import type { ControlMessage } from '../viewer/ViewerTransport.js'
+import type { ControlMessage } from '@nebula/transport'
 
 const logger = createLogger('file-drops')
 

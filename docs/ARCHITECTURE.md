@@ -31,7 +31,7 @@ For the task list see [ROADMAP.md](ROADMAP.md). For completed work see [HISTORY.
   own DOM element with a canvas per surface (the browser composites), does all window management and draws the shell.
 - **Transport**: a single WebSocket with a priority send queue (input/control before video), latest-wins frame
   coalescing, one frame in flight per window, and small kernel send buffers (`TCP_NOTSENT_LOWAT`), with a BBRv3-style
-  congestion controller. It sits behind a `ViewerTransport` interface so WebTransport can be added later if ever
+  congestion controller. It sits behind a `ViewerTransport` interface (`packages/transport`) so WebTransport can be added later if ever
   needed. See [Encoding policy](#encoding-policy) and [Transport and congestion control](#transport-and-congestion-control).
 
 ## Security and sign-in
@@ -341,13 +341,15 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
 
 **As built** (item 5b phase 2, scene protocol 18):
 
-- **Bandwidth-limited** is judged by the transport (`viewer/bandwidth.ts`, `BandwidthMonitor`, one per connection).
+- **Bandwidth-limited** is judged in the session from the transport's link stats (data held back, unsent bytes, the
+  congestion controller's estimate): `qos/bandwidth.ts`, `BandwidthMonitor`, one per connection, wired up by
+  `qos/link-judgment.ts`.
   Since phase 3 it is either/or: the link is saturated (1 s periods; 2 in a row in which streaming items waited in
   the transport while the congestion controller, or the socket's safety limit, held them back at least 80% of the time;
   one isn't enough: Startup and ProbeRTT hold data back for a period on a busy link that keeps up), or, at once, the
   predicted backlog is over `BURST_MS` (see phase 3 below). It ends at the end of a period held back under 50% with
   the predicted backlog under `BURST_MS`, at least 2 s after it began. (Phase 2's lossless-demand check, with
-  per-surface sizes in the monitor, was replaced by the predicted backlog.) On the simulated link (`test/sim-link.ts`, 20 Mbit/s): a stream at 40-80% of the link
+  per-surface sizes in the monitor, was replaced by the predicted backlog.) On the simulated link (`qos/test/sim-link.ts`, 20 Mbit/s): a stream at 40-80% of the link
   never makes it limited, an endless one does within 2-3 s. Transitions are logged ("Bandwidth-limited: ...", "No
   longer bandwidth-limited: ..."). The sink tells the encoders (`EncodingSink.bandwidthLimited`).
 - **JPEG or lossless, whichever is smaller** (a deviation from "JPEG patches while limited"): a streaming surface's
@@ -405,7 +407,7 @@ can drop it), else if a scan of the alpha bytes finds them all 255. The scan is 
 slots per surface, `SURFACE_SLOTS`.) Each surface is a stream of items in the transport; an item is one patch or one
 video frame.
 
-- **The transport says when a stream is ready** for its next item (`ViewerTransport.streamReady`): when at most one
+- **The transport says when a stream is ready** for its next item (`ViewerTransport.streamReady`, `packages/transport`): when at most one
   chunk of that surface's data is left unsent, counted in bytes (its queued items plus what's left of its started
   one), at the current chunk size (`CHUNK_MS` = 10 ms of the congestion controller's bandwidth estimate, 10 to
   300 KB). A stream found not ready is told when it is (`onStreamReady`, at the end of the transport's pump, once its
@@ -460,7 +462,10 @@ that nothing else wants.
 
 The transport (`ViewerTransport`) decides what goes out next whenever it may send (in 2a: today's rule, at most one
 data message handed to the socket at a time and `bufferedAmount` under 64 KB; in 2b: when the congestion controller
-allows it):
+allows it). Since the modularization it is `packages/transport`: the mechanism in `FairQueue.ts` (tier ids and quanta
+given to it), chunking in `chunking.ts`, the WebSocket, socket tuning (its own small native addon), the simulated link
+and receive decoding in `link.ts`; the tiers and their quanta below are the session's configuration
+(`qos/send-tiers.ts`).
 
 1. Control messages first, always, all of them.
 2. Data items (patches and video frames) by **deficit round-robin between the two classes, weighted by bytes** (since
@@ -666,8 +671,8 @@ single large item never stalls the link. Initial window before any estimate: 64 
   safety limit stays: never hand a data item to the socket while `ws.bufferedAmount` is over 256 KB (should never
   happen with the controller working; log once if it does). The kernel buffer settings stay.
 - The controller is told when the transport has nothing to send (app-limited) and when it has data waiting.
-- As implemented: `WebSocketViewerTransport` owns one `CongestionController` per connection (injectable, with the
-  clock, for tests). The scheduler asks it about the item that is next by deficit round-robin, by the item's envelope
+- As implemented: `WebSocketViewerTransport` uses one `CongestionController` per connection, created by `ViewerHost`
+  and passed in through the `Congestion` interface of `@nebula/session-contracts` (tests pass their own, and a clock). The scheduler asks it about the item that is next by deficit round-robin, by the item's envelope
   size (what the viewer's acks count); a refused or empty question leaves the round-robin state as it was, as the
   transport now asks again on every ack, pacing timer and completed send. A paced item gets a timer for when it's due;
   one that waits for the window or the viewer's backlog waits for the next ack, which pumps the transport.
