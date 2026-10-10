@@ -67,4 +67,6 @@ clean:
 	rm -rf packages/video-codec/build packages/video-codec/dist packages/video-codec/types
 	rm -rf packages/session/build packages/session/dist packages/session/types
 	rm -rf packages/viewer/dist
+	# tsc -b's incremental state: left behind, it would take the removed output for up to date
+	rm -f packages/*/tsconfig.tsbuildinfo
 	cd packages/gatekeeper && cargo clean
